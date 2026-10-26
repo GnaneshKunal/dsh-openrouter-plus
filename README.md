@@ -62,13 +62,46 @@ switching never mints a provider, a route or a model list.
 ## Install
 
 ```bash
+dsh plugin add github:GnaneshKunal/dsh-openrouter-plus          # latest main
+dsh plugin add github:GnaneshKunal/dsh-openrouter-plus#v0.1.0   # a pinned tag
+```
+
+From a clone, which is what development uses:
+
+```bash
 git clone https://github.com/GnaneshKunal/dsh-openrouter-plus
 dsh plugin add ./dsh-openrouter-plus     # or, from a session:
 #   plugin_manager { action: install_bundle, target: "./dsh-openrouter-plus" }
 ```
 
+The manifest declares `engines.dsh`, so the plugin manager refuses a harness older than the build
+it was tested against instead of mounting something that cannot work.
+
 The plugin adds one entry to Settings navigation: **OpenRouter Plus**, directly after *Models*. If
 the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mounts.
+
+## Releasing
+
+`.github/workflows/ci.yml` runs `npm run check`, `npm test` and `npm pack --dry-run` on every push
+and pull request. `.github/workflows/release.yml` turns a tag into a release:
+
+```bash
+$EDITOR package.json CHANGELOG.md      # version 0.2.0, and a "## [0.2.0] — 2026-11-02" section
+git commit -am "chore: 0.2.0" && git push
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The job refuses a tag that disagrees with `package.json`, runs the suite, publishes to npm, and
+opens the GitHub Release with the matching `CHANGELOG.md` section as its notes. It fails rather
+than skipping when npm already has that version: a release is a new version, never a re-upload.
+
+One-time npm setup: reserve `dsh-openrouter-plus`, then add a trusted publisher — GitHub Actions,
+repository `GnaneshKunal/dsh-openrouter-plus`, workflow `release.yml`, environment `release`. npm
+then accepts OIDC from the workflow run, so no token is stored here, and it attaches a provenance
+attestation linking the tarball to the commit and run that built it.
+
+Publishing to npm is optional for users: `dsh plugin add github:…` installs the same code from a
+tag, which is how most of the community ships.
 
 ## Use it
 

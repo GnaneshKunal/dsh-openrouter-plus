@@ -1,7 +1,6 @@
 {
   "name": "dsh-openrouter-plus",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "OpenRouter routing presets for DeepSeek Harness \u2014 a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset.",
   "keywords": [
@@ -16,6 +15,22 @@
     "llm"
   ],
   "license": "MIT",
+  "author": "Gnanesh Kunal",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GnaneshKunal/dsh-openrouter-plus.git"
+  },
+  "homepage": "https://github.com/GnaneshKunal/dsh-openrouter-plus#readme",
+  "bugs": {
+    "url": "https://github.com/GnaneshKunal/dsh-openrouter-plus/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.1",
+    "node": ">=22.6"
+  },
   "main": "index.js",
   "exports": {
     ".": "./index.js",
@@ -32,6 +47,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "CHANGELOG.md",
     "docs"
   ],
   "scripts": {
