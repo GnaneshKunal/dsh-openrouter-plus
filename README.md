@@ -143,3 +143,5 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module contract, and
 `docs/DESIGN.md` for the design rationale against the upstream discussion.
 
 MIT.
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
