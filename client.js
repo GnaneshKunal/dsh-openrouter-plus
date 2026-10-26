@@ -10,11 +10,12 @@
  * one compact strip per provider row that routes that row through the relay (attach or
  * detach) without touching the settings card's own draft.
  *
- * Finally it answers `conversation.input.right`: a compact tier chip beside the
- * composer's model selector. A tier is pinned per mount, so changing it for one Session
- * means moving that Session to the sibling provider route that pins it. The sibling is
- * minted by the control API (`/routes/twin`) and the Session's own model selection is
- * switched to it afterwards; the chip never writes provider configuration itself.
+ * Finally it answers `conversation.input.right`: a compact preset chip beside the
+ * composer's model selector. A preset is a per-Session choice: the chip POSTs it to the
+ * control API, the Host keeps it in memory and the relay applies it to that Session's
+ * requests. The chip writes no provider configuration and leaves the model selection —
+ * and the reasoning effort riding on it — untouched. Its menu carries labels only; what
+ * each preset sends is documented on the settings page.
  *
  * Contract: docs/ARCHITECTURE.md ("client.js"). Plain browser JavaScript: no JSX, no
  * build step, no imports beyond the host React module table.
@@ -53,8 +54,23 @@ window.__ModuleLoader__.load({
      */
     const PI_AI_NS = 'llm-pi-ai';
 
-    /** Tier choices the relay accepts for an attached provider (`''` = pass-through). */
-    const ATTACH_TIERS = Object.freeze(['', 'auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']);
+    /**
+     * Service-tier presets, in the order the composer and the settings page offer them.
+     * A preset is an outcome ("cheapest", "priority"), never a raw wire field: the relay
+     * expands it into `service_tier`, `provider.sort` or a model variant, because those
+     * three levers have different contracts and only some combinations are defined.
+     */
+    const PRESET_IDS = Object.freeze([
+      'none',
+      'standard',
+      'fastest',
+      'fastest-standard',
+      'cheapest',
+      'flex',
+      'priority',
+      'ultra',
+      'floor',
+    ]);
 
     /**
      * Attaching writes our target table first, which makes the Loader re-apply this
@@ -157,9 +173,10 @@ window.__ModuleLoader__.load({
       'providers.createdCaption': 'Routes on this relay',
       'providers.createdEmpty': 'No provider route points at this relay yet.',
       'providers.tierOption': '{tier} · {multiplier}',
-      'providers.defaultTierCaption': 'Default service tier',
-      'providers.defaultTierHint': 'What a Session inherits until it picks a tier in the composer.',
-      'providers.defaultTierAria': 'Default service tier for new Sessions',
+      'providers.defaultTierCaption': 'Service tier for new sessions',
+      'providers.defaultTierHint': 'A session inherits this until it picks its own preset in the composer.',
+      'providers.defaultTierAria': 'Service tier for new sessions',
+      'providers.presetCaption': 'What each preset sends',
       'providers.noticeDefaultTier': 'Saved the default service tier.',
       'providers.routeMeta': '{source} · {tier} · {count} models',
       'providers.routeBase': 'Base URL: {url}',
@@ -183,19 +200,36 @@ window.__ModuleLoader__.load({
       'strip.route': 'Route through OpenRouter Plus',
       'strip.routed': 'Routed via OpenRouter Plus',
       'strip.tierAria': 'Service tier for {name}',
-      'strip.tierNone': 'No tier (pass-through)',
       'strip.applying': 'Routing\u2026',
       'strip.detaching': 'Restoring\u2026',
       'strip.tierHint': 'Tiers only apply to endpoints that accept an OpenAI-style service_tier (OpenRouter itself, and some compatible gateways).',
       'strip.routedHint': 'Requests from this provider go through the relay. The service tier is chosen per session from the composer chip.',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
 
+      'preset.none': 'No pin',
+      'preset.standard': 'Standard',
+      'preset.fastest': 'Fastest \u00b7 any price',
+      'preset.fastest-standard': 'Fastest \u00b7 standard price',
+      'preset.cheapest': 'Cheapest',
+      'preset.flex': 'Flex',
+      'preset.priority': 'Priority',
+      'preset.ultra': 'Ultra',
+      'preset.floor': 'Floor',
+      'preset.inherit': 'Profile default ({preset})',
+      'preset.hint': 'Only this session switches. Other sessions keep their own preset.',
+      'preset.none.desc': "OpenRouter's own routing: no tier and no comparator are sent, so nothing is pinned.",
+      'preset.standard.desc': 'The standard tier only. Priority endpoints are excluded, so no premium can be charged.',
+      'preset.fastest.desc': 'Sorts every eligible endpoint by throughput. On an open-weight model this is nitro; on a closed-weight one it stops short of it, because priority endpoints are opt-in there.',
+      'preset.fastest-standard.desc': 'The same throughput race with priority endpoints excluded: the fastest answer at the standard rate.',
+      'preset.cheapest.desc': 'Sorts by price. It usually lands on a 4-bit quantised endpoint \u2014 the cheapest and the least accurate.',
+      'preset.flex.desc': 'Flex endpoints only, at published flex rates. Not necessarily the cheapest, and a capacity error surfaces instead of falling back to standard.',
+      'preset.priority.desc': 'Priority endpoints serve first, then standard. OpenAI calls this Fast mode. The premium is charged only when a priority endpoint actually serves.',
+      'preset.ultra.desc': 'ultrafast, then priority, then standard. OpenAI models only, and it needs max_tokens to hold \u2014 without one it silently degrades to priority.',
+      'preset.floor.desc': 'The :floor variant: a blind price sort over standard and flex endpoints, with no tier preference.',
       'tier.aria': 'Service tier for {name}: {tier}',
       'tier.switching': 'Switching tier\u2026',
       'tier.error': 'Could not switch the tier: {message}',
-      'tier.hint': 'Only this session switches. Other sessions keep their own tier.',
-      'tier.followDefault': 'Default ({tier})',
-      'tier.followDefaultNone': 'Default (no tier)',
+      'tier.followDefault': 'Profile default ({tier})',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -277,9 +311,10 @@ window.__ModuleLoader__.load({
       'providers.createdCaption': '经由此中继的路由',
       'providers.createdEmpty': '尚无提供商路由指向此中继。',
       'providers.tierOption': '{tier} · {multiplier}',
-      'providers.defaultTierCaption': '默认服务等级',
-      'providers.defaultTierHint': '在编辑器中选定等级之前，会话会继承该等级。',
-      'providers.defaultTierAria': '新会话的默认服务等级',
+      'providers.defaultTierCaption': '新会话的服务等级',
+      'providers.defaultTierHint': '会话会继承该设置，直到在输入框中选定自己的预设。',
+      'providers.defaultTierAria': '新会话的服务等级',
+      'providers.presetCaption': '各预设实际发送什么',
       'providers.noticeDefaultTier': '已保存默认服务等级。',
       'providers.routeMeta': '{source} · {tier} · {count} 个模型',
       'providers.routeBase': '基址：{url}',
@@ -303,19 +338,36 @@ window.__ModuleLoader__.load({
       'strip.route': '通过 OpenRouter Plus 转发',
       'strip.routed': '已通过 OpenRouter Plus 转发',
       'strip.tierAria': '{name} 的服务等级',
-      'strip.tierNone': '无等级（直通）',
       'strip.applying': '正在转发\u2026',
       'strip.detaching': '正在恢复\u2026',
       'strip.tierHint': '服务等级只对接受 OpenAI service_tier 的端点生效（如 OpenRouter 本身及部分兼容网关）。',
       'strip.routedHint': '该提供商已通过中继转发。服务等级在输入框的等级按钮里按会话选择。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
 
+      'preset.none': '不固定',
+      'preset.standard': '标准',
+      'preset.fastest': '最快 \u00b7 不限价格',
+      'preset.fastest-standard': '最快 \u00b7 标准价格',
+      'preset.cheapest': '最便宜',
+      'preset.flex': 'Flex',
+      'preset.priority': '优先',
+      'preset.ultra': '极速',
+      'preset.floor': '底价',
+      'preset.inherit': '配置默认（{preset}）',
+      'preset.hint': '只切换当前会话；其他会话保持各自的预设。',
+      'preset.none.desc': '交给 OpenRouter 自身路由：不发送等级，也不发送排序，什么都不固定。',
+      'preset.standard.desc': '只用标准等级，优先端点被排除，因此不会产生溢价。',
+      'preset.fastest.desc': '按吞吐量给所有可用端点排序。开源权重模型上这就等于 nitro；闭源权重模型的优先端点需要显式选择，所以不会走到那一步。',
+      'preset.fastest-standard.desc': '同样的吞吐量排序，但排除优先端点：标准价格下的最快。',
+      'preset.cheapest.desc': '按价格排序，通常会落到 4bit 量化端点——最便宜，也最不精确。',
+      'preset.flex.desc': '只用 flex 端点，按 flex 价格计费。不一定最便宜，且容量不足会直接报错，不会回退到标准路由。',
+      'preset.priority.desc': '优先端点先服务，其余走标准路由（OpenAI 称之为 Fast 模式）。只有优先级端点真正承接时才收溢价。',
+      'preset.ultra.desc': 'ultrafast 优先，其次 priority，再退到标准路由。仅 OpenAI 模型可用，且需要 max_tokens；缺失时会静默降级为 priority。',
+      'preset.floor.desc': '`:floor` 变体：在标准与 flex 端点之间盲目按价格排序，不区分等级。',
       'tier.aria': '{name} 的服务等级：{tier}',
       'tier.switching': '正在切换等级\u2026',
       'tier.error': '无法切换服务等级：{message}',
-      'tier.hint': '只切换当前会话；其他会话保持各自的等级。',
-      'tier.followDefault': '默认（{tier}）',
-      'tier.followDefaultNone': '默认（不指定等级）',
+      'tier.followDefault': '配置默认（{tier}）',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -419,17 +471,6 @@ window.__ModuleLoader__.load({
       } catch (error) {
         return '';
       }
-    }
-
-    function tierMultiplierFor(tier, byTier) {
-      if (typeof tier !== 'string' || tier === '') return 1;
-      if (isPlainObject(byTier) && isPlainObject(byTier[tier]) && byTier[tier].multiplier !== null) {
-        return byTier[tier].multiplier;
-      }
-      if (Object.prototype.hasOwnProperty.call(TIER_MULTIPLIER_FALLBACK, tier)) {
-        return TIER_MULTIPLIER_FALLBACK[tier];
-      }
-      return null;
     }
 
     /** Mount table order: cheapest tier first, pass-through last. */
@@ -561,21 +602,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * `/tier` bodies, normalised: `chosen` is what the Session picked (null while it
-     * follows the default), `tier` what a request will carry, `default` the configured
-     * fallback. Null means the Host answered something that is not this API.
+     * `/tier` bodies, normalised: `chosen` is the preset the Session picked (null while
+     * it follows the profile default), `preset` what a request will carry, `default` the
+     * configured fallback. Null means the Host answered something that is not this API.
      */
-    function normalizeTierState(payload) {
+    function normalizePresetState(payload) {
       if (!isPlainObject(payload)) return null;
       if (payload.ok === false) return null;
-      if (!Object.prototype.hasOwnProperty.call(payload, 'tier')) return null;
+      if (!Object.prototype.hasOwnProperty.call(payload, 'preset')) return null;
       const chosen = stringValue(payload.chosen).trim();
       const fallback = stringValue(payload.default).trim();
-      const effective = stringValue(payload.tier).trim();
+      const effective = stringValue(payload.preset).trim();
       return {
         chosen: chosen === '' ? null : chosen,
-        default: fallback,
-        tier: effective === '' ? null : effective,
+        default: fallback === '' ? 'none' : fallback,
+        preset: effective === '' ? 'none' : effective,
       };
     }
 
@@ -1085,6 +1126,18 @@ window.__ModuleLoader__.load({
     const H4_STYLE = { margin: 0, color: COLORS.primary, font: FONTS.strong };
 
     const SUB_LABEL_STYLE = { color: COLORS.secondary, font: FONTS.smallStrong };
+
+    /** The settings page's preset table: label above, explanation below. */
+    const PRESET_GRID_STYLE = {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      gap: '8px 18px',
+      minWidth: 0,
+      padding: '6px 0',
+      borderTop: '1px solid ' + COLORS.border,
+    };
+
+    const PRESET_ENTRY_STYLE = { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 };
 
     const STATS_ROW_STYLE = {
       display: 'flex',
@@ -1759,7 +1812,7 @@ window.__ModuleLoader__.load({
        * write, so it is the only tier action that can reload the plugin; the re-read
        * below decides between success and failure, exactly like the Models-page switch.
        */
-      const runDefaultTier = (tier) => {
+      const runDefaultPreset = (preset) => {
         if (busy !== null || busyRef.current !== null) return;
         const controller = new AbortController();
         busyRef.current = 'tier-default';
@@ -1768,7 +1821,7 @@ window.__ModuleLoader__.load({
         setActionError('');
         setNotice('');
         (async () => {
-          const wanted = tier === '' ? null : tier;
+          const wanted = preset;
           let failure = '';
           try {
             const response = await fetch(origin + CONTROL_PREFIX + '/tier/default', {
@@ -1780,7 +1833,7 @@ window.__ModuleLoader__.load({
                 'content-type': 'application/json',
                 'x-oorp-client': CLIENT_HEADER,
               },
-              body: JSON.stringify({ tier: wanted }),
+              body: JSON.stringify({ preset: preset }),
               signal: controller.signal,
             });
             let payload = null;
@@ -2157,13 +2210,20 @@ window.__ModuleLoader__.load({
                   entry.tokens === null && entry.bytes !== null
                     ? t('recent.bytesTitle', { bytes: formatCount(entry.bytes) })
                     : undefined;
+                // A preset is the outcome a person picked; a path mount only has a raw
+                // tier, so fall back to it before calling the request unpinned.
+                const presetLabel = entry.preset === null ? '' : t('preset.' + entry.preset);
                 return h(
                   'tr',
                   { key: String(index) },
                   h(
                     'td',
                     { style: TD_STYLE },
-                    h('span', { style: BADGE_STYLE }, entry.tier === null ? t('common.defaultTier') : entry.tier),
+                    h(
+                      'span',
+                      { style: BADGE_STYLE },
+                      presetLabel !== '' ? presetLabel : entry.tier === null ? t('preset.none') : entry.tier,
+                    ),
                   ),
                   h(
                     'td',
@@ -2299,15 +2359,15 @@ window.__ModuleLoader__.load({
                 reasoningHint !== '' ? h('p', { key: 'hint', style: HINT_STYLE }, reasoningHint) : null,
               )
             : null;
-        /* One profile-level preference, next to the routes it applies to: the tier an
-           unchosen Session inherits. Which tier a *particular* Session runs on is the
+        /* One profile-level preference, next to the routes it applies to: the preset an
+           unchosen Session inherits. Which preset a *particular* Session runs on is the
            composer chip, so the two never compete for the same click. */
-        const tierTable = targetsData.tier;
-        const tierChoice =
-          tierTable !== null && tierTable.tiers.length > 0
+        const presetTable = targetsData.tier;
+        const presetChoice =
+          presetTable !== null && presetTable.presets.length > 0
             ? h(
                 'div',
-                { key: 'tier-default', style: ROW_STYLE },
+                { key: 'preset-default', style: ROW_STYLE },
                 h(
                   'div',
                   { style: ROW_INFO_STYLE },
@@ -2318,20 +2378,38 @@ window.__ModuleLoader__.load({
                   'div',
                   { style: ROW_CONTROL_STYLE },
                   h(TierSelect, {
-                    value: tierTable.default === null ? '' : tierTable.default,
-                    options: [{ value: '', label: t('strip.tierNone') }].concat(
-                      tierTable.tiers.map((tier) => ({
-                        value: tier,
-                        label: t('providers.tierOption', {
-                          tier: tier,
-                          multiplier: multiplierLabel(t, tierMultiplierFor(tier, null)),
-                        }),
-                      })),
-                    ),
+                    value: presetTable.default,
+                    options: presetTable.presets.map((preset) => ({
+                      value: preset,
+                      label: t('preset.' + preset),
+                    })),
                     ariaLabel: t('providers.defaultTierAria'),
                     disabled: busy !== null,
-                    onChange: runDefaultTier,
+                    onChange: runDefaultPreset,
                   }),
+                ),
+              )
+            : null;
+        /* What each preset actually sends, written once where it can be read calmly. The
+           composer menu deliberately carries labels only: a picker that explains itself in
+           nine paragraphs is not a picker. */
+        const presetGlossary =
+          presetTable !== null && presetTable.presets.length > 0
+            ? h(
+                'div',
+                { key: 'preset-glossary', style: PRESET_GRID_STYLE },
+                h(
+                  'span',
+                  { style: Object.assign({}, SUB_LABEL_STYLE, { gridColumn: '1 / -1' }) },
+                  t('providers.presetCaption'),
+                ),
+                presetTable.presets.map((preset) =>
+                  h(
+                    'div',
+                    { key: preset, style: PRESET_ENTRY_STYLE },
+                    h('span', { style: SUB_LABEL_STYLE }, t('preset.' + preset)),
+                    h('span', { style: HINT_STYLE }, t('preset.' + preset + '.desc')),
+                  ),
                 ),
               )
             : null;
@@ -2339,7 +2417,8 @@ window.__ModuleLoader__.load({
           'div',
           { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
           h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
-          tierChoice,
+          presetChoice,
+          presetGlossary,
           rows,
           repair,
         );
@@ -2884,7 +2963,7 @@ window.__ModuleLoader__.load({
           type: 'button',
           role: 'option',
           'aria-selected': selected,
-          'data-tier': props.value,
+          'data-preset': props.value,
           disabled: disabled,
           onMouseEnter: () => setHovered(true),
           onMouseLeave: () => setHovered(false),
@@ -2969,8 +3048,8 @@ window.__ModuleLoader__.load({
       const [pendingTier, setPendingTier] = React.useState(null);
       const [error, setError] = React.useState('');
       const [anchor, setAnchor] = React.useState(null);
-      /* What the Host reports for this Session: `{ tier, chosen, default }`. `chosen` is
-         empty until the Session picks a tier, and then it follows the configured default. */
+      /* What the Host reports for this Session: `{ preset, chosen, default }`. `chosen` is
+         empty until the Session picks a preset, and then it follows the profile default. */
       const [tierState, setTierState] = React.useState(null);
 
       const chipRef = React.useRef(null);
@@ -3016,9 +3095,9 @@ window.__ModuleLoader__.load({
       }, [providerKey]);
 
       /*
-       * Read this Session's tier from the Host. It is Session state, not config, so it is
-       * fetched rather than derived from the provider row; a Session that never chose one
-       * answers `chosen: null` and follows the configured default. Re-read when the relay
+       * Read this Session's preset from the Host. It is Session state, not config, so it
+       * is fetched rather than derived from the provider row; a Session that never chose
+       * one answers `chosen: null` and follows the profile default. Re-read when the relay
        * address changes, since a rebind means the Host plugin may have restarted.
        */
       React.useEffect(() => {
@@ -3036,7 +3115,7 @@ window.__ModuleLoader__.load({
             );
             const payload = await readJsonSafe(response);
             if (!response.ok) return;
-            const next = normalizeTierState(payload);
+            const next = normalizePresetState(payload);
             if (next !== null && aliveRef.current) setTierState(next);
           } catch (error) {
             /* A chip must never be the thing that breaks the composer: no answer simply
@@ -3106,33 +3185,23 @@ window.__ModuleLoader__.load({
 
       const name = stringValue(source.displayName).trim() || providerKey;
       const busy = pendingTier !== null;
-      /* `chosen` is what this Session picked, empty while it follows the default; `tier`
-         is what the next request will actually carry. */
-      const chosenTier = tierState === null ? '' : stringValue(tierState.chosen).trim();
-      const defaultTier = tierState === null ? '' : stringValue(tierState.default).trim();
-      const effectiveTier = tierState === null ? '' : stringValue(tierState.tier).trim();
-      const tierOptionLabel = (value) =>
-        value === '' || value === null
-          ? t('strip.tierNone')
-          : t('providers.tierOption', {
-              tier: value,
-              multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
-            });
-      const badge = busy ? t('tier.switching') : effectiveTier === '' ? t('strip.tierNone') : effectiveTier;
-      const tierText = effectiveTier === '' ? t('strip.tierNone') : effectiveTier;
-      const options = ATTACH_TIERS.map((value) => ({
-        value: value,
-        label:
-          value === ''
-            ? defaultTier === ''
-              ? t('tier.followDefaultNone')
-              : t('tier.followDefault', { tier: defaultTier })
-            : tierOptionLabel(value),
-      }));
+      /* `chosen` is the preset this Session picked, empty while it follows the profile
+         default; `preset` is what its next request will actually send. */
+      const activePreset = tierState === null ? 'none' : tierState.preset;
+      const chosenPreset = tierState === null || tierState.chosen === null ? '' : tierState.chosen;
+      const profileDefault = tierState === null ? 'none' : tierState.default;
+      /* Labels only. What each preset actually sends is explained once on the settings
+         page; repeating it here would make every open menu a wall of text. */
+      const presetLabel = (id) => t('preset.' + id);
+      const badge = busy ? t('tier.switching') : presetLabel(activePreset);
+      const tierText = badge;
+      const options = [
+        { value: '', label: t('preset.inherit', { preset: presetLabel(profileDefault) }) },
+      ].concat(PRESET_IDS.map((id) => ({ value: id, label: presetLabel(id) })));
 
       /* One POST, no provider write: the Host records the choice for this Session and the
          relay applies it to the request body on the way out. */
-      const postTier = async (tier) => {
+      const postTier = async (preset) => {
         const origin = feedState.origin;
         if (origin === null) throw new Error(t('offline.noReason'));
         const controller = new AbortController();
@@ -3154,7 +3223,7 @@ window.__ModuleLoader__.load({
               'content-type': 'application/json',
               'x-oorp-client': CLIENT_HEADER,
             },
-            body: JSON.stringify({ session: sessionId, tier: tier === '' ? null : tier }),
+            body: JSON.stringify({ session: sessionId, preset: preset === '' ? null : preset }),
             signal: controller.signal,
           });
           const payload = await readJsonSafe(response);
@@ -3163,7 +3232,7 @@ window.__ModuleLoader__.load({
               controlErrorMessage(payload, t('error.http', { status: String(response.status) })),
             );
           }
-          const next = normalizeTierState(payload);
+          const next = normalizePresetState(payload);
           if (next === null) throw new Error(t('strip.stalled'));
           return next;
         } finally {
@@ -3172,20 +3241,20 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const switchTier = async (tier) => {
+      const switchTier = async (preset) => {
         if (pendingTier !== null) return;
-        if (tier === chosenTier) {
+        if (preset === chosenPreset) {
           setOpen(false);
           setError('');
           return;
         }
-        setPendingTier(tier);
+        setPendingTier(preset);
         setError('');
 
         let next = null;
         let failure = '';
         try {
-          next = await postTier(tier);
+          next = await postTier(preset);
         } catch (exception) {
           failure = unknownOutcomeMessage(t, exception);
         }
@@ -3271,17 +3340,17 @@ window.__ModuleLoader__.load({
               },
               options.map((option) =>
                 h(ChipOption, {
-                  key: option.value === '' ? 'none' : option.value,
+                  key: option.value === '' ? 'inherit' : option.value,
                   value: option.value,
                   label: option.label,
-                  selected: option.value === chosenTier,
+                  selected: option.value === chosenPreset,
                   disabled: busy,
                   onClick: () => {
                     void switchTier(option.value);
                   },
                 }),
               ),
-              h('p', { style: CHIP_HINT_STYLE }, t('tier.hint')),
+              h('p', { style: CHIP_HINT_STYLE }, t('preset.hint')),
               errorLine,
             )
           : null,
