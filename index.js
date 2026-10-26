@@ -1153,10 +1153,10 @@ export function apply(ctx, rawConfig) {
         })
         return
       }
-      // The row is pointed at the *bare* per-target mount on purpose: which tier a
-      // request runs on is the Session's choice, applied by the relay while the body
-      // is on its way out. A row per tier would be a provider per tier, which is
-      // exactly what the tier feature must never need.
+      // The row is pointed at the *bare* per-target mount on purpose: which preset a
+      // request applies is the Session's choice, applied by the relay while the body
+      // is on its way out. A row per preset would be a provider per preset, which is
+      // exactly what the preset feature must never need.
       const baseURL = baseUrlFor(registered.target.id, null)
       const planned = await providerWrite(() => bridge.repointRoute({ route, baseURL }))
       log('info', 'routed provider through the relay', { route, baseURL, changed: planned.changed })
