@@ -171,7 +171,7 @@ window.__ModuleLoader__.load({
 
       'providers.caption': 'Provider routes',
       'providers.explain':
-        'Tick \u201cRoute through OpenRouter Plus\u201d on a provider in Settings \u2192 Models, then pick the service tier in the composer. The provider keeps its models and key; only its base URL moves onto this relay.',
+        'Tick \u201cRoute through OpenRouter Plus\u201d on a provider in Settings \u2192 Models, then pick a preset in the composer. The provider keeps its models and key; only its base URL moves onto this relay.',
       'providers.loading': 'Loading provider routes…',
       'providers.retry': 'Reload',
       'providers.unavailable': 'Route editing is unavailable: {reason}',
@@ -182,7 +182,7 @@ window.__ModuleLoader__.load({
       'providers.defaultTierHint': 'A session inherits this until it picks its own preset in the composer.',
       'providers.defaultTierAria': 'Preset for new sessions',
       'providers.presetCaption': 'What each preset sends',
-      'providers.noticeDefaultTier': 'Saved the service tier for new sessions.',
+      'providers.noticeDefaultTier': 'Saved the preset for new sessions.',
       'providers.routeMeta': '{source} · {tier} · {count} models',
       'providers.routeBase': 'Base URL: {url}',
       'providers.remove': 'Remove',
@@ -208,7 +208,7 @@ window.__ModuleLoader__.load({
       'strip.applying': 'Routing\u2026',
       'strip.detaching': 'Restoring\u2026',
       'strip.tierHint': 'Presets only apply to endpoints that accept OpenAI-style routing fields (OpenRouter itself, and some compatible gateways).',
-      'strip.routedHint': 'Requests from this provider go through the relay. The service tier is chosen per session from the composer chip.',
+      'strip.routedHint': 'Requests from this provider go through the relay. The preset is chosen per session from the composer chip.',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
 
       'preset.none': 'No pin',
@@ -237,7 +237,7 @@ window.__ModuleLoader__.load({
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
-      'recent.column.tier': 'Tier',
+      'recent.column.tier': 'Preset',
       'recent.column.model': 'Model',
       'recent.column.status': 'Status',
       'recent.column.ms': 'Duration',
@@ -305,7 +305,7 @@ window.__ModuleLoader__.load({
       'savings.note': '倍率为相对 token 价格。中继不知道各模型的实际价格，因此不显示金额。',
 
       'providers.caption': '提供商路由',
-      'providers.explain': '在设置 → 模型里勾选“经 OpenRouter Plus 转发”，再到编辑器中选择服务等级。提供商会保留自己的模型与密钥，只有基址切换到本中继。',
+      'providers.explain': '在设置 → 模型里勾选“经 OpenRouter Plus 转发”，再到编辑器中选择预设。提供商会保留自己的模型与密钥，只有基址切换到本中继。',
       'providers.loading': '正在加载提供商路由…',
       'providers.retry': '重新加载',
       'providers.unavailable': '无法编辑路由：{reason}',
@@ -316,7 +316,7 @@ window.__ModuleLoader__.load({
       'providers.defaultTierHint': '会话会继承该设置，直到在输入框中选定自己的预设。',
       'providers.defaultTierAria': '新会话的预设',
       'providers.presetCaption': '各预设实际发送什么',
-      'providers.noticeDefaultTier': '已保存新会话的服务等级。',
+      'providers.noticeDefaultTier': '已保存新会话的预设。',
       'providers.routeMeta': '{source} · {tier} · {count} 个模型',
       'providers.routeBase': '基址：{url}',
       'providers.remove': '移除',
@@ -338,11 +338,11 @@ window.__ModuleLoader__.load({
       'strip.groupAria': '{name} 的 OpenRouter Plus 转发',
       'strip.route': '通过 OpenRouter Plus 转发',
       'strip.routed': '已通过 OpenRouter Plus 转发',
-      'strip.tierAria': '{name} 的服务等级',
+      'strip.tierAria': '{name} 的预设',
       'strip.applying': '正在转发\u2026',
       'strip.detaching': '正在恢复\u2026',
       'strip.tierHint': '预设只对接受 OpenAI 风格路由字段的端点生效（如 OpenRouter 本身及部分兼容网关）。',
-      'strip.routedHint': '该提供商已通过中继转发。服务等级在输入框的等级按钮里按会话选择。',
+      'strip.routedHint': '该提供商已通过中继转发。预设在输入框的预设按钮里按会话选择。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
 
       'preset.none': '不固定',
@@ -371,7 +371,7 @@ window.__ModuleLoader__.load({
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
-      'recent.column.tier': '等级',
+      'recent.column.tier': '预设',
       'recent.column.model': '模型',
       'recent.column.status': '状态',
       'recent.column.ms': '耗时',

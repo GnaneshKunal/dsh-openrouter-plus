@@ -42,7 +42,7 @@ switching never mints a provider, a route or a model list.
   (`/auto/v1`, `/fast/v1`, `/scale/v1`); the settings page lists one mount per preset so it never
   offers the same choice twice.
 - **Its own settings page** (Settings → OpenRouter Plus) showing relay state, one pinned base URL
-  per preset with a copy button, live request/token counters per tier, the weighted cost
+  per preset with a copy button, live request/token counters per preset, the measured effective
   multiplier, and recent requests.
 - **A preset chip in the composer** — next to the model selector, a compact chip shows the preset
   this Session will actually apply and switches it in one click. The switch is **per session**: it
@@ -61,6 +61,24 @@ switching never mints a provider, a route or a model list.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
   header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
   construction.
+
+## Screenshots
+
+The switch lives on the provider you already use, in Settings → Models. Ticking it moves that
+row's traffic onto the relay and changes nothing else:
+
+![Route through OpenRouter Plus ticked on a provider row](docs/images/models-route.jpg)
+
+The settings page — relay state, one pinned base URL per preset, the counters, and what each
+preset actually sends:
+
+![OpenRouter Plus settings: relay state, pinned base URLs, spend impact](docs/images/settings-overview.jpg)
+
+![OpenRouter Plus settings: preset catalogue, provider routes, recent requests](docs/images/settings-presets.jpg)
+
+The composer chip, which switches the preset for one Session without touching any provider row:
+
+![Composer chip showing a per-session preset next to the model selector](docs/images/composer-chip.jpg)
 
 ## Install
 
