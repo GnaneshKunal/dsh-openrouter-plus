@@ -9,6 +9,16 @@ the config keys can still change.
 
 Nothing yet.
 
+## [0.1.1] — 2026-10-27
+
+### Changed
+
+- The UI says **preset** everywhere. The recent-requests column header read `Tier`, the provider
+  row hint and the empty state said "service tier", and the Chinese strings said 服务等级; the
+  rename to presets had missed all five.
+- README gains screenshots of the provider switch, both halves of the settings page, and the
+  composer chip — the four states worth seeing before installing.
+
 ## [0.1.0] — 2026-10-26
 
 First release: a loopback relay that applies an OpenRouter **routing preset** to a request at
