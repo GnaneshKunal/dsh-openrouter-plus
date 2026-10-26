@@ -39,8 +39,9 @@ upstream. Because it only uses schema fields the profile already has, it survive
 ## Install
 
 ```bash
-dsh plugin add /Users/<you>/self/dsh-openrouter-plus     # or, from a session:
-#   plugin_manager { action: install_bundle, target: "/Users/<you>/self/dsh-openrouter-plus" }
+git clone https://github.com/GnaneshKunal/dsh-openrouter-plus
+dsh plugin add ./dsh-openrouter-plus     # or, from a session:
+#   plugin_manager { action: install_bundle, target: "./dsh-openrouter-plus" }
 ```
 
 Then open **Settings → Models**. The card appears at the bottom of the provider list. If the relay
