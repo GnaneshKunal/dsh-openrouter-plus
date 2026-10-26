@@ -270,3 +270,320 @@ test('findUsage reads SSE transcripts and plain JSON bodies', () => {
   assert.deepEqual(findUsage('no usage here'), { promptTokens: null, completionTokens: null })
   assert.deepEqual(findUsage(''), { promptTokens: null, completionTokens: null })
 })
+
+// ---- per-target mounts: /t/<targetId>[/<tier>]/v1 ------------------------
+
+test('a target mount forwards to that target upstream and pins its tier', async () => {
+  /** @type {{ body: string, url: string, headers: http.IncomingHttpHeaders } | undefined} */
+  let received
+  const gateway = await startServer(async (req, res) => {
+    received = { body: (await readRequestBody(req)).toString('utf8'), url: req.url ?? '', headers: req.headers }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+
+  /** @type {object[]} */
+  const records = []
+  const { address } = await startRelay(gateway.origin, { '/flex/v1': 'flex' }, {
+    resolveTarget: (id) => (id === 'acme' ? { upstream: `${gateway.origin}/api/v1`, tier: 'flex' } : null),
+    onRecord: (entry) => records.push(entry),
+  })
+
+  const response = await fetch(`${address.origin}/t/acme/flex/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-acme' },
+    body: JSON.stringify({ model: 'acme/large', messages: [] }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-oorp-tier'), 'flex')
+  assert.equal(response.headers.get('x-oorp-target'), 'acme')
+  assert.equal(response.headers.get('x-oorp-upstream'), gateway.origin, 'the header must not leak the upstream path')
+  assert.ok(received, 'the target upstream received nothing')
+  assert.equal(received.url, '/api/v1/chat/completions', 'the mount is stripped, the upstream path is kept')
+  assert.equal(received.headers.authorization, 'Bearer sk-acme', 'authorization passes through verbatim')
+  const parsed = JSON.parse(received.body)
+  assert.equal(parsed.service_tier, 'flex')
+  assert.equal(parsed.model, 'acme/large')
+  assert.equal(Number(received.headers['content-length']), Buffer.byteLength(received.body))
+
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].tier, 'flex')
+  assert.equal(records[0].model, 'acme/large')
+  assert.equal(records[0].status, 200)
+})
+
+test('the no-tier target mount writes no service_tier key at all', async () => {
+  /** @type {string | undefined} */
+  let receivedBody
+  /** @type {string | undefined} */
+  let receivedUrl
+  const gateway = await startServer(async (req, res) => {
+    receivedBody = (await readRequestBody(req)).toString('utf8')
+    receivedUrl = req.url
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  // Even a target that pins a tier must stay untouched behind the plain mount:
+  // the mount, not the config, decides whether a tier is written.
+  const { address, metrics } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: () => ({ upstream: `${gateway.origin}/api/v1`, tier: 'flex' }),
+  })
+
+  const response = await fetch(`${address.origin}/t/acme/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'acme/large' }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-oorp-tier'), 'passthrough')
+  assert.equal(receivedUrl, '/api/v1/chat/completions')
+  const parsed = JSON.parse(String(receivedBody))
+  assert.equal('service_tier' in parsed, false)
+  assert.equal(parsed.model, 'acme/large', 'the body still arrives, just unmodified')
+
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const snapshot = metrics.snapshot()
+  assert.equal(snapshot.byTier.unset.requests, 1, 'an unpinned target is accounted as unset')
+  assert.equal(snapshot.byTier.unset.multiplier, 1)
+})
+
+test('a target upstream keeps its own path and the join never doubles a slash', async () => {
+  /** @type {string[]} */
+  const seen = []
+  const gateway = await startServer((req, res) => {
+    seen.push(req.url ?? '')
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: (id) => {
+      if (id === 'nested') return { upstream: `${gateway.origin}/gateway/api/v1/`, tier: 'scale' }
+      if (id === 'bare') return { upstream: gateway.origin, tier: null }
+      return null
+    },
+  })
+
+  const query = await fetch(`${address.origin}/t/nested/scale/v1/models?limit=3`)
+  assert.equal(query.status, 200)
+  const exact = await fetch(`${address.origin}/t/nested/scale/v1`)
+  assert.equal(exact.status, 200)
+  const noPath = await fetch(`${address.origin}/t/bare/v1/embeddings`)
+  assert.equal(noPath.status, 200)
+
+  assert.deepEqual(seen, ['/gateway/api/v1/models?limit=3', '/gateway/api/v1', '/embeddings'])
+})
+
+test('an unknown or malformed target is a clear JSON error, never proxied', async () => {
+  let hits = 0
+  const gateway = await startServer((_req, res) => {
+    hits += 1
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, { resolveTarget: () => null })
+
+  const unknown = await fetch(`${address.origin}/t/ghost/v1/chat/completions`)
+  assert.equal(unknown.status, 404)
+  assert.match((await unknown.json()).error.message, /unknown relay target "ghost"/)
+
+  const malformed = await fetch(`${address.origin}/t/acme/notv1/chat`)
+  assert.equal(malformed.status, 404)
+  assert.match((await malformed.json()).error.message, /not a relay target mount/)
+
+  const badId = await fetch(`${address.origin}/t/Nope!/v1/chat`)
+  assert.equal(badId.status, 404)
+
+  // A relay built without a resolver simply has no targets to serve.
+  const { address: plain } = await startRelay(gateway.origin, { '/v1': null })
+  const disabled = await fetch(`${plain.origin}/t/acme/v1/chat`)
+  assert.equal(disabled.status, 404)
+
+  assert.equal(hits, 0, 'a rejected target must never reach an upstream')
+})
+
+test('a target pointed back at the relay is refused instead of looping', async () => {
+  /** @type {{ origin: string, port: number }} */
+  const self = { origin: '', port: 0 }
+  const { address } = await startRelay('http://127.0.0.1:9', { '/v1': null }, {
+    resolveTarget: (id) => {
+      if (id === 'numeric') return { upstream: `${self.origin}/v1`, tier: 'flex' }
+      if (id === 'named') return { upstream: `http://localhost:${self.port}/v1`, tier: 'flex' }
+      return null
+    },
+  })
+  self.origin = address.origin
+  self.port = address.port
+
+  const numeric = await fetch(`${address.origin}/t/numeric/flex/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"model":"x"}',
+  })
+  assert.equal(numeric.status, 400)
+  assert.match((await numeric.json()).error.message, /points back at this relay/)
+
+  const named = await fetch(`${address.origin}/t/named/flex/v1/models`)
+  assert.equal(named.status, 400, 'the loopback name is the same listener')
+
+  const unpinned = await fetch(`${address.origin}/t/numeric/v1/models`)
+  assert.equal(unpinned.status, 400, 'a plain target mount loops just the same')
+  assert.match((await unpinned.json()).error.message, /refusing to proxy it to itself/)
+})
+
+test('the legacy tier mount is unchanged and never consults the resolver', async () => {
+  /** @type {Array<{ url: string, body: string }>} */
+  const seen = []
+  const gateway = await startServer(async (req, res) => {
+    seen.push({ url: req.url ?? '', body: (await readRequestBody(req)).toString('utf8') })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  let targetCalls = 0
+  const { address, metrics } = await startRelay(gateway.origin, { '/flex/v1': 'flex', '/v1': null }, {
+    resolveTarget: () => {
+      targetCalls += 1
+      return { upstream: `${gateway.origin}/elsewhere`, tier: 'priority' }
+    },
+  })
+
+  const tiered = await fetch(`${address.origin}/flex/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'legacy/tiered' }),
+  })
+  const plain = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'legacy/plain' }),
+  })
+
+  assert.equal(tiered.status, 200)
+  assert.equal(plain.status, 200)
+  assert.equal(tiered.headers.get('x-oorp-tier'), 'flex')
+  assert.equal(plain.headers.get('x-oorp-tier'), 'passthrough')
+  assert.equal(tiered.headers.get('x-oorp-target'), null, 'only a target mount names a target')
+  assert.deepEqual(seen.map((entry) => entry.url), ['/chat/completions', '/chat/completions'])
+  assert.equal(JSON.parse(seen[0].body).service_tier, 'flex')
+  assert.equal('service_tier' in JSON.parse(seen[1].body), false)
+  assert.equal(targetCalls, 0, 'the mounted upstream must stay the configured one')
+
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(metrics.snapshot().byTier.flex.requests, 1)
+  assert.equal(metrics.snapshot().byTier.unset.requests, 1)
+})
+
+test('the resolver pins the tier and the mount segment is the fallback', async () => {
+  /** @type {Array<Record<string, unknown>>} */
+  const bodies = []
+  const gateway = await startServer(async (req, res) => {
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: (id) => {
+      if (id === 'pinned') return { upstream: gateway.origin, tier: 'flex' }
+      if (id === 'open') return { upstream: gateway.origin, tier: null }
+      return null
+    },
+  })
+
+  const send = (path) => fetch(`${address.origin}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'm' }),
+  })
+
+  // A stale provider route (its baseURL names an older tier) must not override
+  // the tier the target is pinned to today.
+  assert.equal((await send('/t/pinned/priority/v1/chat')).status, 200)
+  assert.equal((await send('/t/open/priority/v1/chat')).status, 200)
+
+  assert.equal(bodies[0].service_tier, 'flex', 'the pinned target wins over the mount segment')
+  assert.equal(bodies[1].service_tier, 'priority', 'a target with no pinned tier uses the mount')
+})
+
+test('an unusable target upstream is a clear 400, and an async resolver works', async () => {
+  /** @type {string[]} */
+  const seen = []
+  const gateway = await startServer(async (req, res) => {
+    seen.push(req.url ?? '')
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: async (id) => {
+      if (id === 'async') return { upstream: `${gateway.origin}/api/v1`, tier: 'scale' }
+      if (id === 'badurl') return { upstream: 'not-a-url' }
+      if (id === 'ftp') return { upstream: 'ftp://example.test/v1' }
+      if (id === 'credentialed') return { upstream: 'http://user:pass@127.0.0.1:1/v1' }
+      return {}
+    },
+  })
+
+  const ok = await fetch(`${address.origin}/t/async/scale/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'm' }),
+  })
+  assert.equal(ok.status, 200, 'a resolver may answer with a promise')
+  assert.equal(ok.headers.get('x-oorp-tier'), 'scale')
+  assert.deepEqual(seen, ['/api/v1/chat/completions'])
+
+  for (const id of ['badurl', 'ftp', 'credentialed', 'empty']) {
+    const response = await fetch(`${address.origin}/t/${id}/v1/chat`)
+    assert.equal(response.status, 400, `${id} must be refused`)
+    assert.match((await response.json()).error.message, /no usable upstream/)
+  }
+})
+
+test('streams a target mount through byte for byte', async () => {
+  const frames = [
+    'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
+    'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n',
+    'data: [DONE]\n\n',
+  ]
+  const gateway = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+    res.write(frames[0])
+    setTimeout(() => {
+      res.write(frames[1] + frames[2])
+      res.end()
+    }, 10)
+  })
+
+  /** @type {object[]} */
+  const records = []
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: () => ({ upstream: `${gateway.origin}/api/v1`, tier: null }),
+    onRecord: (entry) => records.push(entry),
+  })
+
+  const response = await fetch(`${address.origin}/t/acme/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'streamed-target', stream: true }),
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'text/event-stream')
+
+  /** @type {Uint8Array[]} */
+  const chunks = []
+  for await (const chunk of /** @type {any} */ (response.body)) chunks.push(chunk)
+  assert.equal(Buffer.concat(chunks).toString('utf8'), frames.join(''), 'every byte must survive in order')
+
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(records.length, 1)
+  assert.equal(records[0].streaming, true)
+  assert.equal(records[0].tier, null)
+  assert.equal(records[0].model, 'streamed-target')
+  assert.equal(records[0].promptTokens, 5)
+  assert.equal(records[0].completionTokens, 2)
+})

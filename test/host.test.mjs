@@ -18,8 +18,13 @@ async function freePort() {
   return port
 }
 
-/** The smallest cordis-shaped context `apply()` needs. */
-function createFakeContext() {
+/**
+ * The smallest cordis-shaped context `apply()` needs.
+ *
+ * @param {{ configEditor?: any }} [options] an editor stub, when the test drives
+ *   the endpoints that read and write config (the relay never touches it)
+ */
+function createFakeContext(options = {}) {
   /** @type {Array<() => unknown>} */
   const disposers = []
   /** @type {string[]} */
@@ -28,7 +33,7 @@ function createFakeContext() {
   return {
     ctx: {
       logger: { info: sink('info'), warn: sink('warn'), error: sink('error') },
-      get: () => undefined,
+      get: (name) => (name === 'configEditor' ? options.configEditor : undefined),
       on: () => () => {},
       effect(fn) {
         const disposer = fn()
@@ -41,6 +46,47 @@ function createFakeContext() {
       for (const dispose of disposers.reverse()) await dispose()
     },
   }
+}
+
+/**
+ * A `ctx.configEditor` stub over plain rows: `edit` applies the planner to the
+ * entry's config in place, exactly the contract `config-bridge` relies on.
+ * @param {Array<any>} rows
+ */
+function createFakeEditor(rows) {
+  const writes = []
+  return {
+    rows,
+    writes,
+    configuration: () => rows,
+    async edit(entry, change) {
+      const before = entry?.options?.config ?? {}
+      const next = change(before, entry?.inherited ?? {})
+      writes.push({ entry, before, next })
+      if (entry?.options) entry.options.config = next
+      return next
+    },
+  }
+}
+
+/** The plugin's own row, as the Loader builds it. */
+function ownRow(options = {}) {
+  return { entry: { options: { id: 'openrouter-plus', name: 'dsh-openrouter-plus', config: options } }, inherited: {}, override: options }
+}
+
+/** The `llm-pi-ai` row with the given providers. */
+function piAiRow(providers) {
+  const config = { providers }
+  return { entry: { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config } }, inherited: {}, override: config }
+}
+
+/** Post JSON with the guard header the control layer requires. */
+function postJson(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-oorp-client': 'web' },
+    body: JSON.stringify(body),
+  })
 }
 
 /** Wait until `probe()` resolves truthy, or fail after `timeoutMs`. */
@@ -107,7 +153,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.4.0')
+  assert.equal(health.version, '0.5.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -212,4 +258,210 @@ test('config writes escape the HMR transaction context the listener inherited', 
 
   // An unexpected hmr shape falls back instead of throwing.
   assert.equal(outsideHmrTransaction({ get: () => ({}) }, () => 'fallback'), 'fallback')
+})
+
+test('normalizeTargets keeps only usable mounts', () => {
+  const config = normalizeConfig({
+    targets: {
+      'acme-gw-9f3a': { upstream: 'https://api.acme.dev/v1/', tier: 'FLEX' },
+      'passthrough': { upstream: 'http://127.0.0.1:9000/v1' },
+      'Bad Id': { upstream: 'https://example.test/v1' },
+      '../escape': { upstream: 'https://example.test/v1' },
+      'ftp-target': { upstream: 'ftp://example.test/v1' },
+      'no-url': {},
+      'bad-tier': { upstream: 'https://example.test/v1', tier: 'turbo' },
+    },
+  })
+  assert.deepEqual(Object.keys(config.targets).sort(), ['acme-gw-9f3a', 'bad-tier', 'passthrough'])
+  assert.deepEqual(config.targets['acme-gw-9f3a'], { upstream: 'https://api.acme.dev/v1', tier: 'flex' })
+  assert.equal(config.targets.passthrough.tier, null, 'no tier is a passthrough mount')
+  assert.equal(config.targets['bad-tier'].tier, null, 'an unknown tier is not guessed at')
+})
+
+test('registers a target, attaches a provider, and detaches it again', async () => {
+  const port = await freePort()
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow({
+      acme: {
+        displayName: 'Acme Gateway',
+        api: 'openai-completions',
+        baseURL: 'https://api.acme.dev/v1',
+        models: [{ id: 'acme-large', name: 'Acme Large' }],
+      },
+    }),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  // 1. Register the endpoint the operator typed. No tier means pure passthrough.
+  const registered = await postJson(`${origin}/__openrouter-plus/targets/register`, {
+    upstream: 'https://api.acme.dev/v1',
+  })
+  assert.equal(registered.status, 200)
+  const registration = await registered.json()
+  assert.equal(registration.ok, true)
+  assert.equal(registration.target.upstream, 'https://api.acme.dev/v1')
+  assert.equal(registration.target.tier, null)
+  assert.match(registration.target.id, /^[a-z0-9][a-z0-9_-]{0,31}$/)
+  assert.equal(registration.baseURL, `${origin}/t/${registration.target.id}/v1`)
+  assert.deepEqual(editor.rows[0].entry.options.config.targets, {
+    [registration.target.id]: { upstream: 'https://api.acme.dev/v1', tier: null },
+  })
+
+  // The same endpoint again is the same target: registering is idempotent.
+  const again = await (await postJson(`${origin}/__openrouter-plus/targets/register`, {
+    upstream: 'https://api.acme.dev/v1',
+  })).json()
+  assert.equal(again.target.id, registration.target.id)
+  assert.equal(again.created, false)
+  assert.equal(editor.writes.length, 1, 'a repeat registration writes nothing')
+
+  // 2. Attach a provider row: its base URL becomes the mount, nothing else changes.
+  const attached = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acme',
+    upstream: 'https://api.acme.dev/v1',
+    tier: 'flex',
+  })
+  assert.equal(attached.status, 200)
+  const attachResult = await attached.json()
+  const mount = `${origin}/t/${registration.target.id}/flex/v1`
+  assert.equal(attachResult.baseURL, mount)
+  assert.equal(attachResult.changed, true)
+  const providers = editor.rows[1].entry.options.config.providers
+  assert.equal(providers.acme.baseURL, mount)
+  assert.equal(providers.acme.api, 'openai-completions', 'the protocol is untouched')
+  assert.deepEqual(providers.acme.models, [{ id: 'acme-large', name: 'Acme Large' }], 'models are untouched')
+
+  // 3. The target table reports which row is on it, derived from the profile.
+  const snapshot = await (await fetch(`${origin}/__openrouter-plus/targets`)).json()
+  assert.equal(snapshot.custom.length, 1)
+  assert.equal(snapshot.custom[0].route, 'acme')
+  assert.equal(snapshot.custom[0].tier, 'flex')
+  assert.equal(snapshot.custom[0].baseURL, mount)
+
+  // 3b. Switching the tier of an attached row is one write on the same target,
+  // and a caller that echoes the mount back as `upstream` is understood: the
+  // registry holds the real endpoint, so it wins.
+  const retiered = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acme',
+    upstream: mount,
+    tier: 'fast',
+  })
+  assert.equal(retiered.status, 200)
+  const retieredBody = await retiered.json()
+  assert.equal(retieredBody.target.id, registration.target.id, 'the same endpoint keeps the same target')
+  assert.equal(retieredBody.target.tier, 'fast')
+  assert.equal(
+    editor.rows[1].entry.options.config.providers.acme.baseURL,
+    `${origin}/t/${registration.target.id}/fast/v1`,
+    'the row moved to the new tier mount in place',
+  )
+  assert.equal(editor.rows[1].entry.options.config.providers.acme.api, 'openai-completions')
+
+  // 4. Detach without an id: the target is derived from the mount the row sits on.
+  const detached = await postJson(`${origin}/__openrouter-plus/routes/detach`, { route: 'acme' })
+  assert.equal(detached.status, 200)
+  const detachedBody = await detached.json()
+  assert.equal(detachedBody.changed, true)
+  assert.equal(detachedBody.target.id, registration.target.id)
+  assert.equal(detachedBody.baseURL, 'https://api.acme.dev/v1')
+  assert.equal(
+    editor.rows[1].entry.options.config.providers.acme.baseURL,
+    'https://api.acme.dev/v1',
+    'the provider is back on its own endpoint',
+  )
+
+  await dispose()
+})
+
+test('refuses to attach an endpoint that is not http(s) or is this relay', async () => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port }), piAiRow({ acme: { baseURL: 'https://api.acme.dev/v1' } })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  for (const body of [
+    { route: 'acme', upstream: 'not-a-url' },
+    { route: 'acme', upstream: 'ftp://example.test/v1' },
+    { route: 'acme', upstream: `${origin}/flex/v1` },
+    { route: 'acme', upstream: 'https://api.acme.dev/v1', tier: 'turbo' },
+  ]) {
+    const response = await postJson(`${origin}/__openrouter-plus/routes/attach`, body)
+    assert.equal(response.status, 400, `${JSON.stringify(body)} is a client error`)
+    assert.equal(editor.writes.length, 0, 'a rejected attach writes nothing')
+  }
+
+  await dispose()
+})
+
+test('a typo cannot leave a target behind, and a foreign target cannot be restored', async () => {
+  const port = await freePort()
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow({ acme: { baseURL: 'https://api.acme.dev/v1' } }),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  // An unknown provider must not register a target: the row has to exist first.
+  const typo = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acmee',
+    upstream: 'https://api.acme.dev/v1',
+    tier: 'flex',
+  })
+  assert.equal(typo.status, 400)
+  assert.match((await typo.json()).error.message, /no provider route named "acmee"/)
+  assert.equal(editor.writes.length, 0, 'a typo writes nothing at all')
+
+  // Detaching a row that never went through the relay is refused, not guessed at.
+  const stray = await postJson(`${origin}/__openrouter-plus/routes/detach`, { route: 'acme' })
+  assert.equal(stray.status, 400)
+  assert.match((await stray.json()).error.message, /nothing to restore/)
+
+  // Attach for real, then try to re-point the same row at a DIFFERENT endpoint.
+  const attached = await (await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acme',
+    upstream: 'https://api.acme.dev/v1',
+    tier: 'flex',
+  })).json()
+  const elsewhere = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acme',
+    upstream: 'https://other.example/v1',
+    tier: 'flex',
+  })
+  assert.equal(elsewhere.status, 400, 'a routed row may be re-tiered, not re-homed')
+  assert.match((await elsewhere.json()).error.message, /detach it before routing it to a different endpoint/)
+  assert.equal(
+    editor.rows[1].entry.options.config.providers.acme.baseURL,
+    attached.baseURL,
+    'the row keeps the mount it had',
+  )
+
+  await dispose()
 })

@@ -67,3 +67,18 @@
 
         # 0 disables the upstream timeout, which is what long SSE completions need.
         upstreamTimeoutMs: 0
+
+        # Extra endpoints served from /t/<id>/<tier>/v1 mounts, so one listener can
+        # front more than OpenRouter (a gateway, a self-hosted server, anything
+        # OpenAI- or Anthropic-compatible). This table is written by the
+        # "Route through OpenRouter Plus" switch on a provider row, and it is the
+        # only bookkeeping the switch keeps: the endpoint a provider is taken off
+        # of is recorded here, never inside the provider entry itself (pi-ai
+        # schema-validates that object). `tier: null` is a pure passthrough.
+        # Shown empty on purpose — a hand-written entry looks exactly like this:
+        #
+        # targets:
+        #   acme-gw-9f3a:
+        #     upstream: https://api.acme.dev/v1
+        #     tier: flex
+        targets: {}

@@ -43,8 +43,8 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
-| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, listRoutes }` |
-| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus". |
+| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes }` |
+| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus" and the `settings.models.provider-card` row extension. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
 Plain ESM JavaScript, **no build step, no third-party runtime dependencies** (Node ≥ 20 built-ins
@@ -59,14 +59,68 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
-| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], reasoning: { fill, levels } }` |
+| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], reasoning: { fill, levels } }` |
 | `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` | `{ ok: true, name, baseURL, source, tier, reasoning: { filled, unresolved } }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
+| `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier?, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
+| `POST /__openrouter-plus/routes/detach` | `{ route, id }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
+| `POST /__openrouter-plus/targets/register` | `{ upstream, tier?, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |
+| `POST /__openrouter-plus/targets/remove` | `{ id }` | `{ ok: true, id }`, or `409 { error, route }` while a provider still uses it |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
 relay refuses). Every response carries CORS headers limited to loopback GUI origins.
+
+### The target table and the per-provider switch
+
+`targets` is the plugin's own durable state, and it is the only state the switch needs:
+
+```yaml
+targets:
+  acme-gw-9f3a: { upstream: https://api.acme.dev/v1, tier: flex }
+```
+
+- **Shape.** `Object<id, { upstream, tier }>`. `id` must match `^[a-z0-9][a-z0-9_-]{0,31}$` (it is a
+  path segment); `upstream` must be absolute `http(s)`; `tier` is one of the tier names or `null`
+  (pass-through). Anything else is dropped by `normalizeTargets()` rather than guessed at.
+- **Id allocation.** `idForTarget(upstream)` = a slug of the host plus a 4-char base36 digest of the
+  URL, so the same endpoint always maps to the same id. Registering twice is a no-op: the write is
+  skipped when the table already holds that `{ upstream, tier }`.
+- **Where it lives.** In this plugin's own profile row (`options.id = 'openrouter-plus'`), written
+  through the same `configEditor` the bridge uses. Never inside a `llm-pi-ai` provider entry: that
+  object is schema-validated by `dsh-llm-pi-ai`, so plugin bookkeeping there would be rejected.
+- **Read the live table, not the boot snapshot.** A control request can follow a write this same
+  process made, and `config.targets` is frozen at boot (`ownTargets()` re-reads the editor row and
+  falls back to the loaded copy when there is no editor).
+- **`baseURL` in a snapshot is the stored value, verbatim** (a mount for an attached row, padding and
+  all). `targetId` is reported alongside it for exactly that reason: the *upstream* of an attached
+  row is not in the provider entry any more, it is in `targets`, so a snapshot consumer resolves the
+  endpoint from the table rather than from the row.
+- **A target write reloads this plugin.** The table lives in the plugin's own config row, so
+  `configEditor.edit` makes the Loader re-apply it: the listener rebinds and any HTTP response still
+  in flight on it can be cut. That is why the table is written *first* and the provider row second —
+  a cut leaves an unused target (harmless, removable) rather than a provider pointed at a mount with
+  no endpoint behind it — why every control write is idempotent, and why the client treats a cut as
+  "unknown" and reconciles from `/targets` instead of reporting a failure.
+- **The switch (attach/detach)** is the composition: `ensureTarget()` records the endpoint and
+  returns `baseUrlFor(id, tier)`; `bridge.repointRoute()` moves exactly one provider row onto that
+  mount; `bridge.restoreRoute()` moves it back to `target.upstream`. Both planners skip the write and
+  report `changed: false` when the row is already where it was asked to point, so a double-click
+  cannot churn the profile.
+- **Ownership.** A route whose `baseURL` is under the relay origin is not repointed by `attach` (it
+  is already ours — that is `createRoute`/`repairRoutes` territory); only `restoreRoute` may move a
+  relay-backed route away, and only to the upstream recorded for it. A target whose upstream is the
+  relay itself is rejected at resolve time *and* proxying time, so a mis-typed endpoint cannot make
+  the relay call itself.
+- **Attach is tolerant about what it is told.** A caller that only knows the row may echo the mount
+  back as `upstream`: anything under the relay origin is not an endpoint, so the recorded upstream
+  wins. A *real* different endpoint on an already-attached row is refused (`detach` first) rather
+  than silently applied, and a row whose target has disappeared from the table is refused with an
+  explicit message instead of being re-homed to a guess.
+- **Removal refuses while in use.** `POST /targets/remove` answers `409` with the owning provider key
+  when a row still points at that mount: deleting the mount first would turn that provider's next
+  request into a `404` from our own listener.
 
 ### Config writes must step out of the HMR transaction
 
@@ -84,6 +138,25 @@ when HMR is absent, `ctx.get('hmr')` throws, or the service has an unexpected sh
 so `test/host.test.mjs` can prove the escape against a real `AsyncLocalStorage`.
 
 ## `lib/proxy.js`
+
+Target mounts (added in 0.5.0, alongside the legacy tier mounts):
+
+- `/t/<targetId>/<tier>/v1/…` — forwards to that target's own upstream with `<tier>` injected;
+  `/t/<targetId>/v1/…` forwards with **no** `service_tier` key written at all.
+- `/t/` is a reserved namespace, matched before configured `routes`, so a route key cannot shadow a
+  target. `parseTargetMount` consumes the mount's `/v1`; the remainder is sliced from the original
+  pathname (percent-encoding and repeated slashes survive) and appended to the target's upstream
+  after trailing-slash stripping, with the base query merged into the request query.
+- `createRelay({ …, resolveTarget })`, `resolveTarget(targetId) -> { upstream, tier } | null` (a
+  promise is awaited). The relay reads only those two fields and never touches config. The mount
+  shape decides *whether* a tier is written; the resolver's `tier` supplies the value.
+- Rejections happen before any upstream call: unknown target → `404` in the legacy unknown-mount
+  shape; unusable upstream (missing, non-`http(s)`, carrying credentials) → `400`; a target pointing
+  back at this listener → `400` "refusing to proxy it to itself".
+- Responses carry `x-oorp-target: <id>` on target mounts only; `x-oorp-upstream` reports the origin
+  (never the configured path) and `x-oorp-tier` keeps its existing meaning (`passthrough` when
+  nothing is pinned).
+
 
 ```js
 /**
@@ -176,11 +249,14 @@ export function createConfigBridge(options)
 
 // available(): boolean                       // ctx.configEditor present?
 // targets(): Promise<{                       // read-only snapshot for the UI
-//   sources: Array<{ key, displayName, api, apiKeyEnv, baseURL, modelCount, attachedTier? }>,
-//   created: Array<{ name, source, tier, baseURL, modelCount }>,
+//   sources: Array<{ key, displayName, api, apiKeyEnv, baseURL, modelCount, attachedTier?, targetId? }>,
+//   created: Array<{ name, source, tier, baseURL, modelCount, targetId? }>,
 // }>
 // createRoute({ source, tier, name?, displayName? }): Promise<{ name, baseURL, source, tier }>
 // removeRoute({ name }): Promise<{ name }>
+// repairRoutes(): Promise<{ patched, unresolved, owned, changed }>
+// repointRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRepoint
+// restoreRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRestore
 // listRoutes(): Promise<Array<{ name, source, tier, baseURL, modelCount }>>
 ```
 
@@ -196,6 +272,15 @@ Rules:
 - **Ownership test:** a route belongs to this plugin iff its `baseURL` starts with the relay origin.
   `removeRoute` refuses (throws a clear error) for any other route. Never mutate a route the plugin
   did not create.
+- **`planRepoint` / `planRestore` are the two halves of the per-provider switch.** `repointRoute`
+  moves a provider the operator already had (`baseURL` = their own endpoint) onto a relay mount,
+  leaving `api`, `apiKeyEnv`, headers and `models` byte-identical; it refuses a route that is
+  already relay-backed (that is `planCreate`/`planRepair` territory — rewriting it would fight the
+  owner) and refuses a target that is the relay itself. `restoreRoute` is the inverse and the only
+  path allowed to move a relay-backed route away. Both report `changed: false` and skip the write
+  when the row already points where it was asked to, so a repeated click cannot churn the profile.
+  Neither writes plugin bookkeeping into the provider entry: everything they need (which endpoint,
+  which tier) lives in the plugin's own `targets` table.
 - Reject a create whose name already exists; reject an unknown `source`; reject a `tier` outside the
   accepted set.
 - **Reasoning capability is not inherited by a new provider key.** `dsh-llm-pi-ai` resolves a model's
@@ -236,3 +321,14 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - Styling: inherit the host theme (`var(--dsw-alias-*)` tokens, `var(--dsw-font-*)`). No global CSS
   file, no `document.body` mutation, no reading other plugins' DOM.
 - Every user-visible string goes through the locale namespace.
+- **The row extension.** `ctx.slots.inject('settings.models.provider-card', …)` registers a second
+  seat, keyed by the *settings namespace* (`{ name: 'settings.models.provider-card', key: 'llm-pi-ai' }`),
+  which renders on every saved `llm-pi-ai` provider row (and on the catalog add panel while a dormant
+  row exists). It receives `{ provider, configured, keyConfigured }` and nothing else — no setter, no
+  draft object — so it cannot touch the form being typed; it reads `GET /targets`
+  (`sources`/`created`/`custom`) to learn what the row currently points at and calls
+  `POST /routes/attach` / `routes/detach` to move it. It must render **nothing** when the relay is
+  unreachable, and it must never call `settings.mutate`: the card holds its own `expectedRevision`,
+  so a plugin write while the card is open would make the card's next save fail with
+  `settings/conflict`. Re-render hands it a fresh `provider` object each snapshot, so the strip syncs
+  from props rather than caching identity.

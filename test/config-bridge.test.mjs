@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isDeepStrictEqual } from 'node:util'
 
-import { createConfigBridge } from '../lib/config-bridge.js'
+import { createConfigBridge, planRepoint, planRestore } from '../lib/config-bridge.js'
 
 const PROFILE_PLUGIN = '@deepseek-ai/dsh-llm-pi-ai'
 const RELAY = 'http://127.0.0.1:8791'
@@ -867,4 +867,489 @@ test('repairRoutes() reports an unrepairable model instead of inventing a capabi
   assert.deepEqual(unresolved.patched, [])
   assert.deepEqual(unresolved.unresolved, [{ name: 'openrouter-flex', model: 'vendor/one' }])
   assert.equal(edits.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// repoint / restore
+// ---------------------------------------------------------------------------
+
+/** A provider the user created through the normal "add custom provider" flow. */
+const ACME = 'https://api.acme.dev/v1'
+
+/** A relay mount: what a repointed route is pointed at, path and tier included. */
+const MOUNT = `${RELAY}/t/acme-gw-9f3a/flex/v1`
+
+function acmeRoute(overrides = {}) {
+  return {
+    displayName: 'acme gateway',
+    apiKeyEnv: 'ACME_API_KEY',
+    api: 'openai-responses',
+    baseURL: ACME,
+    models: [{ id: 'acme-gw-large', name: 'Acme GW Large', contextWindow: 200000 }],
+    ...overrides,
+  }
+}
+
+/** Two providers: one to move, one that must never be touched. */
+function repointWorld(overrides = {}) {
+  return createFakeEditor({
+    config: { providers: { acme: acmeRoute(), 'openrouter-custom': sourceRoute() } },
+    ...overrides,
+  })
+}
+
+test('planRepoint() moves only the base URL and leaves every other route alone', () => {
+  const current = { providers: { acme: acmeRoute(), 'openrouter-custom': sourceRoute() } }
+  const before = clone(current)
+
+  const { next, result } = planRepoint(current, {}, { route: 'acme', baseURL: MOUNT }, RELAY)
+
+  assert.deepEqual(result, { name: 'acme', from: ACME, to: MOUNT, changed: true })
+  assert.equal(next.providers.acme.baseURL, MOUNT)
+  // The entry keeps exactly the fields pi-ai knows: nothing of the plugin's own.
+  assert.deepEqual(Object.keys(next.providers.acme), Object.keys(acmeRoute()))
+  const { baseURL: _moved, ...rest } = next.providers.acme
+  const { baseURL: _was, ...expected } = acmeRoute()
+  assert.deepEqual(rest, expected)
+  assert.deepEqual(next.providers['openrouter-custom'], current.providers['openrouter-custom'])
+  // The plan is pure: the layers it was handed are not mutated.
+  assert.deepEqual(current, before)
+})
+
+test('planRepoint() reports changed:false and a no-op config when already there', () => {
+  const current = { providers: { acme: acmeRoute() } }
+  // A trailing slash is the same endpoint, so it must not produce a write either.
+  for (const baseURL of [ACME, `${ACME}/`]) {
+    const { next, result } = planRepoint(current, {}, { route: 'acme', baseURL }, RELAY)
+    assert.deepEqual(result, { name: 'acme', from: ACME, to: baseURL, changed: false })
+    assert.equal(next.providers.acme.baseURL, ACME, 'the stored value is left exactly as it was')
+    // commit() skips the write only when the plan deep-equals the merged snapshot.
+    assert.ok(isDeepStrictEqual(next, current))
+  }
+})
+
+test('planRepoint() refuses an unknown, blank or padded route name', () => {
+  const current = { providers: { acme: acmeRoute(), 'openrouter-custom': sourceRoute() } }
+  assert.throws(
+    () => planRepoint(current, {}, { route: 'nope', baseURL: MOUNT }, RELAY),
+    /Provider route "nope" is not configured in @deepseek-ai\/dsh-llm-pi-ai, so there is nothing to repoint\. Existing routes: acme, openrouter-custom\./,
+  )
+  assert.throws(
+    () => planRepoint(current, {}, {}, RELAY),
+    /A provider route name is required to repoint one/,
+  )
+  assert.throws(
+    () => planRepoint({ providers: {} }, {}, { route: 'acme', baseURL: MOUNT }, RELAY),
+    /There is no provider route to repoint: the @deepseek-ai\/dsh-llm-pi-ai configuration has no routes yet/,
+  )
+  // A key that only differs by surrounding whitespace still resolves, and the
+  // plan reports the key that is really stored.
+  const padded = { providers: { ' acme ': acmeRoute() } }
+  assert.equal(planRepoint(padded, {}, { route: 'acme', baseURL: MOUNT }, RELAY).result.name, ' acme ')
+})
+
+test('planRepoint() refuses an empty or non-http base URL', () => {
+  const current = { providers: { acme: acmeRoute() } }
+  assert.throws(
+    () => planRepoint(current, {}, { route: 'acme', baseURL: '  ' }, RELAY),
+    /Enter the base URL that provider route "acme" should point at/,
+  )
+  for (const bad of ['api.acme.dev/v1', '/v1', 'ftp://api.acme.dev/v1', 'mailto:ops@acme.dev', 'not a url']) {
+    assert.throws(
+      () => planRepoint(current, {}, { route: 'acme', baseURL: bad }, RELAY),
+      /is not usable: enter an absolute http:\/\/ or https:\/\/ URL/,
+    )
+  }
+})
+
+test('planRepoint() refuses a route this plugin created', () => {
+  const current = { providers: { 'acme-flex': acmeRoute({ baseURL: `${RELAY}/flex/v1` }) } }
+  assert.throws(
+    () => planRepoint(current, {}, { route: 'acme-flex', baseURL: MOUNT }, RELAY),
+    /already points at the OpenRouter Plus relay .*so the plugin owns it and it cannot be repointed/,
+  )
+})
+
+test('planRepoint() refuses the relay bare origin but accepts a mount', () => {
+  const current = { providers: { acme: acmeRoute() } }
+  for (const origin of [RELAY, `${RELAY}/`]) {
+    assert.throws(
+      () => planRepoint(current, {}, { route: 'acme', baseURL: origin }, RELAY),
+      /Refusing to point provider route "acme" at the OpenRouter Plus relay itself/,
+    )
+  }
+  const mounted = planRepoint(current, {}, { route: 'acme', baseURL: MOUNT }, RELAY)
+  assert.equal(mounted.result.changed, true)
+  assert.equal(mounted.next.providers.acme.baseURL, MOUNT)
+})
+
+test('planRestore() moves a relay-backed route back and round-trips byte-identically', () => {
+  const original = { providers: { acme: acmeRoute(), 'openrouter-custom': sourceRoute() } }
+  const routed = planRepoint(original, {}, { route: 'acme', baseURL: MOUNT }, RELAY)
+
+  const restored = planRestore(routed.next, {}, { route: 'acme', baseURL: ACME }, RELAY)
+
+  assert.deepEqual(restored.result, { name: 'acme', from: MOUNT, to: ACME, changed: true })
+  assert.deepEqual(restored.next.providers, original.providers)
+})
+
+test('planRestore() refuses a route that is not relay-backed', () => {
+  const current = {
+    providers: {
+      acme: acmeRoute(),
+      naked: { api: 'openai-responses', models: [] },
+    },
+  }
+  assert.throws(
+    () => planRestore(current, {}, { route: 'acme', baseURL: ACME }, RELAY),
+    /Provider route "acme" is not routed through OpenRouter Plus \(its base URL is "https:\/\/api\.acme\.dev\/v1"\), so there is nothing to restore/,
+  )
+  assert.throws(
+    () => planRestore(current, {}, { route: 'naked', baseURL: ACME }, RELAY),
+    /Provider route "naked" is not routed through OpenRouter Plus \(its base URL is no base URL\), so there is nothing to restore/,
+  )
+  assert.throws(
+    () => planRestore(current, {}, { route: 'nope', baseURL: ACME }, RELAY),
+    /nothing to restore\. Existing routes: acme, naked\./,
+  )
+})
+
+test('planRestore() reports changed:false when the route already reads as the target', () => {
+  const current = { providers: { routed: acmeRoute({ baseURL: MOUNT }) } }
+  const { next, result } = planRestore(current, {}, { route: 'routed', baseURL: `${MOUNT}/` }, RELAY)
+  assert.deepEqual(result, { name: 'routed', from: MOUNT, to: `${MOUNT}/`, changed: false })
+  assert.ok(isDeepStrictEqual(next, current))
+  assert.throws(
+    () => planRestore(current, {}, { route: 'routed', baseURL: '' }, RELAY),
+    /Enter the base URL that provider route "routed" should be restored to/,
+  )
+  assert.throws(
+    () => planRestore(current, {}, { route: 'routed', baseURL: 'ftp://api.acme.dev/v1' }, RELAY),
+    /is not usable: enter an absolute http:\/\/ or https:\/\/ URL/,
+  )
+})
+
+test('the planners refuse without a relay address', () => {
+  const current = { providers: { acme: acmeRoute(), routed: acmeRoute({ baseURL: MOUNT }) } }
+  for (const missing of [undefined, null, '']) {
+    assert.throws(
+      () => planRepoint(current, {}, { route: 'acme', baseURL: MOUNT }, missing),
+      /cannot repoint a provider route right now: the loopback relay has no address/,
+    )
+    assert.throws(
+      () => planRestore(current, {}, { route: 'routed', baseURL: ACME }, missing),
+      /cannot restore a provider route right now: the loopback relay has no address/,
+    )
+  }
+})
+
+test('the planners preserve routes and keys that only exist in the inherited layer', () => {
+  const inherited = {
+    providers: { bundle: sourceRoute({ displayName: 'bundle', baseURL: 'https://bundle.dev/v1' }) },
+  }
+  const current = { providers: { acme: acmeRoute() } }
+
+  const repointed = planRepoint(current, inherited, { route: 'bundle', baseURL: MOUNT }, RELAY)
+  assert.equal(repointed.result.changed, true)
+  assert.equal(repointed.next.providers.bundle.baseURL, MOUNT)
+  // The inherited route keeps the rest of its own definition, and the explicit
+  // route beside it is untouched.
+  assert.equal(repointed.next.providers.bundle.displayName, 'bundle')
+  assert.deepEqual(repointed.next.providers.acme, current.providers.acme)
+
+  const restored = planRestore(repointed.next, inherited, { route: 'bundle', baseURL: 'https://bundle.dev/v1' }, RELAY)
+  assert.deepEqual(restored.next.providers.bundle, inherited.providers.bundle)
+})
+
+test('repointRoute() commits the plan, restoreRoute() undoes it', async () => {
+  const { editor, edits } = repointWorld()
+  const { bridge } = bridgeFor(editor)
+
+  const repointed = await bridge.repointRoute({ route: 'acme', baseURL: MOUNT })
+  assert.deepEqual(repointed, { name: 'acme', from: ACME, to: MOUNT, changed: true })
+  assert.equal(edits.length, 1)
+
+  // What reached the editor: the entry gained no plugin field, nothing else moved.
+  assert.deepEqual(Object.keys(edits[0].next.providers.acme), Object.keys(acmeRoute()))
+  assert.deepEqual(edits[0].next.providers['openrouter-custom'], sourceRoute())
+  assert.deepEqual(edits[0].next.providers.acme.models, acmeRoute().models)
+
+  const restored = await bridge.restoreRoute({ route: 'acme', baseURL: ACME })
+  assert.deepEqual(restored, { name: 'acme', from: MOUNT, to: ACME, changed: true })
+  assert.equal(edits.length, 2)
+  assert.deepEqual(edits[1].next.providers, { acme: acmeRoute(), 'openrouter-custom': sourceRoute() })
+
+  // A refusal reaches the caller unchanged: the endpoints show error.message,
+  // so it must not be re-wrapped as a generic save failure.
+  await assert.rejects(
+    () => bridge.repointRoute({ route: 'missing', baseURL: MOUNT }),
+    /Provider route "missing" is not configured in @deepseek-ai\/dsh-llm-pi-ai/,
+  )
+  assert.equal(edits.length, 2, 'a refused plan never writes')
+})
+
+test('the bridge wrappers never write when nothing changes', async () => {
+  const { editor, edits } = repointWorld()
+  const { bridge } = bridgeFor(editor)
+  const noop = await bridge.repointRoute({ route: 'acme', baseURL: ACME })
+  assert.deepEqual(noop, { name: 'acme', from: ACME, to: ACME, changed: false })
+  assert.equal(edits.length, 0, 'a no-op repoint must not touch the profile')
+
+  const routed = repointWorld({ config: { providers: { acme: acmeRoute({ baseURL: MOUNT }) } } })
+  const { bridge: routedBridge } = bridgeFor(routed.editor)
+  const restored = await routedBridge.restoreRoute({ route: 'acme', baseURL: `${MOUNT}/` })
+  assert.equal(restored.changed, false)
+  assert.equal(routed.edits.length, 0, 'a no-op restore must not touch the profile')
+})
+
+test('the bridge wrappers reject with a user-readable message when unavailable', async () => {
+  const { bridge } = bridgeFor(null)
+  assert.equal(bridge.available(), false)
+  await assert.rejects(
+    () => bridge.repointRoute({ route: 'acme', baseURL: MOUNT }),
+    /configuration editor is not available/i,
+  )
+  await assert.rejects(
+    () => bridge.restoreRoute({ route: 'acme', baseURL: ACME }),
+    /configuration editor is not available/i,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// relay mounts: /t/<targetId>/<tier>/v1 (the relay's second URL family)
+// ---------------------------------------------------------------------------
+
+test('targets() reads a /t/<id>/<tier>/v1 mount as that tier plus its target id', async () => {
+  const tierless = `${RELAY}/t/acme-gw-9f3a/v1`
+  const { editor } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-custom': sourceRoute(),
+        acme: sourceRoute({ baseURL: MOUNT }),
+        passthrough: sourceRoute({ baseURL: tierless }),
+        legacy: sourceRoute({
+          displayName: 'openrouter-custom (priority) — OpenRouter Plus',
+          baseURL: `${RELAY}/priority/v1`,
+        }),
+      },
+    },
+  })
+  const { bridge } = bridgeFor(editor)
+  const { sources, created } = await bridge.targets()
+
+  const source = Object.fromEntries(sources.map((entry) => [entry.key, entry]))
+  assert.equal(source.acme.attachedTier, 'flex', 'the tier after the target id, never the "t" segment')
+  assert.equal(source.acme.targetId, 'acme-gw-9f3a')
+  assert.equal(source.passthrough.attachedTier, undefined, '/t/<id>/v1 pins no tier')
+  assert.equal(source.passthrough.targetId, 'acme-gw-9f3a')
+  assert.equal(source.legacy.attachedTier, 'priority', 'the legacy leg still parses its first segment')
+  assert.equal(Object.hasOwn(source.legacy, 'targetId'), false)
+  assert.equal(source['openrouter-custom'].attachedTier, undefined)
+  assert.ok(sources.every((entry) => entry.attachedTier !== 't'), 'the mount segment never leaks as a tier')
+
+  const route = Object.fromEntries(created.map((entry) => [entry.name, entry]))
+  assert.deepEqual(route.acme, {
+    name: 'acme',
+    // A repointed route is not a clone: it has no `${source}-${tier}` origin.
+    source: null,
+    tier: 'flex',
+    baseURL: MOUNT,
+    modelCount: 2,
+    missingReasoning: 2,
+    targetId: 'acme-gw-9f3a',
+  })
+  assert.deepEqual(route.passthrough, {
+    name: 'passthrough',
+    source: null,
+    tier: null,
+    baseURL: tierless,
+    modelCount: 2,
+    missingReasoning: 2,
+    targetId: 'acme-gw-9f3a',
+  })
+  assert.equal(route.legacy.tier, 'priority')
+  assert.equal(route.legacy.source, 'openrouter-custom', 'legacy clones are still attributed')
+  assert.equal(route['openrouter-custom'], undefined, 'a route pointing upstream is never ours')
+
+  // listRoutes() is that same list, so a tierless mount is reported too.
+  assert.deepEqual((await bridge.listRoutes()).map((entry) => entry.name).sort(), ['acme', 'legacy', 'passthrough'])
+
+  // Degenerate mounts: `/t` alone pins no target and no tier — it must not fall
+  // through to the legacy parse and come back as the tier "t". A mount with no
+  // `/v1` (which the relay would 404) also reads as no tier, not an invented one.
+  for (const [baseURL, targetId] of [
+    [`${RELAY}/t`, undefined],
+    [`${RELAY}/t/acme-gw-9f3a`, 'acme-gw-9f3a'],
+    [`${RELAY}/t/acme-gw-9f3a/flex`, 'acme-gw-9f3a'],
+  ]) {
+    const { editor: odd } = createFakeEditor({ config: { providers: { acme: sourceRoute({ baseURL }) } } })
+    const [entry] = (await bridgeFor(odd).bridge.targets()).sources
+    assert.equal(entry.attachedTier, undefined, `${baseURL} pins no tier`)
+    assert.equal(entry.targetId, targetId, `${baseURL} names its target`)
+  }
+})
+
+test('repairRoutes() owns a target mount and never rewrites its base URL', async () => {
+  const tierless = `${RELAY}/t/acme-gw-9f3a/v1`
+  const { editor, edits } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-custom': sourceRoute({ models: [{ id: 'vendor/source-only' }] }),
+        acme: sourceRoute({ baseURL: MOUNT, models: [{ id: 'vendor/acme-large' }] }),
+        passthrough: sourceRoute({ baseURL: tierless, models: [{ id: 'vendor/acme-small' }] }),
+      },
+    },
+  })
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
+  const result = await bridge.repairRoutes()
+
+  assert.equal(result.changed, true)
+  assert.deepEqual(result.owned.sort(), ['acme', 'passthrough'], 'a mount is ours by prefix, tier or not')
+  assert.deepEqual(result.unresolved, [])
+
+  const next = edits[0].next.providers
+  assert.equal(next.acme.baseURL, MOUNT, 'the mount URL is left exactly as it was')
+  assert.equal(next.passthrough.baseURL, tierless)
+  assert.deepEqual(next.acme.models[0].reasoningEfforts, EFFORTS, 'only the reasoning capability is filled')
+  assert.deepEqual(next.passthrough.models[0].reasoningEfforts, EFFORTS)
+  assert.deepEqual(next['openrouter-custom'], editor.state.config.providers['openrouter-custom'], 'upstream routes stay byte-identical')
+})
+
+test('repoint/restore treat a /t/<id>/<tier>/v1 mount as relay-owned', () => {
+  const mounted = { providers: { acme: acmeRoute({ baseURL: MOUNT }) } }
+  assert.throws(
+    () => planRepoint(mounted, {}, { route: 'acme', baseURL: ACME }, RELAY),
+    /already points at the OpenRouter Plus relay \("http:\/\/127\.0\.0\.1:8791\/t\/acme-gw-9f3a\/flex\/v1"\)/,
+  )
+
+  // A tierless mount is equally ours, and restore is the only way off the relay.
+  const tierless = `${RELAY}/t/acme-gw-9f3a/v1`
+  const passthrough = { providers: { acme: acmeRoute({ baseURL: tierless }) } }
+  assert.throws(
+    () => planRepoint(passthrough, {}, { route: 'acme', baseURL: ACME }, RELAY),
+    /already points at the OpenRouter Plus relay/,
+  )
+  const restored = planRestore(passthrough, {}, { route: 'acme', baseURL: ACME }, RELAY)
+  assert.deepEqual(restored.result, { name: 'acme', from: tierless, to: ACME, changed: true })
+  assert.equal(restored.next.providers.acme.baseURL, ACME)
+
+  // A route already on its own endpoint has nothing to undo.
+  assert.throws(
+    () => planRestore({ providers: { acme: acmeRoute() } }, {}, { route: 'acme', baseURL: ACME }, RELAY),
+    /is not routed through OpenRouter Plus/,
+  )
+})
+// ---------------------------------------------------------------------------
+// retiering an attached provider: same relay target, one write
+// ---------------------------------------------------------------------------
+
+const TARGET_A = `${RELAY}/t/acme-gw-9f3a/v1`
+const TARGET_A_FLEX = `${RELAY}/t/acme-gw-9f3a/flex/v1`
+const TARGET_A_PRIORITY = `${RELAY}/t/acme-gw-9f3a/priority/v1`
+const TARGET_B_FLEX = `${RELAY}/t/other-gw-1a2b/flex/v1`
+
+test('planRepoint() retiers a route inside the same relay target', () => {
+  // flex -> priority: one plan, and everything but `baseURL` is byte-identical.
+  const current = {
+    providers: { acme: acmeRoute({ baseURL: TARGET_A_FLEX }), 'openrouter-custom': sourceRoute() },
+  }
+  const { next, result } = planRepoint(current, {}, { route: 'acme', baseURL: TARGET_A_PRIORITY }, RELAY)
+  assert.deepEqual(result, { name: 'acme', from: TARGET_A_FLEX, to: TARGET_A_PRIORITY, changed: true })
+  assert.deepEqual(Object.keys(next.providers.acme), Object.keys(acmeRoute()), 'still only pi-ai fields')
+  const { baseURL: _moved, ...rest } = next.providers.acme
+  const { baseURL: _was, ...expected } = acmeRoute()
+  assert.deepEqual(rest, expected)
+  assert.deepEqual(next.providers['openrouter-custom'], current.providers['openrouter-custom'])
+
+  // Both mount spellings count, in both directions, so pass-through <-> tier is
+  // the same one-write operation as tier <-> tier.
+  for (const [from, to] of [
+    [TARGET_A, TARGET_A_FLEX],
+    [TARGET_A_FLEX, TARGET_A],
+    [TARGET_A, TARGET_A_PRIORITY],
+    [TARGET_A_PRIORITY, TARGET_A],
+  ]) {
+    const plan = planRepoint({ providers: { acme: acmeRoute({ baseURL: from }) } }, {}, { route: 'acme', baseURL: to }, RELAY)
+    assert.deepEqual(plan.result, { name: 'acme', from, to, changed: true }, `${from} -> ${to}`)
+    assert.equal(plan.next.providers.acme.baseURL, to)
+  }
+})
+
+test('repointing to the mount the route already has is a no-op, not a write', async () => {
+  const snapshot = { providers: { acme: acmeRoute({ baseURL: MOUNT }) } }
+  const planned = planRepoint(snapshot, {}, { route: 'acme', baseURL: MOUNT }, RELAY)
+  assert.deepEqual(planned.result, { name: 'acme', from: MOUNT, to: MOUNT, changed: false })
+  assert.equal(planned.next.providers.acme.baseURL, MOUNT)
+  assert.ok(isDeepStrictEqual(planned.next, snapshot), 'a no-op plan deep-equals the snapshot, so commit() skips the write')
+
+  const world = repointWorld({ config: { providers: { acme: acmeRoute({ baseURL: MOUNT }) } } })
+  const { bridge } = bridgeFor(world.editor)
+  const again = await bridge.repointRoute({ route: 'acme', baseURL: `${MOUNT}/` })
+  assert.deepEqual(again, { name: 'acme', from: MOUNT, to: `${MOUNT}/`, changed: false })
+  assert.equal(world.edits.length, 0, 'an idempotent attach must not touch the profile')
+})
+
+test('planRepoint() still refuses a different target, a legacy mount, or leaving the relay', () => {
+  const attached = { providers: { acme: acmeRoute({ baseURL: TARGET_A_FLEX }) } }
+  const refusal = /already points at the OpenRouter Plus relay .*so the plugin owns it and it cannot be repointed/
+
+  // A different target: that is another owner's mount, so detach first.
+  assert.throws(() => planRepoint(attached, {}, { route: 'acme', baseURL: TARGET_B_FLEX }, RELAY), refusal)
+  // A legacy catalog leg names no target, on either side.
+  assert.throws(
+    () => planRepoint({ providers: { acme: acmeRoute({ baseURL: `${RELAY}/flex/v1` }) } }, {}, { route: 'acme', baseURL: TARGET_A_FLEX }, RELAY),
+    refusal,
+  )
+  assert.throws(() => planRepoint(attached, {}, { route: 'acme', baseURL: `${RELAY}/priority/v1` }, RELAY), refusal)
+  // Off the relay entirely is a restore, never a repoint.
+  assert.throws(() => planRepoint(attached, {}, { route: 'acme', baseURL: ACME }, RELAY), refusal)
+  // planRestore is still that one way back.
+  const restored = planRestore({ providers: { acme: acmeRoute({ baseURL: TARGET_A_FLEX }) } }, {}, { route: 'acme', baseURL: ACME }, RELAY)
+  assert.deepEqual(restored.result, { name: 'acme', from: TARGET_A_FLEX, to: ACME, changed: true })
+  assert.equal(restored.next.providers.acme.baseURL, ACME)
+})
+
+test('repointRoute() retiers an attached provider with exactly one write', async () => {
+  const world = repointWorld({ config: { providers: { acme: acmeRoute({ baseURL: MOUNT }), 'openrouter-custom': sourceRoute() } } })
+  const { bridge } = bridgeFor(world.editor)
+
+  const retiered = await bridge.repointRoute({ route: 'acme', baseURL: TARGET_A_PRIORITY })
+  assert.deepEqual(retiered, { name: 'acme', from: MOUNT, to: TARGET_A_PRIORITY, changed: true })
+  assert.equal(world.edits.length, 1, 'a tier change is one write, not detach + attach')
+  assert.equal(world.edits[0].next.providers.acme.baseURL, TARGET_A_PRIORITY)
+  assert.deepEqual(world.edits[0].next.providers.acme.models, acmeRoute().models)
+  assert.deepEqual(world.edits[0].next.providers['openrouter-custom'], sourceRoute())
+
+  // Back down to the pass-through mount is one write too.
+  const back = await bridge.repointRoute({ route: 'acme', baseURL: TARGET_A })
+  assert.deepEqual(back, { name: 'acme', from: TARGET_A_PRIORITY, to: TARGET_A, changed: true })
+  assert.equal(world.edits.length, 2)
+  assert.equal(world.edits[1].next.providers.acme.baseURL, TARGET_A)
+})
+
+test('describeSources() reports the stored base URL verbatim, mounts included', async () => {
+  const padded = `  ${MOUNT}  `
+  const { editor } = createFakeEditor({
+    config: {
+      providers: {
+        acme: acmeRoute({ baseURL: MOUNT }),
+        padded: acmeRoute({ baseURL: padded }),
+        legacy: acmeRoute({ baseURL: `${RELAY}/priority/v1` }),
+        upstream: acmeRoute(),
+      },
+    },
+  })
+  const [acme, paddedRow, legacy, upstream] = (await bridgeFor(editor).bridge.targets()).sources
+
+  // The Models row strip feeds this to `attach` as `upstream`, so it must be the
+  // value the profile actually holds — never normalised, never rewritten to an origin.
+  assert.equal(acme.baseURL, MOUNT)
+  assert.equal(paddedRow.baseURL, padded, 'stored padding survives; only the truthiness check trims')
+  assert.equal(legacy.baseURL, `${RELAY}/priority/v1`)
+  assert.equal(upstream.baseURL, ACME)
+  // Which is exactly why an attached row is identified by targetId, not by baseURL.
+  assert.equal(acme.targetId, 'acme-gw-9f3a')
+  assert.equal(paddedRow.targetId, 'acme-gw-9f3a')
+  assert.equal(Object.hasOwn(legacy, 'targetId'), false)
+  assert.equal(Object.hasOwn(upstream, 'targetId'), false)
 })

@@ -33,8 +33,13 @@ upstream. Because it only uses schema fields the profile already has, it survive
 - **One-click provider routes** — the page creates a real `llm-pi-ai` route (a clone of an existing
   one, with `baseURL` pointed at a tier mount) so it appears in the model picker like any other
   provider, and removes it again. Routes the plugin did not create are never touched.
+- **A switch on every provider row** — in Settings → Models, each `llm-pi-ai` provider gets a
+  **Route through OpenRouter Plus** checkbox and a service-tier picker. Tick it and that provider's
+  traffic flows through the relay to the endpoint you already gave it; untick it and the endpoint
+  comes back. Your provider entry, protocol, key and models are left exactly as they were.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
-  header verbatim, binds loopback only, and the plugin's rows are additive.
+  header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
+  construction.
 
 ## Install
 
@@ -59,6 +64,47 @@ the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mou
 4. **Remove** the route from the same page when you are done. Its deletion is safe and leaves your
    original route untouched.
 
+### From a provider row (the switch)
+
+In **Settings → Models**, every `llm-pi-ai` provider row carries a compact strip added by this
+plugin: a **Route through OpenRouter Plus** checkbox and, once ticked, a **tier** picker
+(`No tier (pass-through)`, `auto`, `default`, `flex`, `scale`, `priority`, `fast`, `ultrafast`).
+
+Ticking it does three things, all through the control API:
+
+1. records the endpoint that row currently points at (that is your real base URL) as a *target* in
+   this plugin's own config;
+2. gives that target a mount — `http://127.0.0.1:8791/t/<targetId>/<tier>/v1`, or
+   `…/t/<targetId>/v1` when no tier is pinned;
+3. repoints **only** that provider row's `baseURL` at the mount. `api`, `apiKeyEnv`, headers and
+   models are not touched, and no plugin bookkeeping is written into the provider entry (it is
+   schema-validated, so it stays clean).
+
+**The first attach reloads the plugin.** Recording a new target is a write to this plugin's own
+config, so the Loader re-applies the Host row and the listener rebinds — which can cut the HTTP
+response to that very request. It is not a failure: the strip re-probes `/health`, re-reads
+`/targets` and shows the truth, and every write here is idempotent, so a retry lands cleanly. Later
+attaches (a tier change, a detach, a re-attach of a known endpoint) reuse the target row and do not
+reload anything.
+
+What happens to a request: the relay strips the mount prefix, appends the rest of the path to your
+recorded endpoint, and — only when a tier is pinned — writes `service_tier` into the JSON body. With
+**No tier (pass-through)** it forwards the request body untouched, which is what you want for a
+self-hosted gateway that has no notion of OpenRouter tiers.
+
+Untick it (**Detach**) and the row's `baseURL` goes back to the endpoint recorded for that target;
+the mount stays until you remove the target. Everything is idempotent: the same endpoint always maps
+to the same target id, so ticking the box twice cannot fork the table or repoint anything twice.
+
+> **Why the switch is on the row and not inside the add-provider form.** The obvious place for this
+> checkbox is the "Custom model API" form itself. A plugin cannot put it there: the
+> `settings.models.provider-card` extension slot hands an extension `{provider, configured,
+> keyConfigured}` and no setter, the draft Base URL lives in a private `useState` inside the editor,
+> and that card dispatches no extension at all before the provider is saved. The saved row is the
+> earliest surface a plugin can reach — same page, one save later. The same class of limitation is
+> why a re-picked model loses hand-declared fields (tracked upstream as
+> [discussion #11097](https://github.com/deepseek-ai/deepseek-harness/discussions/11097)).
+
 ### By hand
 
 Point any OpenAI-compatible provider route's `baseURL` at a mount:
@@ -81,6 +127,25 @@ Point any OpenAI-compatible provider route's `baseURL` at a mount:
               high: high
               max: max
 ```
+
+Or route a provider to its own endpoint through a target mount — no provider config needed beyond
+the base URL:
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      acme-gateway:
+        api: openai-completions
+        apiKeyEnv: ACME_API_KEY
+        baseURL: http://127.0.0.1:8791/t/acme-gw-9f3a/flex/v1
+        models:
+          - id: acme-large
+```
+
+`/t/<targetId>/<tier>/v1` pins `<tier>`; `/t/<targetId>/v1` pins nothing. The target's endpoint is
+declared once, in the plugin's config (see `targets` below), so one listener can front any number of
+OpenAI- or Anthropic-style endpoints.
 
 ### Reasoning effort on a relay route
 
@@ -121,10 +186,19 @@ Served on the same loopback listener, outside the proxy path space:
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
 | `GET /__openrouter-plus/status` | address, upstream, mounts, metrics |
-| `GET /__openrouter-plus/targets` | source routes + routes this plugin created |
+| `GET /__openrouter-plus/targets` | source routes, routes this plugin created, and the `targets` table |
 | `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
 | `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
+| `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier? }` — record the endpoint and point that provider at the relay |
+| `POST /__openrouter-plus/routes/detach` | `{ route, id }` — put that provider back on its own endpoint |
+| `POST /__openrouter-plus/targets/register` | `{ upstream, tier?, id? }` — record an endpoint without touching a provider |
+| `POST /__openrouter-plus/targets/remove` | `{ id }` — refuse while a provider still routes through it |
+
+`attach`/`detach` are what the Models-page switch calls; both are idempotent and report
+`changed: false` when the row is already in the requested state. A rejected request answers `400`
+with `{ error: { message } }` — for example a body that is not an http(s) URL, or one that points
+back at the relay.
 
 `POST` requires `x-oorp-client: web`. CORS is reflected only for loopback GUI origins.
 
@@ -147,6 +221,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
 | `reasoningEfforts` | `false`-able map | levels written onto created routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
+| `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream, tier } }`, `tier: null` for pass-through. Written by the switch; edit by hand only if you want one without a provider row |
 
 ## Security model
 
@@ -154,7 +229,9 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
   Do not bind a routable interface.
 - **Read-only telemetry.** The status API exposes counts and token sums, never prompts or keys.
 - **Reversible by construction.** The plugin only ever adds a provider route whose `baseURL` points
-  at its own origin, and only removes routes that pass that same test.
+  at its own origin, and only removes routes that pass that same test. The switch is the same idea
+  one level down: the endpoint it took over is recorded in the plugin's config, and **Detach** —
+  or deleting the target — puts it back, so a provider is never left pointing at a dead mount.
 
 ## Troubleshooting
 

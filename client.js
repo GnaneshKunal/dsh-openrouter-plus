@@ -6,6 +6,10 @@
  * shows the tier mounts (with copyable base URLs), the weighted cost signal,
  * provider-route creation, and the most recent relayed requests.
  *
+ * It also answers the `settings.models.provider-card` seat for the `llm-pi-ai` family:
+ * one compact strip per provider row that routes that row through the relay (attach or
+ * detach) without touching the settings card's own draft.
+ *
  * Contract: docs/ARCHITECTURE.md ("client.js"). Plain browser JavaScript: no JSX, no
  * build step, no imports beyond the host React module table.
  */
@@ -35,6 +39,25 @@ window.__ModuleLoader__.load({
     const COPY_FEEDBACK_MS = 1600;
     const NOTICE_MS = 5000;
     const RECENT_LIMIT = 5;
+
+    /**
+     * The adapter family whose Models rows this plugin extends. The Models page
+     * dispatches `settings.models.provider-card` with the row's settings namespace as
+     * the key, so this constant is both our registration key and our filter.
+     */
+    const PI_AI_NS = 'llm-pi-ai';
+
+    /** Tier choices the relay accepts for an attached provider (`''` = pass-through). */
+    const ATTACH_TIERS = Object.freeze(['', 'auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']);
+
+    /**
+     * Attaching writes our target table first, which makes the Loader re-apply this
+     * plugin and restart the listener, so the HTTP response itself can be cut. These
+     * are the gaps used while re-reading the truth; an attach whose target already
+     * exists is idempotent, which makes the one retry safe.
+     */
+    const RECONCILE_DELAYS_MS = Object.freeze([350, 450, 550]);
+    const MUTATION_TIMEOUT_MS = 6000;
 
     /** Accepted tiers when the relay has not reported a mount list yet. */
     const TIER_FALLBACK = Object.freeze(['flex', 'scale', 'auto', 'priority', 'fast', 'ultrafast']);
@@ -164,6 +187,19 @@ window.__ModuleLoader__.load({
       'providers.noticeRepairNoop': 'Every shown model already has effort levels.',
       'providers.noticeRepairUnresolved': 'Nothing could be inferred automatically; models needing a hand-written map: {count}.',
 
+      'strip.groupAria': 'OpenRouter Plus routing for {name}',
+      'strip.route': 'Route through OpenRouter Plus',
+      'strip.routed': 'Routed via OpenRouter Plus',
+      'strip.tierAria': 'Service tier for {name}',
+      'strip.tierNone': 'No tier (pass-through)',
+      'strip.apply': 'Route requests',
+      'strip.applying': 'Routing\u2026',
+      'strip.detach': 'Detach',
+      'strip.detaching': 'Restoring\u2026',
+      'strip.detachAria': 'Detach {name} from OpenRouter Plus',
+      'strip.tierHint': 'Tiers only apply to endpoints that accept an OpenAI-style service_tier (OpenRouter itself, and some compatible gateways).',
+      'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
+
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
       'recent.column.tier': 'Tier',
@@ -277,6 +313,19 @@ window.__ModuleLoader__.load({
       'providers.noticeRepairedUnresolved': '仍需手写映射的模型：{count} 个。',
       'providers.noticeRepairNoop': '当前显示的模型都已有强度档位。',
       'providers.noticeRepairUnresolved': '无法自动推断；仍需手写映射的模型：{count} 个。',
+
+      'strip.groupAria': '{name} 的 OpenRouter Plus 转发',
+      'strip.route': '通过 OpenRouter Plus 转发',
+      'strip.routed': '已通过 OpenRouter Plus 转发',
+      'strip.tierAria': '{name} 的服务等级',
+      'strip.tierNone': '无等级（直通）',
+      'strip.apply': '开始转发',
+      'strip.applying': '正在转发\u2026',
+      'strip.detach': '解除',
+      'strip.detaching': '正在恢复\u2026',
+      'strip.detachAria': '将 {name} 从 OpenRouter Plus 解除',
+      'strip.tierHint': '服务等级只对接受 OpenAI service_tier 的端点生效（如 OpenRouter 本身及部分兼容网关）。',
+      'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -449,6 +498,88 @@ window.__ModuleLoader__.load({
 
     function httpError(t, status) {
       return new Error(t('error.http', { status: String(status) }));
+    }
+
+    /** A JSON body, or null when the response carried none (a reload can cut it). */
+    function readJsonSafe(response) {
+      try {
+        return response.json();
+      } catch (error) {
+        return Promise.resolve(null);
+      }
+    }
+
+    /** Resolve after `ms`, or as soon as `signal` aborts (unmount tears waits down). */
+    function sleepUntil(ms, signal) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        if (signal === undefined || signal === null) return;
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    }
+
+    /** A trimmed absolute http(s) URL, or '' when the value is not usable as one. */
+    function absoluteHttpURL(value) {
+      const text = stringValue(value).trim();
+      if (text === '') return '';
+      try {
+        const parsed = new URL(text);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+        if (parsed.hostname === '') return '';
+        return text;
+      } catch (error) {
+        return '';
+      }
+    }
+
+    /** The `/targets` source row for one provider route, or null. */
+    function providerSourceOf(data, route) {
+      if (!isPlainObject(data) || !Array.isArray(data.sources)) return null;
+      for (const entry of data.sources) {
+        if (isPlainObject(entry) && entry.key === route) return entry;
+      }
+      return null;
+    }
+
+    /**
+     * The target this card attached to a provider route, or null. The route link is
+     * derived by the relay; matching the source's base URL is the fallback for a
+     * payload that predates `route`.
+     */
+    function relayTargetOf(data, route) {
+      if (!isPlainObject(data) || !Array.isArray(data.custom) || route === '') return null;
+      for (const entry of data.custom) {
+        if (isPlainObject(entry) && entry.id !== '' && entry.route === route) return entry;
+      }
+      const source = providerSourceOf(data, route);
+      if (source === null || source.baseURL === '') return null;
+      for (const entry of data.custom) {
+        if (isPlainObject(entry) && entry.id !== '' && entry.baseURL === source.baseURL) return entry;
+      }
+      return null;
+    }
+
+    /**
+     * A relay-backed route that has no target of ours (a route created by this page),
+     * as `{ tier }`, or null. Those rows have nothing to detach: removing the route on
+     * the OpenRouter Plus page is the inverse.
+     */
+    function relayRouteOf(data, route) {
+      const source = providerSourceOf(data, route);
+      if (source !== null && source.attachedTier !== null) return { tier: source.attachedTier };
+      if (isPlainObject(data) && Array.isArray(data.created)) {
+        for (const entry of data.created) {
+          if (isPlainObject(entry) && entry.name === route) return { tier: entry.tier };
+        }
+      }
+      return null;
     }
 
     /* ------------------------------------------------------------------ normalizers */
@@ -627,6 +758,26 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /* Targets this card attached to a provider row. `route` names the row that
+         currently points here, when one does; `id` is what detach needs. */
+      const custom = [];
+      if (Array.isArray(payload.custom)) {
+        for (const entry of payload.custom) {
+          if (!isPlainObject(entry)) continue;
+          const id = stringValue(entry.id).trim();
+          if (id === '') continue;
+          const tier = stringValue(entry.tier).trim();
+          custom.push({
+            id,
+            upstream: stringValue(entry.upstream).trim(),
+            tier: tier === '' ? null : tier,
+            mount: stringValue(entry.mount).trim(),
+            baseURL: stringValue(entry.baseURL).trim(),
+            route: stringValue(entry.route).trim(),
+          });
+        }
+      }
+
       let reasoning = null;
       if (isPlainObject(payload.reasoning)) {
         const fill = stringValue(payload.reasoning.fill).trim();
@@ -647,6 +798,7 @@ window.__ModuleLoader__.load({
         reason: stringValue(payload.reason).trim(),
         sources,
         created,
+        custom,
         reasoning,
       };
     }
@@ -947,6 +1099,51 @@ window.__ModuleLoader__.load({
       marginTop: '2px',
       borderTop: '1px solid ' + COLORS.border,
     };
+
+    /* Provider-row strip: compact enough to sit between a row head and its editor. */
+    const STRIP_STYLE = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '4px 10px',
+      minWidth: 0,
+      margin: '2px 0 8px',
+      color: COLORS.secondary,
+      font: FONTS.small,
+    };
+
+    const STRIP_LABEL_STYLE = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: 0,
+      color: COLORS.primary,
+      font: FONTS.small,
+      cursor: 'pointer',
+    };
+
+    const STRIP_STATUS_STYLE = {
+      display: 'inline-flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: 0,
+      color: COLORS.secondary,
+      font: FONTS.small,
+    };
+
+    const STRIP_CHOOSER_STYLE = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '4px 10px',
+      flex: '1 0 100%',
+      minWidth: 0,
+      paddingTop: '6px',
+      borderTop: '1px solid ' + COLORS.border,
+    };
+
+    const STRIP_HINT_STYLE = { margin: 0, flexBasis: '100%', color: COLORS.secondary, font: FONTS.tiny };
 
     function dotStyle(connection) {
       const color =
@@ -2030,6 +2227,504 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* ------------------------------------------------------ provider-row extension */
+
+    /**
+     * Shared `/targets` reader for the provider-row strips. Every row mounts with the
+     * settings page, so they all read one snapshot; writes re-read the truth instead of
+     * trusting the response, because an attach can restart the relay mid-request.
+     */
+    function createTargetsFeed() {
+      let state = { status: 'idle', origin: null, data: null };
+      const listeners = new Set();
+      const controllers = new Set();
+      let inflight = null;
+
+      const broadcast = (next) => {
+        state = next;
+        for (const listener of listeners) {
+          try {
+            listener();
+          } catch (error) {
+            /* one strip must never break its siblings */
+          }
+        }
+      };
+
+      const abortAll = () => {
+        for (const controller of controllers) {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already settled */
+          }
+        }
+        controllers.clear();
+      };
+
+      const request = async (url, timeoutMs) => {
+        const controller = new AbortController();
+        controllers.add(controller);
+        const timer = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already settled */
+          }
+        }, timeoutMs);
+        try {
+          return await fetch(url, {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+          controllers.delete(controller);
+        }
+      };
+
+      /** First documented origin that answers `/health`; `quick` keeps a retry cheap. */
+      const probe = async (preferred, quick) => {
+        const candidates = [];
+        if (typeof preferred === 'string' && preferred !== '') candidates.push(preferred);
+        const rest = quick === true ? DEFAULT_ORIGINS.slice(0, 1) : DEFAULT_ORIGINS;
+        for (const origin of rest) {
+          if (candidates.indexOf(origin) < 0) candidates.push(origin);
+        }
+        for (const origin of candidates) {
+          try {
+            const response = await request(origin + CONTROL_PREFIX + '/health', PROBE_TIMEOUT_MS);
+            if (!response.ok) continue;
+            const payload = await readJsonSafe(response);
+            if (isPlainObject(payload) && payload.ok !== false) return origin;
+          } catch (error) {
+            /* try the next documented port */
+          }
+        }
+        return null;
+      };
+
+      /** `/targets` when the relay is usable for this extension, else null. */
+      const readTargets = async (origin) => {
+        try {
+          const response = await request(origin + CONTROL_PREFIX + '/targets', STATUS_TIMEOUT_MS);
+          if (!response.ok) return null;
+          const data = normalizeTargets(await readJsonSafe(response));
+          if (data === null || data.available !== true) return null;
+          return data;
+        } catch (error) {
+          return null;
+        }
+      };
+
+      const load = () => {
+        if (inflight !== null) return inflight;
+        inflight = (async () => {
+          broadcast({ status: state.data === null ? 'loading' : 'ready', origin: state.origin, data: state.data });
+          try {
+            const origin = await probe(state.origin, false);
+            if (origin === null) {
+              broadcast({ status: 'unavailable', origin: null, data: null });
+              return null;
+            }
+            const data = await readTargets(origin);
+            if (data === null) {
+              broadcast({ status: 'unavailable', origin: null, data: null });
+              return null;
+            }
+            broadcast({ status: 'ready', origin: origin, data: data });
+            return { origin: origin, data: data };
+          } catch (error) {
+            broadcast({ status: 'unavailable', origin: null, data: null });
+            return null;
+          } finally {
+            inflight = null;
+          }
+        })();
+        return inflight;
+      };
+
+      return {
+        subscribe(listener) {
+          listeners.add(listener);
+          if (listeners.size === 1) void load();
+          return () => {
+            listeners.delete(listener);
+            if (listeners.size > 0) return;
+            abortAll();
+            inflight = null;
+          };
+        },
+        snapshot() {
+          return state;
+        },
+        publish(origin, data) {
+          broadcast({ status: 'ready', origin: origin, data: data });
+        },
+        probe,
+        readTargets,
+      };
+    }
+
+    /** Hard stop for the strip: a thrown render must leave the provider card intact. */
+    class StripBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { failed: false };
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      componentDidCatch(error, info) {
+        try {
+          if (typeof console !== 'undefined' && typeof console.error === 'function') {
+            console.error('[dsh-openrouter-plus] provider-row strip render failed', error, info);
+          }
+        } catch (ignored) {
+          /* logging must never throw out of an error boundary */
+        }
+      }
+
+      render() {
+        return this.state.failed === true ? null : this.props.children;
+      }
+    }
+
+    /**
+     * One provider row's relay switch. Rendered by the Models page for every saved row;
+     * it answers only for the `llm-pi-ai` family and renders null for everything else,
+     * when the relay is unreachable, and when the row has no usable upstream.
+     */
+    function ProviderRouteStrip(props) {
+      const t = props.t;
+      const feed = props.feed;
+      const provider = isPlainObject(props.provider) ? props.provider : null;
+      const route = provider === null ? '' : stringValue(provider.provider).trim();
+      const isPiAi = provider !== null && stringValue(provider.settingsNs).trim() === PI_AI_NS;
+
+      const [feedState, setFeedState] = React.useState(() => feed.snapshot());
+      const [chooserOpen, setChooserOpen] = React.useState(false);
+      const [tier, setTier] = React.useState('');
+      const [pending, setPending] = React.useState(null);
+      const [error, setError] = React.useState('');
+
+      const aliveRef = React.useRef(true);
+      const lifetimeRef = React.useRef(null);
+      const actionControllerRef = React.useRef(null);
+
+      React.useEffect(() => {
+        aliveRef.current = true;
+        const lifetime = new AbortController();
+        lifetimeRef.current = lifetime;
+        return () => {
+          aliveRef.current = false;
+          try {
+            lifetime.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+          lifetimeRef.current = null;
+          if (actionControllerRef.current !== null) {
+            try {
+              actionControllerRef.current.abort();
+            } catch (error) {
+              /* already settled */
+            }
+            actionControllerRef.current = null;
+          }
+        };
+      }, []);
+
+      /* Rows of other adapters never read the relay: they must stay untouched guests. */
+      React.useEffect(() => {
+        if (!isPiAi) return undefined;
+        return feed.subscribe(() => setFeedState(feed.snapshot()));
+      }, [feed, isPiAi]);
+
+      /* The owner hands us a fresh directory object on every snapshot: derive the draft
+         from the row's id, never from object identity, and drop local state when the row
+         changes underneath us. */
+      React.useEffect(() => {
+        setChooserOpen(false);
+        setTier('');
+        setPending(null);
+        setError('');
+      }, [route]);
+
+      const data = feedState.data;
+      if (!isPiAi || provider === null || route === '' || data === null) return null;
+
+      const source = providerSourceOf(data, route);
+      const own = relayTargetOf(data, route);
+      const routed = own === null ? relayRouteOf(data, route) : null;
+      /* Upstream to remember: the live row wins, then the adapter's default. A catalog row
+         reports an empty baseURL (it resolves one from the installed catalog or an env
+         var), and the default is the only endpoint the strip can honestly offer; a row
+         with neither has nothing to repoint and renders no switch. */
+      const storedUpstream = source === null ? '' : absoluteHttpURL(source.baseURL);
+      const upstream =
+        storedUpstream !== '' ? storedUpstream : absoluteHttpURL(stringValue(provider.defaultBaseURL));
+      const name = stringValue(provider.displayName).trim() || route;
+      const groupAria = t('strip.groupAria', { name: name });
+
+      /*
+       * Re-read the truth after a write. The first attempt after a cut usually lands on a
+       * listener that is still rebinding, so retry with small gaps; each attempt is
+       * cheap: `/health` then `/targets` on the origin that answered.
+       */
+      const reconcile = async () => {
+        const gaps = RECONCILE_DELAYS_MS;
+        for (let attempt = 0; attempt < gaps.length; attempt += 1) {
+          await sleepUntil(gaps[attempt], lifetimeRef.current === null ? null : lifetimeRef.current.signal);
+          if (!aliveRef.current) return null;
+          const origin = await feed.probe(feedState.origin, attempt < gaps.length - 1);
+          if (!aliveRef.current) return null;
+          if (origin === null) continue;
+          const next = await feed.readTargets(origin);
+          if (!aliveRef.current) return null;
+          if (next !== null) return { origin: origin, data: next };
+        }
+        return null;
+      };
+
+      /** An aborted write is the relay reloading, not a verdict; say so plainly. */
+      const mutationMessage = (error) => (error && error.name === 'AbortError' ? t('strip.stalled') : errorMessage(t, error));
+
+      const post = async (kind, body, explicitOrigin) => {
+        const origin = explicitOrigin === undefined ? feedState.origin : explicitOrigin;
+        if (origin === null || origin === undefined) throw new Error(t('offline.noReason'));
+        const controller = new AbortController();
+        actionControllerRef.current = controller;
+        const timer = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already settled */
+          }
+        }, MUTATION_TIMEOUT_MS);
+        try {
+          const response = await fetch(origin + CONTROL_PREFIX + '/routes/' + kind, {
+            method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: {
+              accept: 'application/json',
+              'content-type': 'application/json',
+              'x-oorp-client': CLIENT_HEADER,
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+          const payload = await readJsonSafe(response);
+          if (!response.ok) {
+            const message = payloadErrorMessage(payload);
+            throw new Error(message === '' ? t('error.http', { status: String(response.status) }) : message);
+          }
+          return payload;
+        } finally {
+          clearTimeout(timer);
+          if (actionControllerRef.current === controller) actionControllerRef.current = null;
+        }
+      };
+
+      /* Render the state the relay reports, never the intent: a rejected or cut call can
+         still have changed the config, so the re-read decides between success and error. */
+      const attach = async () => {
+        if (pending !== null || upstream === '') return;
+        const body = { route: route, upstream: upstream, tier: tier };
+        setPending('attach');
+        setError('');
+        let failure = '';
+        try {
+          await post('attach', body);
+        } catch (exception) {
+          failure = mutationMessage(exception);
+        }
+        let found = await reconcile();
+        let backed = found !== null && relayTargetOf(found.data, route) !== null;
+        if (found !== null) feed.publish(found.origin, found.data);
+        if (!backed) {
+          /* The target write already landed, so this second attempt reuses it without
+             touching our config again (no reload) and normally completes cleanly. The
+             relay may have rebounded to another documented port, so aim at the origin
+             the re-read just found. */
+          try {
+            await post('attach', body, found === null ? undefined : found.origin);
+          } catch (exception) {
+            failure = mutationMessage(exception);
+          }
+          found = await reconcile();
+          if (found !== null) feed.publish(found.origin, found.data);
+          backed = found !== null && relayTargetOf(found.data, route) !== null;
+        }
+        if (!aliveRef.current) return;
+        if (backed) {
+          /* The row is routed now, so the local chooser starts over next time it opens:
+             a detach/attach cycle must not silently reuse the last tier. */
+          setChooserOpen(false);
+          setTier('');
+          setError('');
+        } else {
+          setChooserOpen(false);
+          setError(t('providers.actionFailed', { message: failure !== '' ? failure : t('strip.stalled') }));
+        }
+        setPending(null);
+      };
+
+      /* Detach restores the row instead of deleting the target: the endpoint stays
+         registered for a later re-attach, so success means this route no longer links
+         to one. A re-read that cannot reach the relay is "unknown" — one idempotent
+         retry, then the error line. */
+      const detach = async () => {
+        if (pending !== null || own === null) return;
+        const body = { route: route, id: own.id };
+        setPending('detach');
+        setError('');
+        let failure = '';
+        try {
+          await post('detach', body);
+        } catch (exception) {
+          failure = mutationMessage(exception);
+        }
+        let found = await reconcile();
+        let attached = found === null || relayTargetOf(found.data, route) !== null;
+        if (found !== null) feed.publish(found.origin, found.data);
+        if (attached) {
+          try {
+            await post('detach', body, found === null ? undefined : found.origin);
+          } catch (exception) {
+            failure = mutationMessage(exception);
+          }
+          found = await reconcile();
+          if (found !== null) feed.publish(found.origin, found.data);
+          attached = found === null || relayTargetOf(found.data, route) !== null;
+        }
+        if (!aliveRef.current) return;
+        if (attached) {
+          setError(t('providers.actionFailed', { message: failure !== '' ? failure : t('strip.stalled') }));
+        } else {
+          setChooserOpen(false);
+          setTier('');
+          setError('');
+        }
+        setPending(null);
+      };
+
+      const errorLine = error === '' ? null : h('p', { role: 'alert', style: ALERT_STYLE }, error);
+
+      if (own !== null) {
+        return h(
+          'div',
+          {
+            role: 'group',
+            'aria-label': groupAria,
+            'aria-busy': pending === null ? undefined : 'true',
+            style: STRIP_STYLE,
+          },
+          h(
+            'span',
+            { role: 'status', 'aria-live': 'polite', style: STRIP_STATUS_STYLE },
+            h('span', null, t('strip.routed')),
+            h('span', { style: BADGE_STYLE }, own.tier === null ? t('mounts.passthrough') : own.tier),
+          ),
+          errorLine,
+          h(ActionButton, {
+            label: pending === 'detach' ? t('strip.detaching') : t('strip.detach'),
+            ariaLabel: t('strip.detachAria', { name: name }),
+            disabled: pending !== null,
+            onClick: () => {
+              void detach();
+            },
+          }),
+        );
+      }
+
+      if (routed !== null) {
+        return h(
+          'div',
+          { role: 'group', 'aria-label': groupAria, style: STRIP_STYLE },
+          h(
+            'span',
+            { role: 'status', 'aria-live': 'polite', style: STRIP_STATUS_STYLE },
+            h('span', null, t('strip.routed')),
+            h('span', { style: BADGE_STYLE }, routed.tier === null ? t('mounts.passthrough') : routed.tier),
+          ),
+          errorLine,
+        );
+      }
+
+      /* No stored row and no default: there is nothing this extension can repoint, and an
+         attach would need a route the config does not have yet. */
+      if (source === null || upstream === '') return null;
+
+      const options = ATTACH_TIERS.map((value) => ({
+        value: value,
+        label:
+          value === ''
+            ? t('strip.tierNone')
+            : t('providers.tierOption', {
+                tier: value,
+                multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
+              }),
+      }));
+
+      const ticked = chooserOpen || pending === 'attach';
+
+      return h(
+        'div',
+        {
+          role: 'group',
+          'aria-label': groupAria,
+          'aria-busy': pending === null ? undefined : 'true',
+          style: STRIP_STYLE,
+        },
+        h(
+          'label',
+          { style: STRIP_LABEL_STYLE },
+          h('input', {
+            type: 'checkbox',
+            checked: ticked,
+            disabled: pending !== null,
+            style: { margin: 0 },
+            onChange: (event) => {
+              const next = event.target.checked === true;
+              setChooserOpen(next);
+              if (!next) setTier('');
+              if (error !== '') setError('');
+            },
+          }),
+          h('span', null, t('strip.route')),
+        ),
+        errorLine,
+        chooserOpen || pending === 'attach'
+          ? h(
+              'div',
+              { style: STRIP_CHOOSER_STYLE },
+              h(TierSelect, {
+                value: tier,
+                ariaLabel: t('strip.tierAria', { name: name }),
+                disabled: pending !== null,
+                options: options,
+                onChange: (value) => setTier(value),
+              }),
+              h(ActionButton, {
+                label: pending === 'attach' ? t('strip.applying') : t('strip.apply'),
+                disabled: pending !== null,
+                onClick: () => {
+                  void attach();
+                },
+              }),
+              h('p', { style: STRIP_HINT_STYLE }, t('strip.tierHint')),
+            )
+          : null,
+      );
+    }
+
     /* -------------------------------------------------------------------- plugin */
 
     return {
@@ -2058,6 +2753,29 @@ window.__ModuleLoader__.load({
           ctx.slots.register(
             { name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') },
             OpenRouterPlusPage,
+          ),
+        );
+
+        /*
+         * The Models page dispatches `settings.models.provider-card` once per provider card,
+         * keyed by the row's settings namespace. We answer only for `llm-pi-ai`, so the
+         * strip appears on that family's rows and nowhere else; the seat itself is declared
+         * by the Models section, which is mounted independently of our own page.
+         */
+        const targetsFeed = createTargetsFeed();
+
+        function ProviderRouteExtension(ownerProps) {
+          return h(
+            StripBoundary,
+            null,
+            h(ProviderRouteStrip, Object.assign({}, ownerProps, { t: t, feed: targetsFeed })),
+          );
+        }
+
+        ctx.slots.inject('settings.models.provider-card', () =>
+          ctx.slots.register(
+            { name: 'settings.models.provider-card', key: PI_AI_NS },
+            ProviderRouteExtension,
           ),
         );
       },
