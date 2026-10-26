@@ -69,6 +69,15 @@ test('normalizeConfig applies defaults and rejects nonsense', () => {
   assert.equal(custom.routes['/flex/v1'], 'flex', 'mounts are normalised and tiers lowercased')
 
   assert.deepEqual(normalizeRoutes({}), normalizeConfig(undefined).routes, 'an empty map keeps the defaults')
+
+  // Reasoning filling: `false` disables it, absent means evidence-only, a map is
+  // the blanket fallback. Unknown levels and blank wires are dropped.
+  assert.equal(normalizeConfig(undefined).reasoningEfforts, null)
+  assert.equal(normalizeConfig({ reasoningEfforts: false }).reasoningEfforts, false)
+  assert.deepEqual(
+    normalizeConfig({ reasoningEfforts: { off: null, low: 'low', medium: '   ', bogus: 'x' } }).reasoningEfforts,
+    { off: null, low: 'low' },
+  )
 })
 
 test('boots the relay, serves control endpoints, and stops cleanly', async () => {
@@ -98,7 +107,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.1.0')
+  assert.equal(health.version, '0.2.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -129,6 +138,19 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   assert.equal(targets.available, false)
   assert.deepEqual(targets.sources, [])
   assert.ok(targets.reason.includes('configEditor'))
+
+  // the repair endpoint answers to the same guard: no header, no write
+  const unguardedRepair = await fetch(`${origin}/__openrouter-plus/routes/repair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  })
+  assert.equal(unguardedRepair.status, 403)
+  const guardedRepair = await fetch(`${origin}/__openrouter-plus/routes/repair`, {
+    method: 'POST',
+    headers: { 'x-oorp-client': 'web' },
+  })
+  assert.equal(guardedRepair.status, 500, 'without configEditor a repair fails loudly')
+  assert.match((await guardedRepair.json()).error.message, /configuration editor is not available/i)
 
   // a guarded create with no configEditor fails loudly instead of silently
   const create = await fetch(`${origin}/__openrouter-plus/routes/create`, {

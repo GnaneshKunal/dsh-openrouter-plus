@@ -37,5 +37,24 @@
           /default/v1: default
           /v1: null
 
+        # Reasoning levels written onto every model of a route this plugin creates.
+        #
+        # A relay route is a provider key the installed catalog has never seen, so
+        # pi-ai cannot inherit a model's reasoning capability for it: without this
+        # field the composer shows no effort selector ("This model provides no
+        # reasoning effort levels"). Models that already declare their own map —
+        # in the source route, or as another variant of the same id such as
+        # `vendor/model:flex` — are never overwritten; this map is the fallback
+        # for the rest.
+        #
+        # false disables filling entirely. Omit the key to fill only from evidence
+        # already present in the profile.
+        reasoningEfforts:
+          off: null
+          low: low
+          medium: medium
+          high: high
+          max: max
+
         # 0 disables the upstream timeout, which is what long SSE completions need.
         upstreamTimeoutMs: 0

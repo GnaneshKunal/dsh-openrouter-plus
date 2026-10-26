@@ -77,12 +77,13 @@ function contextFor(editor) {
   return { get: (key) => (key === 'configEditor' ? editor : undefined), configEditor: editor }
 }
 
-function bridgeFor(editor, { tiers = TIERS, origin = () => ({ host: '127.0.0.1', port: 8791 }), log } = {}) {
+function bridgeFor(editor, { tiers = TIERS, origin = () => ({ host: '127.0.0.1', port: 8791 }), log, reasoningEfforts } = {}) {
   const logged = []
   const bridge = createConfigBridge({
     ctx: editor === null ? { get: () => undefined } : contextFor(editor),
     origin,
     tiers,
+    reasoningEfforts,
     log: (level, message, detail) => {
       logged.push([level, message, detail])
       if (log) log(level, message, detail)
@@ -213,6 +214,8 @@ test('targets() lists the running routes with counts and marks relay-attached ti
       tier: 'flex',
       baseURL: `${RELAY}/flex/v1`,
       modelCount: 2,
+      missingReasoning: 2,
+      missingReasoning: 2,
     },
   ])
 })
@@ -238,6 +241,7 @@ test('targets() attributes a custom-named relay route through its display name',
     tier: 'priority',
     baseURL: `${RELAY}/priority/v1`,
     modelCount: 2,
+    missingReasoning: 2,
   })
 })
 
@@ -279,6 +283,7 @@ test('targets() reports the inherited layer when the row has no config of its ow
       tier: 'flex',
       baseURL: `${RELAY}/flex/v1`,
       modelCount: 2,
+      missingReasoning: 2,
     },
   ])
 })
@@ -294,6 +299,12 @@ test('createRoute() clones the source route for the relay under the default name
     baseURL: `${RELAY}/flex/v1`,
     source: 'openrouter-custom',
     tier: 'flex',
+    // The fixtures declare no reasoningEfforts anywhere, so evidence-only
+    // filling adds nothing and reports every model as still unresolved.
+    reasoning: {
+      filled: [],
+      unresolved: ['deepseek/deepseek-v4-flash-0731', 'google/gemini-3.8-flash'],
+    },
   })
   assert.equal(edits.length, 1)
 
@@ -512,6 +523,7 @@ test('removeRoute() refuses a route the plugin did not create', async () => {
       tier: 'flex',
       baseURL: `${RELAY}/flex/v1`,
       modelCount: 2,
+      missingReasoning: 2,
     },
   ])
 })
@@ -661,6 +673,198 @@ test('listRoutes() reports only plugin-owned routes', async () => {
       tier: 'flex',
       baseURL: `${RELAY}/flex/v1`,
       modelCount: 2,
+      missingReasoning: 2,
     },
   ])
+})
+
+// ---------------------------------------------------------------------------
+// reasoning capability
+// ---------------------------------------------------------------------------
+
+const EFFORTS = { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }
+
+test('createRoute() carries a capability the source models already declare', async () => {
+  const source = sourceRoute({
+    models: [{ id: 'google/gemini-4-argon:flex', name: 'Gemini 4 Argon', reasoningEfforts: { off: null, medium: 'medium' } }],
+  })
+  const { editor, edits } = createFakeEditor({ config: { providers: { 'openrouter-custom': source } } })
+  const { bridge } = bridgeFor(editor)
+
+  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
+  // Nothing to fill: the clone already carries the declaration verbatim.
+  assert.deepEqual(result.reasoning, { filled: [], unresolved: [] })
+
+  // The clone keeps the declaration it inherited from the source models.
+  const created = edits[0].next.providers['openrouter-custom-flex']
+  assert.deepEqual(created.models[0].reasoningEfforts, { off: null, medium: 'medium' })
+  assert.deepEqual(edits[0].next.providers['openrouter-custom'], source, 'the source route is untouched')
+})
+
+test('createRoute() fills from the configured fallback map when nothing can be inferred', async () => {
+  const { editor, edits } = openRouterWorld()
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
+
+  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
+  assert.deepEqual(result.reasoning, {
+    filled: [
+      { id: 'deepseek/deepseek-v4-flash-0731', from: 'default' },
+      { id: 'google/gemini-3.8-flash', from: 'default' },
+    ],
+    unresolved: [],
+  })
+  const created = edits[0].next.providers['openrouter-custom-flex']
+  assert.deepEqual(created.models.map((model) => model.reasoningEfforts), [EFFORTS, EFFORTS])
+})
+
+test('createRoute() leaves models alone when filling is disabled', async () => {
+  const { editor, edits } = openRouterWorld()
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: false })
+
+  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
+  assert.deepEqual(result.reasoning.filled, [])
+  assert.deepEqual(result.reasoning.unresolved, [
+    'deepseek/deepseek-v4-flash-0731',
+    'google/gemini-3.8-flash',
+  ])
+  const created = edits[0].next.providers['openrouter-custom-flex']
+  assert.equal(created.models[0].reasoningEfforts, undefined)
+})
+
+test('createRoute() never overwrites a capability the model already declares', async () => {
+  const source = sourceRoute({
+    models: [{ id: 'vendor/one', reasoningEfforts: { off: null, max: 'max' } }],
+  })
+  const { editor, edits } = createFakeEditor({ config: { providers: { 'openrouter-custom': source } } })
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
+
+  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
+  assert.deepEqual(result.reasoning, { filled: [], unresolved: [] })
+  assert.deepEqual(edits[0].next.providers['openrouter-custom-flex'].models[0].reasoningEfforts, {
+    off: null,
+    max: 'max',
+  })
+})
+
+test('targets() counts the models a repair would fix', async () => {
+  const { editor } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-custom': sourceRoute({
+          models: [
+            { id: 'vendor/declared', reasoningEfforts: EFFORTS },
+            { id: 'vendor/missing' },
+            { id: 'vendor/missing-too' },
+          ],
+        }),
+        'openrouter-flex': sourceRoute({
+          baseURL: `${RELAY}/flex/v1`,
+          models: [{ id: 'vendor/declared', reasoningEfforts: EFFORTS }, { id: 'vendor/missing' }],
+        }),
+      },
+    },
+  })
+  const { bridge } = bridgeFor(editor)
+  const { created } = await bridge.targets()
+  assert.deepEqual(created.map((route) => route.missingReasoning), [1])
+})
+
+test('repairRoutes() fills owned routes only and reports what it could not infer', async () => {
+  const { editor, edits } = createFakeEditor({
+    config: {
+      providers: {
+        // A hand-written route pointing upstream: never touched.
+        'openrouter-custom': sourceRoute({
+          models: [{ id: 'vendor/source-only' }],
+        }),
+        // Owned, one declared + two missing, one of which has a variant sibling.
+        'openrouter-flex': sourceRoute({
+          displayName: 'openrouter-custom (flex) — OpenRouter Plus',
+          baseURL: `${RELAY}/flex/v1`,
+          models: [
+            { id: 'vendor/declared', reasoningEfforts: { off: null, high: 'high' } },
+            { id: 'google/gemini-4-argon:flex' },
+            { id: 'vendor/no-evidence' },
+          ],
+        }),
+      },
+      inherited: {},
+    },
+  })
+  // Evidence for the sibling variant lives on another owned route.
+  editor.state.config.providers['openrouter-priority'] = sourceRoute({
+    baseURL: `${RELAY}/priority/v1`,
+    models: [{ id: 'google/gemini-4-argon', reasoningEfforts: { off: null, low: 'low' } }],
+  })
+  editor.entry.options.config = clone(editor.state.config)
+
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
+  const result = await bridge.repairRoutes()
+
+  assert.equal(result.changed, true)
+  assert.deepEqual(result.owned.sort(), ['openrouter-flex', 'openrouter-priority'])
+  assert.deepEqual(result.patched, [
+    {
+      name: 'openrouter-flex',
+      models: [
+        { id: 'google/gemini-4-argon:flex', from: 'variant' },
+        { id: 'vendor/no-evidence', from: 'default' },
+      ],
+    },
+  ])
+  assert.deepEqual(result.unresolved, [])
+
+  const patched = edits[0].next.providers['openrouter-flex']
+  assert.deepEqual(patched.models[0].reasoningEfforts, { off: null, high: 'high' }, 'declared maps are kept verbatim')
+  assert.deepEqual(patched.models[1].reasoningEfforts, { off: null, low: 'low' })
+  assert.deepEqual(patched.models[2].reasoningEfforts, EFFORTS)
+
+  // The hand-written route is byte-identical.
+  assert.deepEqual(edits[0].next.providers['openrouter-custom'], editor.state.config.providers['openrouter-custom'])
+})
+
+test('repairRoutes() writes nothing when every owned model already declares a capability', async () => {
+  const { editor, edits } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-flex': sourceRoute({
+          baseURL: `${RELAY}/flex/v1`,
+          models: [{ id: 'vendor/one', reasoningEfforts: EFFORTS }],
+        }),
+      },
+    },
+  })
+  const { bridge, logged } = bridgeFor(editor)
+  const result = await bridge.repairRoutes()
+
+  assert.deepEqual(result.patched, [])
+  assert.equal(result.changed, false)
+  assert.equal(edits.length, 0, 'a no-op repair must not rewrite the profile')
+  assert.ok(logged.some(([level, message]) => level === 'debug' && /no-op/.test(message)))
+})
+
+test('repairRoutes() reports an unrepairable model instead of inventing a capability', async () => {
+  const { editor, edits } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-flex': sourceRoute({
+          baseURL: `${RELAY}/flex/v1`,
+          models: [{ id: 'vendor/one' }],
+        }),
+      },
+    },
+  })
+  // Filling disabled: nothing may be written, and the gap is reported instead.
+  const { bridge } = bridgeFor(editor, { reasoningEfforts: false })
+  const disabled = await bridge.repairRoutes()
+  assert.deepEqual(disabled.patched, [])
+  assert.deepEqual(disabled.unresolved, [{ name: 'openrouter-flex', model: 'vendor/one' }])
+  assert.equal(edits.length, 0)
+
+  // Evidence-only filling has no evidence for this id either.
+  const { bridge: evidenceOnly } = bridgeFor(editor)
+  const unresolved = await evidenceOnly.repairRoutes()
+  assert.deepEqual(unresolved.patched, [])
+  assert.deepEqual(unresolved.unresolved, [{ name: 'openrouter-flex', model: 'vendor/one' }])
+  assert.equal(edits.length, 0)
 })

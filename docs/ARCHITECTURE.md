@@ -40,7 +40,8 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `index.js` | lead | Host plugin entry: config normalization, lifecycle, control endpoints. |
 | `lib/proxy.js` | relay-core | `createRelay(options) -> { start, stop, address, routes }` |
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
-| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, listRoutes }` |
+| `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
+| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, listRoutes }` |
 | `client.js` | models-card | `window.__ModuleLoader__.load(...)`; registers the `settings.models.footer` card. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
@@ -56,9 +57,10 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
-| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[] }` |
-| `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` | `{ ok: true, name, baseURL, source, tier }` |
+| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], reasoning: { fill, levels } }` |
+| `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` | `{ ok: true, name, baseURL, source, tier, reasoning: { filled, unresolved } }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
+| `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
@@ -194,6 +196,14 @@ Rules:
   did not create.
 - Reject a create whose name already exists; reject an unknown `source`; reject a `tier` outside the
   accepted set.
+- **Reasoning capability is not inherited by a new provider key.** `dsh-llm-pi-ai` resolves a model's
+  `reasoning` from the model's own `reasoningEfforts`, then from the *installed catalog* entry for
+  that provider key. A route this plugin invents has no catalog entry, so an unfilled model
+  materializes as `reasoning: false` and the composer renders "This model provides no reasoning
+  effort levels." `planCreate` therefore runs `lib/reasoning.js` over the clone, and `planRepair`
+  runs it over every owned route; both keep a declared map byte-identical, prefer a sibling
+  variant's declaration over the configured fallback, and report the rest as `unresolved` instead of
+  guessing. Filling is opt-out (`reasoningEfforts: false`).
 
 ## `client.js`
 

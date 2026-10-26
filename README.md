@@ -73,7 +73,35 @@ Point any OpenAI-compatible provider route's `baseURL` at a mount:
         baseURL: http://127.0.0.1:8791/flex/v1
         models:
           - id: deepseek/deepseek-v4.1-flash
+            # Optional but recommended — see "Reasoning effort" below.
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
 ```
+
+### Reasoning effort on a relay route
+
+A relay route is a provider key the installed catalog has never seen, so
+`@deepseek-ai/dsh-llm-pi-ai` cannot inherit a model's reasoning capability for it. Without an
+explicit `reasoningEfforts` the model materializes as `reasoning: false` and the composer shows
+**"This model provides no reasoning effort levels."** — no effort selector, no error, nothing in the
+log. The relay itself is not involved; it never touches reasoning fields.
+
+The plugin fills that gap when it creates a route, from the best evidence available:
+
+1. a capability the model already declares (in the source route), kept byte-identical;
+2. a declaration for another variant of the same id — `google/gemini-4-argon:flex` teaches the
+   plugin about `google/gemini-4-argon`;
+3. the configured `reasoningEfforts` map, as a fallback for everything else.
+
+Set `reasoningEfforts: false` to switch filling off, or omit it to fill only from evidence 1–2.
+Routes it already created — or ones you hand-edited — are fixed by **Add reasoning to N models** in
+the card, which is also available as `POST /__openrouter-plus/routes/repair`. It only ever touches
+routes whose `baseURL` points at the relay, never overwrites a declared map, and writes nothing when
+there is nothing to do.
 
 ## Control API
 
@@ -86,6 +114,7 @@ Served on the same loopback listener, outside the proxy path space:
 | `GET /__openrouter-plus/targets` | source routes + routes this plugin created |
 | `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
+| `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
 
 `POST` requires `x-oorp-client: web`. CORS is reflected only for loopback GUI origins.
 
@@ -106,6 +135,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `upstream` | `https://openrouter.ai/api/v1` | where requests are forwarded, no trailing slash |
 | `routes` | tier mounts | mount path → tier; `null` tier is a pure passthrough |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
+| `reasoningEfforts` | `false`-able map | levels written onto created routes' models; `false` disables, omit for evidence-only |
 
 ## Security model
 
@@ -123,6 +153,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route in Settings → Models. |
 | Requests work but no tier is applied | The route's mount has a `null` tier (`/v1`), or the request is not `POST` with a JSON body. |
 | `flex` still bills full price | The provider decides the served tier; a pinned tier only *requests* it. Confirm with `usage` / the OpenRouter dashboard. |
+| No effort selector for a relay route's model | The model has no `reasoningEfforts`. Press **Add reasoning to N models** in the card, or add the field in Models settings — see "Reasoning effort on a relay route". |
 
 ## Uninstall
 

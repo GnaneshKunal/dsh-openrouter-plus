@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
       'error.fetch': 'Request failed: {message}',
       'error.badStatus': 'The relay returned an unexpected status payload.',
       'error.badTargets': 'The relay returned an unexpected provider-routes payload.',
+      'error.badRepair': 'The relay returned an unexpected repair result.',
       'error.render': 'The OpenRouter Plus card failed to render; the rest of the Models page still works.',
 
       'mounts.caption': 'Tier mounts',
@@ -149,6 +150,17 @@ window.__ModuleLoader__.load({
       'providers.noticeCreated': 'Created route {name}.',
       'providers.noticeRemoved': 'Removed route {name}.',
       'providers.actionFailed': 'Route change failed: {message}',
+      'providers.missingReasoning': 'no effort levels \u00b7 {count} models',
+      'providers.repair': 'Add effort levels to {count} models',
+      'providers.repairing': 'Adding effort levels\u2026',
+      'providers.repairAria': 'Add effort levels to the {count} models missing them',
+      'providers.reasoningEvidence': 'Effort levels come from the same model declared elsewhere in your config.',
+      'providers.reasoningDefault': 'A configured default map applies effort levels to every model.',
+      'providers.reasoningNever': 'Adding effort levels is disabled in settings.',
+      'providers.noticeRepaired': 'Added effort levels to {count} models.',
+      'providers.noticeRepairedUnresolved': 'Models still needing a hand-written map: {count}.',
+      'providers.noticeRepairNoop': 'Every shown model already has effort levels.',
+      'providers.noticeRepairUnresolved': 'Nothing could be inferred automatically; models needing a hand-written map: {count}.',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -194,6 +206,7 @@ window.__ModuleLoader__.load({
       'error.fetch': '请求失败：{message}',
       'error.badStatus': '中继返回了无法识别的状态数据。',
       'error.badTargets': '中继返回了无法识别的提供商路由数据。',
+      'error.badRepair': '中继返回了无法识别的修复结果。',
       'error.render': 'OpenRouter Plus 卡片渲染失败；模型页面的其余部分不受影响。',
 
       'mounts.caption': '等级挂载点',
@@ -249,6 +262,17 @@ window.__ModuleLoader__.load({
       'providers.noticeCreated': '已创建路由 {name}。',
       'providers.noticeRemoved': '已移除路由 {name}。',
       'providers.actionFailed': '路由修改失败：{message}',
+      'providers.missingReasoning': '无强度档位 \u00b7 {count} 个模型',
+      'providers.repair': '为 {count} 个模型补充强度档位',
+      'providers.repairing': '正在补充强度档位\u2026',
+      'providers.repairAria': '为缺少强度档位的 {count} 个模型补充强度档位',
+      'providers.reasoningEvidence': '强度档位取自配置中其他位置声明的同一模型。',
+      'providers.reasoningDefault': '已配置的默认映射会应用到每个模型。',
+      'providers.reasoningNever': '设置中已关闭强度档位补充。',
+      'providers.noticeRepaired': '已为 {count} 个模型补充强度档位。',
+      'providers.noticeRepairedUnresolved': '仍需手写映射的模型：{count} 个。',
+      'providers.noticeRepairNoop': '当前显示的模型都已有强度档位。',
+      'providers.noticeRepairUnresolved': '无法自动推断；仍需手写映射的模型：{count} 个。',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -592,7 +616,25 @@ window.__ModuleLoader__.load({
             tier: tier === '' ? null : tier,
             baseURL: stringValue(entry.baseURL).trim(),
             modelCount: countNumber(entry.modelCount),
+            // Models on this route the composer cannot offer an effort selector
+            // for. Zero is the calm case and renders no hint at all.
+            missingReasoning: countNumber(entry.missingReasoning),
           });
+        }
+      }
+
+      let reasoning = null;
+      if (isPlainObject(payload.reasoning)) {
+        const fill = stringValue(payload.reasoning.fill).trim();
+        if (fill === 'never' || fill === 'evidence' || fill === 'default') {
+          const levels = [];
+          if (Array.isArray(payload.reasoning.levels)) {
+            for (const level of payload.reasoning.levels) {
+              const name = stringValue(level).trim();
+              if (name !== '') levels.push(name);
+            }
+          }
+          reasoning = { fill: fill, levels: levels };
         }
       }
 
@@ -601,6 +643,23 @@ window.__ModuleLoader__.load({
         reason: stringValue(payload.reason).trim(),
         sources,
         created,
+        reasoning,
+      };
+    }
+
+    /** Validate the `/routes/repair` payload; null means an unexpected shape. */
+    function normalizeRepairPayload(payload) {
+      if (!isPlainObject(payload)) return null;
+      if (!Array.isArray(payload.patched) || !Array.isArray(payload.unresolved)) return null;
+      let models = 0;
+      for (const entry of payload.patched) {
+        if (!isPlainObject(entry)) continue;
+        if (Array.isArray(entry.models)) models += entry.models.length;
+      }
+      return {
+        changed: payload.changed === true,
+        models: models,
+        unresolved: payload.unresolved.length,
       };
     }
 
@@ -868,6 +927,19 @@ window.__ModuleLoader__.load({
     };
 
     const NOTICE_STYLE = { margin: 0, color: COLORS.secondary, font: FONTS.small };
+
+    const WARN_HINT_STYLE = { margin: 0, color: COLORS.warn, font: FONTS.small };
+
+    const REPAIR_ROW_STYLE = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '4px 12px',
+      minWidth: 0,
+      paddingTop: '8px',
+      marginTop: '2px',
+      borderTop: '1px solid ' + COLORS.border,
+    };
 
     function dotStyle(connection) {
       const color =
@@ -1327,6 +1399,85 @@ window.__ModuleLoader__.load({
         })();
       };
 
+      /*
+       * Ask the relay to fill effort levels onto every route this card owns.
+       * It is a config write, so it shares the create/remove guards: one action
+       * at a time, aborted on unmount, and the same error line. A refresh (not
+       * the response) drives the rows, and `changed: false` is calm — nothing
+       * was written because every owned route already had a capability.
+       */
+      const runRepair = () => {
+        if (busy !== null || busyRef.current !== null) return;
+        const controller = new AbortController();
+        busyRef.current = 'repair';
+        actionControllerRef.current = controller;
+        setBusy({ kind: 'repair', key: 'repair' });
+        setActionError('');
+        setNotice('');
+        (async () => {
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/routes/repair', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: '{}',
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            if (!response.ok) {
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+            if (isPlainObject(payload) && payload.ok === false) {
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+            const result = normalizeRepairPayload(payload);
+            if (result === null) throw new Error(t('error.badRepair'));
+            if (!mountedRef.current) return;
+            busyRef.current = null;
+            setBusy(null);
+            let message;
+            if (result.changed) {
+              message = t('providers.noticeRepaired', { count: formatCount(result.models) });
+              if (result.unresolved > 0) {
+                message += ' ' + t('providers.noticeRepairedUnresolved', { count: formatCount(result.unresolved) });
+              }
+            } else if (result.unresolved > 0) {
+              message = t('providers.noticeRepairUnresolved', { count: formatCount(result.unresolved) });
+            } else {
+              message = t('providers.noticeRepairNoop');
+            }
+            setNotice(message);
+            setTargetsKey((key) => key + 1);
+            if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current);
+            noticeTimerRef.current = setTimeout(() => {
+              noticeTimerRef.current = null;
+              if (mountedRef.current) setNotice('');
+            }, NOTICE_MS);
+          } catch (error) {
+            if (!mountedRef.current) return;
+            if (error && error.name === 'AbortError') return;
+            busyRef.current = null;
+            setBusy(null);
+            setActionError(t('providers.actionFailed', { message: errorMessage(t, error) }));
+          } finally {
+            if (actionControllerRef.current === controller) {
+              actionControllerRef.current = null;
+              busyRef.current = null;
+            }
+          }
+        })();
+      };
+
       const copyBaseURL = (path, url) => {
         writeClipboard(url)
           .then((ok) => {
@@ -1371,6 +1522,11 @@ window.__ModuleLoader__.load({
       if (targetsData !== null) {
         for (const route of targetsData.created) createdNames[route.name] = true;
       }
+      let missingReasoningTotal = 0;
+      if (targetsData !== null) {
+        for (const route of targetsData.created) missingReasoningTotal += route.missingReasoning;
+      }
+      const reasoningFill = targetsData !== null && targetsData.reasoning !== null ? targetsData.reasoning.fill : null;
 
       const connectionKey =
         connection === 'online' ? 'status.online' : connection === 'offline' ? 'status.offline' : 'status.checking';
@@ -1731,6 +1887,7 @@ window.__ModuleLoader__.load({
 
       const renderCreated = () => {
         const rows = [];
+        const repairing = busy !== null && busy.kind === 'repair';
         if (targetsData.created.length === 0) {
           rows.push(h('p', { key: 'empty', style: HINT_STYLE }, t('providers.createdEmpty')));
         } else {
@@ -1756,6 +1913,13 @@ window.__ModuleLoader__.load({
                   route.baseURL !== ''
                     ? h('span', { style: mutedCodeStyle }, t('providers.routeBase', { url: route.baseURL }))
                     : null,
+                  route.missingReasoning > 0
+                    ? h(
+                        'span',
+                        { style: WARN_HINT_STYLE },
+                        t('providers.missingReasoning', { count: formatCount(route.missingReasoning) }),
+                      )
+                    : null,
                 ),
                 h(
                   'div',
@@ -1772,11 +1936,34 @@ window.__ModuleLoader__.load({
             );
           }
         }
+        /* One line of context next to the repair action, only when it helps:
+           how a fill would source the capability. No settings form lives here. */
+        let reasoningHint = '';
+        if (reasoningFill === 'never') reasoningHint = t('providers.reasoningNever');
+        else if (reasoningFill === 'default') reasoningHint = t('providers.reasoningDefault');
+        else if (reasoningFill === 'evidence') reasoningHint = t('providers.reasoningEvidence');
+        const repair =
+          missingReasoningTotal > 0
+            ? h(
+                'div',
+                { key: 'repair', style: REPAIR_ROW_STYLE },
+                h(ActionButton, {
+                  label: repairing
+                    ? t('providers.repairing')
+                    : t('providers.repair', { count: formatCount(missingReasoningTotal) }),
+                  ariaLabel: t('providers.repairAria', { count: formatCount(missingReasoningTotal) }),
+                  disabled: busy !== null,
+                  onClick: runRepair,
+                }),
+                reasoningHint !== '' ? h('p', { key: 'hint', style: HINT_STYLE }, reasoningHint) : null,
+              )
+            : null;
         return h(
           'div',
           { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
           h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
           rows,
+          repair,
         );
       };
 

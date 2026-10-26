@@ -14,6 +14,7 @@
 import { createMetrics } from './lib/metrics.js'
 import { createRelay } from './lib/proxy.js'
 import { createConfigBridge } from './lib/config-bridge.js'
+import { normalizeReasoningEfforts } from './lib/reasoning.js'
 
 /** Must match the string client.js probes and the docs advertise. */
 const CONTROL_PREFIX = '/__openrouter-plus'
@@ -34,7 +35,7 @@ const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 /** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -63,6 +64,9 @@ export function normalizeConfig(raw) {
     upstreamTimeoutMs: Number.isFinite(config.upstreamTimeoutMs) && config.upstreamTimeoutMs > 0
       ? config.upstreamTimeoutMs
       : 0,
+    // `false` never fills, absent/`null` fills only from evidence found in the
+    // profile, a map is the blanket fallback for models with no evidence.
+    reasoningEfforts: normalizeReasoningEfforts(config.reasoningEfforts),
   }
 }
 
@@ -304,6 +308,7 @@ export function apply(ctx, rawConfig) {
       return address ? { host: address.host, port: address.port } : { host: config.host, port: config.port }
     },
     tiers: KNOWN_TIERS,
+    reasoningEfforts: config.reasoningEfforts,
   })
 
   const control = {
@@ -341,7 +346,16 @@ export function apply(ctx, rawConfig) {
         return
       }
       const targets = await bridge.targets()
-      sendJson(res, 200, { available: true, ...targets })
+      sendJson(res, 200, {
+        available: true,
+        ...targets,
+        // What a repair would fill: `false` = never, `null` = only from evidence
+        // already declared elsewhere in the profile, object = the fallback map.
+        reasoning: {
+          fill: config.reasoningEfforts === false ? 'never' : config.reasoningEfforts === null ? 'evidence' : 'default',
+          levels: config.reasoningEfforts === false ? [] : Object.keys(config.reasoningEfforts ?? {}),
+        },
+      })
     }),
 
     [`${CONTROL_PREFIX}/routes/create`]: controlRoute(async (req, res) => {
@@ -367,6 +381,16 @@ export function apply(ctx, rawConfig) {
       )
       log('info', 'removed provider route', removed)
       sendJson(res, 200, { ok: true, ...removed })
+    }),
+
+    // Models on a relay route get no reasoning capability by inheritance (the
+    // provider key is new to the installed catalog), so the composer offers no
+    // effort levels. This adds the capability a route is missing.
+    [`${CONTROL_PREFIX}/routes/repair`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'POST')) return
+      const repaired = await outsideHmrTransaction(ctx, () => bridge.repairRoutes())
+      if (repaired.patched.length > 0) log('info', 'added reasoning to provider routes', repaired.patched)
+      sendJson(res, 200, { ok: true, ...repaired })
     }),
   }
 
