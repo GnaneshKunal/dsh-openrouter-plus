@@ -1,9 +1,9 @@
 {
   "name": "dsh-openrouter-plus",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
-  "description": "OpenRouter service-tier routing for DeepSeek Harness — a loopback relay that pins service_tier (flex / priority / fast / ultrafast) on OpenAI-compatible request bodies, a live status API, and an OpenRouter Plus settings page that creates the provider route for you.",
+  "description": "OpenRouter service-tier routing for DeepSeek Harness \u2014 a loopback relay that pins service_tier (flex / priority / fast / ultrafast) on OpenAI-compatible request bodies, a live status API, and an OpenRouter Plus settings page that creates the provider route for you.",
   "keywords": [
     "deepseek",
     "harness",

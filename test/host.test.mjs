@@ -80,6 +80,41 @@ function piAiRow(providers) {
   return { entry: { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config } }, inherited: {}, override: config }
 }
 
+/** The suffix every clone's display name carries exactly once. */
+const DISPLAY_SUFFIX = ' — OpenRouter Plus'
+
+/** Count the non-overlapping occurrences of `needle` in `haystack`. */
+function countOf(haystack, needle) {
+  return haystack.split(needle).length - 1
+}
+
+/**
+ * A synthetic tier family on one per-endpoint mount. `tid1` is never registered:
+ * the bridge reads the target out of the base URL alone, which keeps these tests
+ * about naming rather than about the target registry.
+ *
+ * @param {string} origin relay origin, e.g. `http://127.0.0.1:8791`
+ * @param {Record<string, unknown>} [extra] further provider rows for the fixture
+ */
+function familyProviders(origin, extra = {}) {
+  return {
+    root: {
+      displayName: 'openrouter-test',
+      api: 'openai-completions',
+      apiKeyEnv: 'OPENROUTER_API_KEY',
+      baseURL: `${origin}/t/tid1/flex/v1`,
+      models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
+    },
+    plain: {
+      displayName: 'Plain',
+      api: 'openai-completions',
+      baseURL: 'https://api.plain.dev/v1',
+      models: [{ id: 'plain-large', name: 'Plain Large' }],
+    },
+    ...extra,
+  }
+}
+
 /** Post JSON with the guard header the control layer requires. */
 function postJson(url, body) {
   return fetch(url, {
@@ -153,7 +188,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.6.0')
+  assert.equal(health.version, '0.7.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -558,6 +593,238 @@ test('the composer tier chip gets an idempotent sibling provider for another tie
     assert.match(payload.error.message, pattern)
   }
   assert.equal(editor.writes.length, writesBeforeRefusals, 'refusals write nothing')
+
+  await dispose()
+})
+
+test('a chained tier switch names the sibling after the family root', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port }), piAiRow(familyProviders(origin))])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  // root -> priority: the first sibling is named after the root, as it always was.
+  const priority = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root', tier: 'priority' })).json()
+  assert.equal(priority.created, true)
+  assert.equal(priority.name, 'root-priority')
+  assert.equal(priority.baseURL, `${origin}/t/tid1/priority/v1`)
+
+  // priority -> ultrafast: named from the root, not from the sibling it came from.
+  const ultrafast = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root-priority', tier: 'ultrafast' })).json()
+  assert.equal(ultrafast.created, true)
+  assert.equal(ultrafast.name, 'root-ultrafast', 'the key does not chain with the incoming sibling')
+  assert.equal(ultrafast.source, 'root-priority', 'the clone still comes from the incoming sibling')
+  assert.equal(ultrafast.baseURL, `${origin}/t/tid1/ultrafast/v1`)
+
+  const providers = editor.rows[1].entry.options.config.providers
+  const ultrafastRow = providers['root-ultrafast']
+  assert.ok(ultrafastRow, 'the sibling is stored under the root-derived key')
+  assert.equal(providers['root-priority-ultrafast'], undefined, 'no chained key is created')
+  assert.equal(ultrafastRow.apiKeyEnv, 'OPENROUTER_API_KEY', 'the clone keeps the source credentials')
+  assert.deepEqual(ultrafastRow.models.map((model) => model.id), ['deepseek/deepseek-v4-flash-0731'])
+  assert.equal(ultrafastRow.displayName, 'openrouter-test (ultrafast) — OpenRouter Plus')
+  assert.equal(countOf(ultrafastRow.displayName, DISPLAY_SUFFIX), 1, 'the suffix appears exactly once')
+  assert.equal(countOf(ultrafastRow.displayName, '('), 1, 'one tier parenthetical, never a stack')
+
+  // ultrafast -> fast: one more hop still lands on a root-named sibling.
+  const fast = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root-ultrafast', tier: 'fast' })).json()
+  assert.equal(fast.created, true)
+  assert.equal(fast.name, 'root-fast')
+  const afterFast = editor.rows[1].entry.options.config.providers
+  assert.equal(afterFast['root-ultrafast-fast'], undefined)
+  assert.equal(afterFast['root-fast'].displayName, 'openrouter-test (fast) — OpenRouter Plus')
+  assert.equal(countOf(afterFast['root-fast'].displayName, DISPLAY_SUFFIX), 1)
+
+  await dispose()
+})
+
+test('an existing sibling at the requested tier is reused even with a chained key', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const chained = {
+    displayName: 'openrouter-test (priority) — OpenRouter Plus (ultrafast) — OpenRouter Plus',
+    api: 'openai-completions',
+    baseURL: `${origin}/t/tid1/ultrafast/v1`,
+    models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
+  }
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow(familyProviders(origin, { 'root-priority-ultrafast': chained })),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const writesBefore = editor.writes.length
+  const reused = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root', tier: 'ultrafast' })).json()
+  assert.equal(reused.created, false)
+  assert.equal(reused.name, 'root-priority-ultrafast', 'the row that already holds the tier keeps its key')
+  assert.equal(reused.baseURL, `${origin}/t/tid1/ultrafast/v1`)
+  assert.equal(reused.source, 'root')
+  assert.equal(editor.writes.length, writesBefore, 'reusing a sibling writes nothing')
+  const providers = editor.rows[1].entry.options.config.providers
+  assert.equal(providers['root-ultrafast'], undefined, 'no second row is added for the same tier')
+  assert.equal(providers['root-priority-ultrafast'].displayName, chained.displayName, 'the reused row is untouched')
+
+  await dispose()
+})
+
+test('an explicitly requested route name wins unchanged', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow(familyProviders(origin, {
+      'root-priority': {
+        displayName: 'openrouter-test (priority) — OpenRouter Plus',
+        api: 'openai-completions',
+        baseURL: `${origin}/t/tid1/priority/v1`,
+        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
+      },
+    })),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const named = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, {
+    route: 'root-priority',
+    tier: 'scale',
+    name: 'custom-scale',
+  })).json()
+  assert.equal(named.created, true)
+  assert.equal(named.name, 'custom-scale', 'the caller-chosen key is not rewritten')
+  assert.equal(named.source, 'root-priority')
+  assert.equal(named.baseURL, `${origin}/t/tid1/scale/v1`)
+  const providers = editor.rows[1].entry.options.config.providers
+  assert.equal(providers['root-scale'], undefined, 'a requested name suppresses the derived one')
+  // The display name still comes from the family root, with one tier marker only.
+  assert.equal(providers['custom-scale'].displayName, 'openrouter-test (scale) — OpenRouter Plus')
+  assert.equal(countOf(providers['custom-scale'].displayName, DISPLAY_SUFFIX), 1)
+
+  await dispose()
+})
+
+test('a source key that is not on a target mount still fails with the existing error', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port }), piAiRow(familyProviders(origin))])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const writesBefore = editor.writes.length
+  const response = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'plain', tier: 'fast' })
+  assert.equal(response.status, 400)
+  assert.match((await response.json()).error.message, /is not routed through a per-endpoint target yet/)
+  assert.equal(editor.writes.length, writesBefore, 'a refused twin writes nothing')
+
+  await dispose()
+})
+
+test('a root display that already carries the suffix gets one suffix, not two', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow(familyProviders(origin, {
+      suffixed: {
+        displayName: 'Suffixed — OpenRouter Plus',
+        api: 'openai-completions',
+        baseURL: `${origin}/t/tid2/flex/v1`,
+        models: [{ id: 'suffixed-large', name: 'Suffixed Large' }],
+      },
+    })),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const twinned = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'suffixed', tier: 'priority' })).json()
+  assert.equal(twinned.created, true)
+  assert.equal(twinned.name, 'suffixed-priority')
+  const providers = editor.rows[1].entry.options.config.providers
+  assert.equal(providers['suffixed-priority'].displayName, 'Suffixed (priority) — OpenRouter Plus')
+  assert.equal(countOf(providers['suffixed-priority'].displayName, DISPLAY_SUFFIX), 1)
+
+  await dispose()
+})
+
+test('a sibling chained by the old naming still resolves through to the root', async () => {
+  const port = await freePort()
+  const origin = `http://127.0.0.1:${port}`
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow(familyProviders(origin, {
+      'root-priority': {
+        displayName: 'openrouter-test (priority) — OpenRouter Plus',
+        api: 'openai-completions',
+        baseURL: `${origin}/t/tid1/priority/v1`,
+        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
+      },
+      // The exact shape the pre-fix code produced: one tier suffix per switch.
+      'root-priority-ultrafast': {
+        displayName: 'openrouter-test (priority) — OpenRouter Plus (ultrafast) — OpenRouter Plus',
+        api: 'openai-completions',
+        baseURL: `${origin}/t/tid1/ultrafast/v1`,
+        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
+      },
+    })),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  // Two suffixes are peeled, not one: a legacy chain must not grow a third.
+  const switched = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, {
+    route: 'root-priority-ultrafast',
+    tier: 'fast',
+  })).json()
+  assert.equal(switched.created, true)
+  assert.equal(switched.name, 'root-fast')
+  assert.equal(switched.source, 'root-priority-ultrafast', 'the clone still comes from the incoming sibling')
+  const providers = editor.rows[1].entry.options.config.providers
+  assert.equal(providers['root-priority-ultrafast-fast'], undefined)
+  assert.equal(providers['root-fast'].displayName, 'openrouter-test (fast) — OpenRouter Plus')
+  assert.equal(countOf(providers['root-fast'].displayName, DISPLAY_SUFFIX), 1)
 
   await dispose()
 })

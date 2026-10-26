@@ -665,6 +665,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The first candidate that names both a provider and a model, normalised to the three
+     * fields a selection carries. Composer seats read the durable projection and the shared
+     * `ModelDirectory` in a fixed order; this collapses that list to one truth so the chip
+     * has a single `selection` to badge and to submit, effort included.
+     */
+    function firstSelection(candidates) {
+      for (const candidate of Array.isArray(candidates) ? candidates : []) {
+        if (!isPlainObject(candidate)) continue;
+        const provider = stringValue(candidate.provider).trim();
+        const model = stringValue(candidate.model).trim();
+        if (provider === '' || model === '') continue;
+        const effort = stringValue(candidate.reasoningEffort).trim();
+        return effort === '' ? { provider: provider, model: model } : { provider: provider, model: model, reasoningEffort: effort };
+      }
+      return null;
+    }
+
+    /**
      * The model-selection request the chip submits: same model, sibling provider, and the
      * Session's effort only when it has one. An absent effort must stay absent — sending
      * `reasoningEffort: undefined` would ask the Host to clear a level the user chose.
@@ -3012,7 +3030,14 @@ window.__ModuleLoader__.load({
      * move that conversation to the sibling route that pins the tier. The sibling is
      * minted on demand by the relay (`/routes/twin`); this chip never writes provider
      * configuration, never touches the settings draft, and renders nothing unless the
-     * Session already runs on a row mounted from one of our targets.
+     * Session runs on a row mounted from one of our targets.
+     *
+     * A blank Session has no durable `modelSelection` yet (the projection stays
+     * `{lastUsed: null, next: null}` until its first message), so keying the chip off the
+     * projection alone left it invisible exactly where choosing a tier first matters. The
+     * shared `ModelDirectory` both composer entries render from is the fallback: its
+     * `current` already holds the resolved default (provider, model, effort) and its
+     * `pending` the in-flight choice.
      */
     function TierChip(props) {
       const t = props.t;
@@ -3021,14 +3046,43 @@ window.__ModuleLoader__.load({
       const resolveDirectory = props.resolveDirectory;
       const useProjection = props.useProjection;
 
+      /* The shared directory lazily fails loud for an unknown Session; a chip must never be
+         the thing that takes the composer down, so an unresolvable Session reads as "no
+         directory" and the chip falls back to the durable projection alone. */
+      const directory = (() => {
+        if (typeof resolveDirectory !== 'function' || sessionId === undefined || sessionId === null) return null;
+        try {
+          const found = resolveDirectory(sessionId);
+          return found === undefined ? null : found;
+        } catch (error) {
+          return null;
+        }
+      })();
+      const directoryStore =
+        directory !== null && directory.store !== null && directory.store !== undefined
+          && typeof directory.store.getSnapshot === 'function'
+          ? directory.store
+          : null;
+
+      const [directoryState, setDirectoryState] = React.useState(() =>
+        directoryStore === null ? null : directoryStore.getSnapshot(),
+      );
+
+      React.useEffect(() => {
+        if (directoryStore === null) return undefined;
+        setDirectoryState(directoryStore.getSnapshot());
+        return directoryStore.subscribe(() => setDirectoryState(directoryStore.getSnapshot()));
+      }, [directoryStore]);
+
       const projection = typeof useProjection === 'function' ? useProjection('modelSelection') : undefined;
-      const selection = isPlainObject(projection)
-        ? isPlainObject(projection.next)
-          ? projection.next
-          : projection.lastUsed
-        : null;
-      const providerKey = isPlainObject(selection) ? stringValue(selection.provider).trim() : '';
-      const modelKey = isPlainObject(selection) ? stringValue(selection.model).trim() : '';
+      const selection = firstSelection([
+        isPlainObject(projection) ? projection.next : null,
+        isPlainObject(directoryState) ? directoryState.pending : null,
+        isPlainObject(projection) ? projection.lastUsed : null,
+        isPlainObject(directoryState) ? directoryState.current : null,
+      ]);
+      const providerKey = selection === null ? '' : selection.provider;
+      const modelKey = selection === null ? '' : selection.model;
 
       const [feedState, setFeedState] = React.useState(() => feed.snapshot());
       const [open, setOpen] = React.useState(false);
@@ -3046,6 +3100,25 @@ window.__ModuleLoader__.load({
       /* The row a successful switch just moved to, until `/targets` reports it. Without
          it the badge would blink out between the projection update and the next load. */
       const movedRef = React.useRef(null);
+      /* `"<provider>|<effort>"` of the last effort repair, so a lost level is restored once
+         and a genuinely unsupported level is never retried in a loop. */
+      const repairedRef = React.useRef('');
+
+      /* A tier switch rewrites the whole selection, and the freshly minted sibling can sit
+         outside the client's model catalog for a beat; a Host write that normalises the
+         effort away would silently reset a level the user chose. Put it back exactly once. */
+      React.useEffect(() => {
+        const moved = movedRef.current;
+        if (moved === null || moved.reasoningEffort === '') return;
+        if (selection === null || selection.provider !== moved.key) return;
+        const carried = selection.reasoningEffort === undefined ? '' : selection.reasoningEffort;
+        if (carried === moved.reasoningEffort) return;
+        const stamp = moved.key + '|' + moved.reasoningEffort;
+        if (repairedRef.current === stamp) return;
+        repairedRef.current = stamp;
+        if (directory === null || typeof directory.select !== 'function') return;
+        void directory.select({ provider: moved.key, model: moved.model, reasoningEffort: moved.reasoningEffort });
+      }, [selection, directory]);
 
       React.useEffect(() => {
         aliveRef.current = true;
@@ -3270,6 +3343,8 @@ window.__ModuleLoader__.load({
           if (outcome.ok === true) {
             movedRef.current = {
               key: twin.name,
+              model: selection.model,
+              reasoningEffort: selection.reasoningEffort === undefined ? '' : selection.reasoningEffort,
               source: {
                 key: twin.name,
                 displayName: name,

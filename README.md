@@ -37,6 +37,11 @@ upstream. Because it only uses schema fields the profile already has, it survive
   tier the current provider is running and switches it in one click. The switch is **per session**:
   it moves this conversation onto the sibling provider that carries the requested tier, so another
   session can sit on a different one. Tiers slide in beside the model name, not instead of it.
+  It shows up on a brand-new Session too — before the first message the chip reads the composer's
+  own default selection, so a tier can be picked *before* you start typing; the reasoning effort you
+  chose travels with the switch instead of being reset to the new route's default. Siblings are
+  named after the tier *family* (`openrouter-<tier>`), so switching back and forth reuses one row per
+  tier instead of stacking suffixes.
 - **A switch on every provider row** — in Settings → Models, each `llm-pi-ai` provider gets a
   **Route through OpenRouter Plus** checkbox and a service-tier picker. Tick it and that provider's
   traffic flows through the relay to the endpoint you already gave it; untick it and the endpoint
