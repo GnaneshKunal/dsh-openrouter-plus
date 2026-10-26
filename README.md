@@ -61,16 +61,20 @@ switching never mints a provider, a route or a model list.
 
 ## Install
 
+`--profile` is not optional — `dsh plugin` manages the plugins of one named profile, so pass the
+one you actually boot (`web` for `dsh web`, `default` for a bare `dsh`). Without it the CLI stops
+with `required option '--profile <name>' not specified`.
+
 ```bash
-dsh plugin add github:GnaneshKunal/dsh-openrouter-plus          # latest main
-dsh plugin add github:GnaneshKunal/dsh-openrouter-plus#v0.1.0   # a pinned tag
+dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus          # latest main
+dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus#v0.1.0   # a tag, once tagged
 ```
 
 From a clone, which is what development uses:
 
 ```bash
 git clone https://github.com/GnaneshKunal/dsh-openrouter-plus
-dsh plugin add ./dsh-openrouter-plus     # or, from a session:
+dsh plugin --profile web add ./dsh-openrouter-plus     # or, from a session:
 #   plugin_manager { action: install_bundle, target: "./dsh-openrouter-plus" }
 ```
 
@@ -109,7 +113,7 @@ After that the tag does everything: the workflow run's OIDC identity is accepted
 provenance attestation linking the tarball to the commit and run that built it, and no
 `NPM_TOKEN` exists in the repository. `npm trust list dsh-openrouter-plus` shows the grant.
 
-Publishing to npm is optional for users: `dsh plugin add github:…` installs the same code from a
+Publishing to npm is optional for users: `dsh plugin --profile web add github:…` installs the same code from a
 tag, which is how most of the community ships.
 
 ## Use it
@@ -378,14 +382,14 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 Remove the route(s) in Settings → Models, then:
 
 ```bash
-dsh plugin remove dsh-openrouter-plus
+dsh plugin --profile web remove dsh-openrouter-plus
 ```
 
 ## Development
 
 ```bash
 node --check index.js && node --check client.js
-node --test            # 98 tests, no network, no profile writes
+node --test            # 99 tests, no network, no profile writes
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module contract, and
