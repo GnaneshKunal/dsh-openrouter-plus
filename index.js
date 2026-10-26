@@ -236,9 +236,38 @@ function controlRoute(handler) {
 }
 
 /**
+ * Run `operation` outside the async context this listener inherited.
+ *
+ * `configEditor.edit()` serialises its write through the HMR service, which refuses
+ * to start while another transaction is already executing ("HMR transactions cannot
+ * be nested"). An HTTP listener created during plugin activation inherits that
+ * activation's async context, so every request it later serves looks like a nested
+ * transaction. Stepping out of the HMR store for the duration of the call is the
+ * difference between "cannot save the route" and a working button.
+ *
+ * The exit is synchronous, which is all that matters: `runExclusive` reads the store
+ * when it is called, then owns its own context for the actual work.
+ *
+ * @template T
+ * @param {any} ctx
+ * @param {() => T} operation
+ * @returns {T}
+ */
+export function outsideHmrTransaction(ctx, operation) {
+  try {
+    const hmr = typeof ctx?.get === 'function' ? ctx.get('hmr') : undefined
+    const storage = hmr?.executing
+    if (storage && typeof storage.exit === 'function') return storage.exit(operation)
+  } catch {
+    // No HMR (or an unexpected shape): the plain call is correct in that case.
+  }
+  return operation()
+}
+
+/**
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
- * @param {number} status
+ * @param {string} method
  */
 function requireMethod(req, res, method) {
   if (req.method === method) return true
@@ -318,12 +347,14 @@ export function apply(ctx, rawConfig) {
     [`${CONTROL_PREFIX}/routes/create`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)
-      const created = await bridge.createRoute({
-        source: typeof body.source === 'string' ? body.source : '',
-        tier: typeof body.tier === 'string' ? body.tier : '',
-        name: typeof body.name === 'string' ? body.name : undefined,
-        displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
-      })
+      const created = await outsideHmrTransaction(ctx, () =>
+        bridge.createRoute({
+          source: typeof body.source === 'string' ? body.source : '',
+          tier: typeof body.tier === 'string' ? body.tier : '',
+          name: typeof body.name === 'string' ? body.name : undefined,
+          displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
+        }),
+      )
       log('info', 'created provider route', created)
       sendJson(res, 200, { ok: true, ...created })
     }),
@@ -331,7 +362,9 @@ export function apply(ctx, rawConfig) {
     [`${CONTROL_PREFIX}/routes/remove`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)
-      const removed = await bridge.removeRoute({ name: typeof body.name === 'string' ? body.name : '' })
+      const removed = await outsideHmrTransaction(ctx, () =>
+        bridge.removeRoute({ name: typeof body.name === 'string' ? body.name : '' }),
+      )
       log('info', 'removed provider route', removed)
       sendJson(res, 200, { ok: true, ...removed })
     }),

@@ -167,3 +167,27 @@ test('enabled: false binds nothing', async () => {
   assert.ok(logs.some((line) => line.includes('disabled by config')))
   await dispose()
 })
+
+test('config writes escape the HMR transaction context the listener inherited', async () => {
+  const { AsyncLocalStorage } = await import('node:async_hooks')
+  const { outsideHmrTransaction } = await import('../index.js')
+  const executing = new AsyncLocalStorage()
+
+  // A listener created inside `runExclusive` inherits the store, so every later
+  // request looks like a nested transaction and configEditor.edit() refuses.
+  const asNestedRequest = () => executing.run(true, async () => outsideHmrTransaction(ctx, () => executing.getStore()))
+
+  const ctx = { get: () => ({ executing }) }
+  assert.equal(await asNestedRequest(), undefined, 'the mutation runs with an empty store')
+
+  // Without HMR the plain call is already correct.
+  const bare = { get: () => undefined }
+  assert.equal(outsideHmrTransaction(bare, () => 'plain'), 'plain')
+
+  // A throwing or absent `get` must not break route creation.
+  assert.equal(outsideHmrTransaction({ get: () => { throw new Error('no such service') } }, () => 'safe'), 'safe')
+  assert.equal(outsideHmrTransaction(undefined, () => 'safe'), 'safe')
+
+  // An unexpected hmr shape falls back instead of throwing.
+  assert.equal(outsideHmrTransaction({ get: () => ({}) }, () => 'fallback'), 'fallback')
+})

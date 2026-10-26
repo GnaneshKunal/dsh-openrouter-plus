@@ -64,6 +64,21 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
 relay refuses). Every response carries CORS headers limited to loopback GUI origins.
 
+### Config writes must step out of the HMR transaction
+
+`configEditor.edit()` serialises its write through `hmr.runExclusive()`, which **rejects** when
+called while another transaction is already executing (`HMR transactions cannot be nested`). A
+listener created during plugin activation inherits that activation's `AsyncLocalStorage` context —
+silently, because the leak travels through the accept path — so every request the relay serves looks
+like a nested transaction: route creation failed with exactly that message while the read endpoints
+kept working.
+
+`outsideHmrTransaction(ctx, operation)` in `index.js` clears the store for the duration of the
+mutation via `hmr.executing.exit()`. Only the synchronous entry matters: `runExclusive` reads the
+store when it is called, then owns its own context for the actual work. The helper degrades safely
+when HMR is absent, `ctx.get('hmr')` throws, or the service has an unexpected shape. It is exported
+so `test/host.test.mjs` can prove the escape against a real `AsyncLocalStorage`.
+
 ## `lib/proxy.js`
 
 ```js
