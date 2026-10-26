@@ -188,7 +188,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.9.0')
+  assert.equal(health.version, '0.1.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -271,7 +271,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   assert.equal(chosenBody.preset, 'priority')
   assert.deepEqual(chosenBody.wire, { serviceTier: 'priority', sort: null, variant: null })
 
-  // The 0.8.0 spelling still maps onto the preset that sends the same thing.
+  // The tier-era spelling still maps onto the preset that sends the same thing.
   const legacy = await (await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', tier: 'fast' })).json()
   assert.equal(legacy.preset, 'priority', '`fast` is a spelling of priority')
 
@@ -575,7 +575,7 @@ test('switching a Session tier writes no config; only the default is persisted',
   // plugin and restart the listener on every switch, mid-conversation.
   assert.equal((await set({ session: 'a', preset: 'flex' })).status, 200)
   assert.equal((await set({ session: 'b', preset: 'priority' })).status, 200)
-  // The 0.8.0 body shape is still understood, and still writes nothing.
+  // The tier-era body shape is still understood, and still writes nothing.
   assert.equal((await set({ session: 'c', tier: 'ultrafast' })).status, 200)
   assert.equal((await set({ session: 'a' })).status, 200)
   assert.equal(editor.writes.length, 0, 'a preset switch must not write the config')
@@ -588,7 +588,7 @@ test('switching a Session tier writes no config; only the default is persisted',
   assert.equal(editor.writes[0].next.defaultPreset, 'flex')
   assert.equal(editor.writes[0].next.sessionPresets, undefined, 'the memory table is never persisted')
 
-  // A 0.8.0 default is read forward rather than rejected.
+  // A tier-era default is read forward rather than rejected.
   const legacy = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'default' })
   assert.equal(legacy.status, 200)
   assert.equal((await legacy.json()).default, 'standard', '`default` is the standard tier, not the profile default')

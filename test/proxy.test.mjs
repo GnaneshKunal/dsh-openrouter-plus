@@ -644,7 +644,7 @@ test('a bare target mount asks the resolver per Session and applies that recipe'
   assert.equal(seen[1].body.service_tier, undefined, 'a sort preset writes no tier')
   assert.deepEqual(seen[1].body.provider, { sort: 'throughput' }, 'the comparator rides provider.sort')
   assert.equal(seen[2].body.model, 'm:floor', 'the floor preset is a model variant, not a parameter')
-  assert.equal(seen[3].body.service_tier, 'priority', 'a 0.8.0 bare tier string still works')
+  assert.equal(seen[3].body.service_tier, 'priority', 'a bare tier string still works')
   assert.equal('service_tier' in seen[4].body, false, 'pass-through strips a tier the client pinned')
   assert.equal(seen[0].body.model, 'm', 'every other body field survives the rewrite')
 })

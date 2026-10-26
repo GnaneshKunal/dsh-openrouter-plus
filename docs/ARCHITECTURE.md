@@ -73,7 +73,7 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | `POST /__openrouter-plus/targets/register` | `{ upstream, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |
 | `POST /__openrouter-plus/targets/remove` | `{ id }` | `{ ok: true, id }`, or `409 { error, route }` while a provider still uses it |
 | `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, preset, wire: { serviceTier, sort, variant }, chosen, default, presets }` — what that Session applies *now* |
-| `POST /__openrouter-plus/tier` | `{ session, preset }` (or the 0.8.0 `tier`) | the same body; `preset: null`/absent clears. **Memory only** |
+| `POST /__openrouter-plus/tier` | `{ session, preset }` (or a tier-era `tier`) | the same body; `preset: null`/absent clears. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` (or `tier`) | `{ ok, default, presets }`; one config write, because it is a preference. An absent preset means `none` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
@@ -147,7 +147,7 @@ so `test/host.test.mjs` can prove the escape against a real `AsyncLocalStorage`.
 
 ## `lib/proxy.js`
 
-Target mounts (added in 0.5.0, alongside the legacy tier mounts):
+Target mounts (alongside the legacy tier mounts):
 
 - `/t/<targetId>/<tier>/v1/…` — forwards to that target's own upstream with `<tier>` injected;
   `/t/<targetId>/v1/…` forwards with **no** `service_tier` key written at all.
@@ -182,7 +182,7 @@ Target mounts (added in 0.5.0, alongside the legacy tier mounts):
  * @param {(session: string) => object|string|null} [options.resolveSessionRecipe]
  *        per-Session preset; applied after the mount shape, on any mount
  * @param {(session: string) => string|null} [options.resolveSessionTier]
- *        0.8.0 spelling of the same seam: a bare tier string
+ *        tier-era spelling of the same seam: a bare tier string
  * @param {Record<string, (req,res)=>Promise<void>|void>} [options.control]
  *        absolute pathname -> handler, checked before proxying
  * @param {(entry: object) => void} [options.onRecord]   per-request metric sink
@@ -341,7 +341,7 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - **The relay and the page update independently.** A Host restart re-applies `index.js`; the page
   keeps the client bundle it already evaluated until the document is reloaded, because the loader
   fetches each bundle once per document. So the client reads both payload shapes: `/tier` answers
-  `preset` in 0.9.0 and `tier` before it, `/targets` answers `tier.presets` or the older
+  `preset` now and `tier` in the tier-era answer, `/targets` answers `tier.presets` or the older
   `tier.tiers` — a missing key degrades a picker to the built-in preset list instead of throwing the
   page out of its boundary. `__test` on the module object exports those readers for
   `test/client.test.mjs`; the loader ignores it.

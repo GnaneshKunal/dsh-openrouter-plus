@@ -72,7 +72,7 @@ window.__ModuleLoader__.load({
       'floor',
     ]);
 
-    /** The 0.8.0 tier vocabulary, so a client paired with an older relay still maps. */
+    /** The tier vocabulary, so a client paired with a relay that still speaks it maps. */
     const LEGACY_TIER_PRESET = Object.freeze({
       auto: 'none',
       default: 'standard',
@@ -83,7 +83,7 @@ window.__ModuleLoader__.load({
       scale: 'none',
     });
 
-    /** A 0.8.0 tier name as the preset it now means; `null` when nothing is pinned. */
+    /** A tier name as the preset it now means; `null` when nothing is pinned. */
     function presetFromLegacyTier(value) {
       const text = stringValue(value).trim().toLowerCase();
       if (text === '') return null;
@@ -609,7 +609,7 @@ window.__ModuleLoader__.load({
     function normalizePresetState(payload) {
       if (!isPlainObject(payload)) return null;
       if (payload.ok === false) return null;
-      /* `preset` is the 0.9.0 answer. A relay that predates it answers `tier`, and a
+      /* `preset` is the current answer; a relay that still speaks tiers answers `tier`, and a
          client showing "the relay did not confirm" while the change *was* applied is a
          worse failure than reading the older field, so both are accepted. */
       const modern = Object.prototype.hasOwnProperty.call(payload, 'preset');

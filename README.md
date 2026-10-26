@@ -274,7 +274,7 @@ Served on the same loopback listener, outside the proxy path space:
 `changed: false` when the row is already in the requested state. A rejected request answers `400`
 with `{ error: { message } }` — for example a body that is not an http(s) URL, or one that points
 back at the relay. `POST /tier` answers `400` for an unknown preset (`turbo`) or a missing
-`session`, and accepts `preset: null` (or no `preset` at all) to clear. The 0.8.0 body shape is still
+`session`, and accepts `preset: null` (or no `preset` at all) to clear. The tier-era body shape is still
 read: `tier: "fast"` maps onto the `priority` preset, and any other legacy name maps onto the preset
 that sends the same field.
 
@@ -303,7 +303,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
 | `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
-| `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A 0.8.0 `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
+| `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 
 ## Security model

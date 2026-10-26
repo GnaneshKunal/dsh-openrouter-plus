@@ -43,7 +43,7 @@ const {
   presetFromLegacyTier,
 } = module.__test
 
-test('a preset id or a 0.8.0 tier name both name a preset', () => {
+test('a preset id or a tier name both name a preset', () => {
   assert.equal(presetFromLegacyTier('cheapest'), 'cheapest')
   assert.equal(presetFromLegacyTier('fastest-standard'), 'fastest-standard')
   assert.equal(presetFromLegacyTier('FAST'), 'priority')
@@ -102,7 +102,7 @@ test('the chip reads both answer shapes', () => {
   const inherited = normalizePresetState({ ok: true, preset: 'priority', chosen: null, default: 'priority' })
   assert.deepEqual(inherited, { chosen: null, default: 'priority', preset: 'priority' })
 
-  // 0.8.0 answered `{ tier, chosen, default }` with raw tier names.
+  // A tier-era relay answered `{ tier, chosen, default }` with raw tier names.
   const legacy = normalizePresetState({ ok: true, tier: 'fast', chosen: 'flex', default: 'auto' })
   assert.deepEqual(legacy, { chosen: 'flex', default: 'none', preset: 'priority' })
 

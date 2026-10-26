@@ -82,7 +82,7 @@ export const PRESET_WIRE = Object.freeze({
 export const PRESET_IDS = Object.freeze(Object.keys(PRESET_WIRE))
 
 /**
- * Tier strings still accepted from a 0.8.0 config or a hand-written call, mapped onto
+ * Tier strings still accepted from a tier-based config or a hand-written call, mapped onto
  * the preset that sends the same thing. `scale` has no endpoints, so it maps to the
  * pass-through preset rather than pretending to be a request.
  */
@@ -96,7 +96,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.9.0'
+const VERSION = '0.1.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -140,7 +140,7 @@ export function normalizeConfig(raw) {
     targets: normalizeTargets(config.targets),
     // The preset a Session runs on when it has not chosen one. A preset is a runtime
     // decision, so it lives here next to the table rather than in any provider row.
-    // `defaultTier` is the 0.8.0 spelling and still normalises forward.
+    // `defaultTier` is the tier-era spelling and still normalises forward.
     defaultPreset: normalizePresetId(config.defaultPreset ?? config.defaultTier),
     sessionPresets: sessionPresets.presets,
     sessionPresetStamp: sessionPresets.stamp,
@@ -158,7 +158,7 @@ export function normalizeTierName(value) {
 }
 
 /**
- * Normalise a preset id, accepting the 0.8.0 tier spellings so an old config keeps
+ * Normalise a preset id, accepting the tier spellings so a hand-written config keeps
  * working: `flex`, `priority` and `ultrafast` are still preset ids and are left alone;
  * `default` becomes `standard`; `auto` and `scale` become the pass-through preset.
  *
@@ -178,7 +178,7 @@ export const SESSION_PRESET_LIMIT = 200
 /**
  * Normalise the per-Session preset table. Entries are `{ preset, at }` objects written
  * by the control API; a bare string is accepted too so a hand-edited config still
- * works, and `{ tier }` is read forward from 0.8.0. Oldest entries are dropped past
+ * works, and a `{ tier }` body is read forward. Oldest entries are dropped past
  * {@link SESSION_PRESET_LIMIT} so the table cannot grow without bound as Sessions are
  * created.
  *
@@ -967,7 +967,7 @@ export function apply(ctx, rawConfig) {
         sendJson(res, 400, { error: { message: 'session must be at most 128 characters' } })
         return
       }
-      // `tier` is the 0.8.0 spelling and still maps onto the preset that sends it.
+      // `tier` is the tier-era spelling and still maps onto the preset that sends it.
       const raw = typeof body.preset === 'string' ? body.preset : typeof body.tier === 'string' ? body.tier : ''
       const text = raw.trim().toLowerCase()
       const preset = text === '' ? null : normalizePresetId(text)
