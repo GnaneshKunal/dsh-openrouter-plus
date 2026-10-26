@@ -188,7 +188,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.8.0')
+  assert.equal(health.version, '0.9.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -243,28 +243,53 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   assert.equal(attach.status, 400)
   assert.match((await attach.json()).error.message, /no provider route named "openrouter"/)
 
-  // The tier table answers with no configEditor at all: it is Session state, not config.
+  // The preset table answers with no configEditor at all: it is Session state, not config.
   const tier = await (await fetch(`${origin}/__openrouter-plus/tier?session=abc`)).json()
   assert.equal(tier.ok, true)
   assert.equal(tier.session, 'abc')
   assert.equal(tier.chosen, null, 'a fresh Session has chosen nothing')
-  assert.equal(tier.tier, tier.default, 'and therefore runs on the configured default')
-  assert.deepEqual(tier.tiers, ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast'])
+  assert.equal(tier.default, 'none', 'an unconfigured profile passes through')
+  assert.equal(tier.preset, tier.default, 'and therefore runs on the configured default')
+  assert.deepEqual(tier.presets, [
+    'none',
+    'standard',
+    'fastest',
+    'fastest-standard',
+    'cheapest',
+    'flex',
+    'priority',
+    'ultra',
+    'floor',
+  ])
+  assert.deepEqual(tier.wire, { serviceTier: null, sort: null, variant: null })
 
-  // A POST records the choice for that Session only, and a blank tier clears it.
-  const chosen = await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', tier: 'priority' })
+  // A POST records the choice for that Session only, and a blank preset clears it.
+  const chosen = await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', preset: 'priority' })
   assert.equal(chosen.status, 200)
   const chosenBody = await chosen.json()
   assert.equal(chosenBody.chosen, 'priority')
-  assert.equal(chosenBody.tier, 'priority')
+  assert.equal(chosenBody.preset, 'priority')
+  assert.deepEqual(chosenBody.wire, { serviceTier: 'priority', sort: null, variant: null })
+
+  // The 0.8.0 spelling still maps onto the preset that sends the same thing.
+  const legacy = await (await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', tier: 'fast' })).json()
+  assert.equal(legacy.preset, 'priority', '`fast` is a spelling of priority')
+
+  // A sort preset names no tier: the wire recipe is where that asymmetry is kept.
+  const cheapest = await (
+    await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', preset: 'cheapest' })
+  ).json()
+  assert.equal(cheapest.preset, 'cheapest')
+  assert.deepEqual(cheapest.wire, { serviceTier: null, sort: 'price', variant: null })
+
   const other = await (await fetch(`${origin}/__openrouter-plus/tier?session=def`)).json()
   assert.equal(other.chosen, null, 'another Session keeps its own choice')
   const cleared = await (await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc' })).json()
   assert.equal(cleared.chosen, null)
-  assert.equal(cleared.tier, cleared.default)
-  const badTier = await postJson(`${origin}/__openrouter-plus/tier`, { tier: 'turbo' })
-  assert.equal(badTier.status, 400, 'an unknown tier is refused')
-  const noSession = await postJson(`${origin}/__openrouter-plus/tier`, { tier: 'priority' })
+  assert.equal(cleared.preset, cleared.default)
+  const badPreset = await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', preset: 'turbo' })
+  assert.equal(badPreset.status, 400, 'an unknown preset is refused')
+  const noSession = await postJson(`${origin}/__openrouter-plus/tier`, { preset: 'priority' })
   assert.equal(noSession.status, 400, 'the Session is required')
 
   await dispose()
@@ -548,29 +573,36 @@ test('switching a Session tier writes no config; only the default is persisted',
 
   // A Session's choice is runtime state: writing the plugin row here would reload the
   // plugin and restart the listener on every switch, mid-conversation.
-  assert.equal((await set({ session: 'a', tier: 'flex' })).status, 200)
-  assert.equal((await set({ session: 'b', tier: 'priority' })).status, 200)
+  assert.equal((await set({ session: 'a', preset: 'flex' })).status, 200)
+  assert.equal((await set({ session: 'b', preset: 'priority' })).status, 200)
+  // The 0.8.0 body shape is still understood, and still writes nothing.
+  assert.equal((await set({ session: 'c', tier: 'ultrafast' })).status, 200)
   assert.equal((await set({ session: 'a' })).status, 200)
-  assert.equal(editor.writes.length, 0, 'a tier switch must not write the config')
+  assert.equal(editor.writes.length, 0, 'a preset switch must not write the config')
 
   // The profile-level default is a preference, so it does write — once.
-  const chosen = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'scale' })
+  const chosen = await postJson(`${origin}/__openrouter-plus/tier/default`, { preset: 'flex' })
   assert.equal(chosen.status, 200)
-  assert.equal((await chosen.json()).default, 'scale')
+  assert.equal((await chosen.json()).default, 'flex')
   assert.equal(editor.writes.length, 1)
-  assert.equal(editor.writes[0].next.defaultTier, 'scale')
-  assert.equal(editor.writes[0].next.sessionTiers, undefined, 'the memory table is never persisted')
+  assert.equal(editor.writes[0].next.defaultPreset, 'flex')
+  assert.equal(editor.writes[0].next.sessionPresets, undefined, 'the memory table is never persisted')
 
-  const refused = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'turbo' })
+  // A 0.8.0 default is read forward rather than rejected.
+  const legacy = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'default' })
+  assert.equal(legacy.status, 200)
+  assert.equal((await legacy.json()).default, 'standard', '`default` is the standard tier, not the profile default')
+
+  const refused = await postJson(`${origin}/__openrouter-plus/tier/default`, { preset: 'turbo' })
   assert.equal(refused.status, 400)
-  assert.equal(editor.writes.length, 1, 'a refused default writes nothing')
+  assert.equal(editor.writes.length, 2, 'a refused default writes nothing')
 
-  // Clearing the default is a legitimate write: no tier is the pass-through answer.
+  // Clearing the default is a legitimate write: pass-through is the answer, not null.
   const cleared = await postJson(`${origin}/__openrouter-plus/tier/default`, {})
   assert.equal(cleared.status, 200)
-  assert.equal((await cleared.json()).default, null)
-  assert.equal(editor.writes.length, 2)
-  assert.equal(editor.writes[1].next.defaultTier, null)
+  assert.equal((await cleared.json()).default, 'none')
+  assert.equal(editor.writes.length, 3)
+  assert.equal(editor.writes[2].next.defaultPreset, 'none')
 
   await dispose()
 })

@@ -3,10 +3,10 @@
  *
  * One loopback HTTP relay + one status/control API. The relay exists because the
  * only request-body seam a third-party plugin can reach is a provider route's
- * `baseURL`: we point a cloned pi-ai provider route at
- * `http://127.0.0.1:<port>/<tier>/v1`, and the relay writes the
- * `service_tier` key into the body on the way upstream. See docs/ARCHITECTURE.md
- * and deepseek-harness discussion #9787.
+ * `baseURL`: we point a pi-ai provider route at `http://127.0.0.1:<port>/t/<id>/v1`,
+ * and the relay applies that Session's preset to the body on the way upstream —
+ * `service_tier`, `provider.sort`, or the `:floor` model suffix. See
+ * docs/ARCHITECTURE.md and deepseek-harness discussion #9787.
  *
  * Nothing is mounted on the DSH web server, so the GUI's auth fence and this
  * plugin cannot interfere with each other.
@@ -33,10 +33,70 @@ const DEFAULT_ROUTES = {
 
 const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 
-/** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
+/** Tier names an explicit `/t/<id>/<tier>/v1` mount may still pin. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.8.0'
+/**
+ * What each preset actually sends.
+ *
+ * A preset is an outcome a person picks; the fields are this relay's business.
+ * `service_tier`, `provider.sort` and a model variant are three separate levers with
+ * three separate contracts — pool eligibility plus lane precedence, the comparator
+ * over that pool, and the two "admit a tier *and* sort" slugs the API does not let a
+ * parameter express. Keeping them as one recipe per outcome is what stops a picker
+ * from offering `:nitro` alongside `service_tier: "priority"`, a combination the API
+ * never defines.
+ *
+ * - `none`             send nothing; OpenRouter's own routing decides.
+ * - `standard`         pin the standard tier — priority endpoints excluded.
+ * - `fastest`          sort the whole pool by throughput. This *is* nitro for an
+ *                      open-weight model (its priority endpoints already compete in
+ *                      default routing) and stops short of it for a closed-weight one.
+ * - `fastest-standard` the same race with priority endpoints excluded: no premium.
+ * - `cheapest`         sort the whole pool by price; never admits a flex endpoint,
+ *                      so it cannot reach a flex rate.
+ * - `flex`             flex endpoints only. Not necessarily the cheapest, and a flex
+ *                      capacity error surfaces instead of falling back.
+ * - `priority`         priority endpoints first, then standard; billing follows the
+ *                      endpoint that actually served.
+ * - `ultra`            ultrafast, then priority, then standard; needs `max_tokens`
+ *                      or it silently degrades to priority.
+ * - `floor`            the `:floor` slug: blind price sort over standard + flex. No
+ *                      parameter form exists for it, which is why it is a variant.
+ *
+ * @type {Readonly<Record<string, { serviceTier: string|null, sort: string|null, variant: string|null }>>}
+ */
+export const PRESET_WIRE = Object.freeze({
+  none: { serviceTier: null, sort: null, variant: null },
+  standard: { serviceTier: 'default', sort: null, variant: null },
+  fastest: { serviceTier: null, sort: 'throughput', variant: null },
+  'fastest-standard': { serviceTier: 'default', sort: 'throughput', variant: null },
+  cheapest: { serviceTier: null, sort: 'price', variant: null },
+  flex: { serviceTier: 'flex', sort: null, variant: null },
+  priority: { serviceTier: 'priority', sort: null, variant: null },
+  ultra: { serviceTier: 'ultrafast', sort: null, variant: null },
+  floor: { serviceTier: null, sort: null, variant: 'floor' },
+})
+
+/** Preset ids, in the order the composer offers them. */
+export const PRESET_IDS = Object.freeze(Object.keys(PRESET_WIRE))
+
+/**
+ * Tier strings still accepted from a 0.8.0 config or a hand-written call, mapped onto
+ * the preset that sends the same thing. `scale` has no endpoints, so it maps to the
+ * pass-through preset rather than pretending to be a request.
+ */
+const LEGACY_TIER_PRESET = Object.freeze({
+  auto: 'none',
+  default: 'standard',
+  flex: 'flex',
+  priority: 'priority',
+  fast: 'priority',
+  ultrafast: 'ultra',
+  scale: 'none',
+})
+
+const VERSION = '0.9.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -48,8 +108,8 @@ const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/
  * @returns {{
  *   enabled: boolean, host: string, port: number, portFallback: boolean,
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
- *   autoRepairReasoning: boolean, defaultTier: string|null,
- *   sessionTiers: Record<string, string>, sessionTierStamp: Record<string, number>,
+ *   autoRepairReasoning: boolean, defaultPreset: string|null,
+ *   sessionPresets: Record<string, string>, sessionPresetStamp: Record<string, number>,
  * }}
  */
 export function normalizeConfig(raw) {
@@ -57,7 +117,7 @@ export function normalizeConfig(raw) {
   const upstream = typeof config.upstream === 'string' && config.upstream.trim()
     ? config.upstream.trim().replace(/\/+$/, '')
     : DEFAULT_UPSTREAM
-  const sessionTiers = normalizeSessionTiers(config.sessionTiers)
+  const sessionPresets = normalizeSessionPresets(config.sessionPresets)
   return {
     enabled: config.enabled !== false,
     host: typeof config.host === 'string' && config.host.trim() ? config.host.trim() : '127.0.0.1',
@@ -78,16 +138,17 @@ export function normalizeConfig(raw) {
     // Extra upstreams this relay forwards to, keyed by the id used in their
     // mount path. Written by the control API when a provider is attached.
     targets: normalizeTargets(config.targets),
-    // The tier a Session runs on when it has not chosen one. The tier is a runtime
+    // The preset a Session runs on when it has not chosen one. A preset is a runtime
     // decision, so it lives here next to the table rather than in any provider row.
-    defaultTier: normalizeTierName(config.defaultTier),
-    sessionTiers: sessionTiers.tiers,
-    sessionTierStamp: sessionTiers.stamp,
+    // `defaultTier` is the 0.8.0 spelling and still normalises forward.
+    defaultPreset: normalizePresetId(config.defaultPreset ?? config.defaultTier),
+    sessionPresets: sessionPresets.presets,
+    sessionPresetStamp: sessionPresets.stamp,
   }
 }
 
 /**
- * Normalise a tier name against the tiers this relay knows, or null.
+ * Normalise a tier name against the tiers an explicit mount may pin, or null.
  * @param {unknown} value
  * @returns {string | null}
  */
@@ -96,41 +157,57 @@ export function normalizeTierName(value) {
   return KNOWN_TIERS.includes(tier) ? tier : null
 }
 
-/** How many Sessions keep a chosen tier before the oldest choices are dropped. */
-export const SESSION_TIER_LIMIT = 200
+/**
+ * Normalise a preset id, accepting the 0.8.0 tier spellings so an old config keeps
+ * working: `flex`, `priority` and `ultrafast` are still preset ids and are left alone;
+ * `default` becomes `standard`; `auto` and `scale` become the pass-through preset.
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizePresetId(value) {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (text === '') return null
+  if (Object.hasOwn(PRESET_WIRE, text)) return text
+  return LEGACY_TIER_PRESET[text] ?? null
+}
+
+/** How many Sessions keep a chosen preset before the oldest choices are dropped. */
+export const SESSION_PRESET_LIMIT = 200
 
 /**
- * Normalise the per-Session tier table. Entries are `{ tier, at }` objects written
+ * Normalise the per-Session preset table. Entries are `{ preset, at }` objects written
  * by the control API; a bare string is accepted too so a hand-edited config still
- * works. Oldest entries are dropped past {@link SESSION_TIER_LIMIT} so the table
- * cannot grow without bound as Sessions are created.
+ * works, and `{ tier }` is read forward from 0.8.0. Oldest entries are dropped past
+ * {@link SESSION_PRESET_LIMIT} so the table cannot grow without bound as Sessions are
+ * created.
  *
  * @param {unknown} raw
- * @returns {{ tiers: Record<string, string>, stamp: Record<string, number> }}
+ * @returns {{ presets: Record<string, string>, stamp: Record<string, number> }}
  */
-export function normalizeSessionTiers(raw) {
-  if (!isPlainObject(raw)) return { tiers: {}, stamp: {} }
+export function normalizeSessionPresets(raw) {
+  if (!isPlainObject(raw)) return { presets: {}, stamp: {} }
   /** @type {Array<[string, string, number]>} */
   const kept = []
   for (const [rawId, value] of Object.entries(raw)) {
     const id = typeof rawId === 'string' ? rawId.trim() : ''
     if (!id || id.length > 128) continue
-    const object = isPlainObject(value) ? value : { tier: value }
-    const tier = normalizeTierName(object.tier)
-    if (tier === null) continue
+    const object = isPlainObject(value) ? value : { preset: value }
+    const preset = normalizePresetId(object.preset ?? object.tier)
+    if (preset === null) continue
     const at = Number.isFinite(object.at) ? Number(object.at) : 0
-    kept.push([id, tier, at])
+    kept.push([id, preset, at])
   }
   kept.sort((a, b) => b[2] - a[2])
   /** @type {Record<string, string>} */
-  const tiers = {}
+  const presets = {}
   /** @type {Record<string, number>} */
   const stamp = {}
-  for (const [id, tier, at] of kept.slice(0, SESSION_TIER_LIMIT)) {
-    tiers[id] = tier
+  for (const [id, preset, at] of kept.slice(0, SESSION_PRESET_LIMIT)) {
+    presets[id] = preset
     stamp[id] = at
   }
-  return { tiers, stamp }
+  return { presets, stamp }
 }
 
 /**
@@ -582,84 +659,97 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
-   * The tier each Session chose, live in memory so a request never pays for a
+   * The preset each Session chose, live in memory so a request never pays for a
    * config read, and mirrored into this plugin's own row so a restart keeps it.
-   * The tier is a runtime decision — the same shape `reasoningEffort` has — so it
+   * The preset is a runtime decision — the same shape `reasoningEffort` has — so it
    * is deliberately *not* a property of any provider row.
    *
    * @type {Map<string, string>}
    */
-  const sessionTiers = new Map(Object.entries(config.sessionTiers ?? {}))
+  const sessionPresets = new Map(Object.entries(config.sessionPresets ?? {}))
 
   /** When each choice was made, for bounded eviction. @type {Map<string, number>} */
-  const sessionTierStamp = new Map(Object.entries(config.sessionTierStamp ?? {}))
+  const sessionPresetStamp = new Map(Object.entries(config.sessionPresetStamp ?? {}))
 
-  /** The tier a Session runs on when it has chosen nothing. */
-  function defaultTier() {
-    return normalizeTierName(config.defaultTier)
+  /** The preset a Session runs on when it has chosen nothing. */
+  function defaultPreset() {
+    return normalizePresetId(config.defaultPreset) ?? 'none'
   }
 
   /**
-   * Persist the tier every unchosen Session inherits.
+   * Persist the preset every unchosen Session inherits.
    *
    * Written into this plugin's own row because it is a preference, not a request
    * property: unlike a Session's choice there is nothing to keep in memory, so the
    * next request reads it straight from the reloaded config.
    *
-   * @param {string | null} tier
+   * @param {string} preset
    */
-  async function writeDefaultTier(tier) {
+  async function writeDefaultPreset(preset) {
     const { editor, entry, current } = ownRow()
     await editor.edit(entry, (currentConfig) => ({
       ...(isPlainObject(currentConfig) ? currentConfig : current),
-      defaultTier: tier,
+      defaultPreset: preset,
     }))
   }
 
   /**
-   * The tier one Session runs on: its own choice, else the configured default.
-   * An unknown/blank Session gets the default — a proxy hop with no tier is still
+   * The preset one Session runs on: its own choice, else the configured default.
+   * An unknown/blank Session gets the default — a proxy hop with no session is still
    * the correct answer, never an error.
    *
    * @param {unknown} session
-   * @returns {string | null}
+   * @returns {string}
    */
-  function tierForSession(session) {
+  function presetForSession(session) {
     const key = typeof session === 'string' ? session.trim() : ''
     if (key !== '') {
-      const chosen = sessionTiers.get(key)
+      const chosen = sessionPresets.get(key)
       if (chosen !== undefined) return chosen
     }
-    return defaultTier()
+    return defaultPreset()
   }
 
   /**
-   * Record one Session's tier — or clear it, which hands that Session back to the
+   * The recipe one Session's request must carry, expanded through {@link PRESET_WIRE}.
+   * There is no "no answer" case: the pass-through preset is an answer, and it is what
+   * keeps a tier pinned by the client from surviving the picker.
+   *
+   * @param {unknown} session
+   */
+  function recipeForSession(session) {
+    const preset = presetForSession(session)
+    const wire = PRESET_WIRE[preset] ?? PRESET_WIRE.none
+    return { preset, serviceTier: wire.serviceTier, sort: wire.sort, variant: wire.variant }
+  }
+
+  /**
+   * Record one Session's preset — or clear it, which hands that Session back to the
    * configured default.
    *
    * Deliberately memory-only. A Session's choice is runtime state, exactly like
    * `reasoningEffort`; persisting it would write the plugin row on every switch, and
    * that write reloads this plugin and restarts the listener mid-conversation. The one
-   * tier setting that outlives a restart is `POST /tier/default`.
+   * preset setting that outlives a restart is `POST /tier/default`.
    *
    * @param {string} session
-   * @param {string | null} tier
+   * @param {string | null} preset
    */
-  function writeSessionTier(session, tier) {
-    if (tier === null) {
-      sessionTiers.delete(session)
-      sessionTierStamp.delete(session)
+  function writeSessionPreset(session, preset) {
+    if (preset === null) {
+      sessionPresets.delete(session)
+      sessionPresetStamp.delete(session)
       return
     }
-    sessionTiers.set(session, tier)
-    sessionTierStamp.set(session, Date.now())
+    sessionPresets.set(session, preset)
+    sessionPresetStamp.set(session, Date.now())
     // Evict the oldest choices past the cap so a long-lived Host cannot grow a table
     // of every Session it ever ran.
-    if (sessionTiers.size > SESSION_TIER_LIMIT) {
-      const ordered = [...sessionTierStamp.entries()].sort((a, b) => a[1] - b[1])
-      for (const [key] of ordered.slice(0, sessionTiers.size - SESSION_TIER_LIMIT)) {
-        sessionTiers.delete(key)
-        sessionTierStamp.delete(key)
+    if (sessionPresets.size > SESSION_PRESET_LIMIT) {
+      const ordered = [...sessionPresetStamp.entries()].sort((a, b) => a[1] - b[1])
+      for (const [key] of ordered.slice(0, sessionPresets.size - SESSION_PRESET_LIMIT)) {
+        sessionPresets.delete(key)
+        sessionPresetStamp.delete(key)
       }
     }
   }
@@ -828,9 +918,9 @@ export function apply(ctx, rawConfig) {
         available: true,
         ...targets,
         custom,
-        // The tier is a Session-level runtime choice, so the page only needs to know
-        // what new Sessions inherit and which tiers a Session may pick.
-        tier: { default: defaultTier(), tiers: KNOWN_TIERS },
+        // The preset is a Session-level runtime choice, so the page only needs to know
+        // what new Sessions inherit and which presets a Session may pick.
+        tier: { default: defaultPreset(), presets: PRESET_IDS },
         // What a repair would fill: `false` = never, `null` = only from evidence
         // already declared elsewhere in the profile, object = the fallback map.
         reasoning: {
@@ -841,25 +931,28 @@ export function apply(ctx, rawConfig) {
     }),
 
     /**
-     * The service tier one Session runs on.
+     * The service-tier preset one Session runs on.
      *
-     * `GET ?session=<id>` reports what that Session would send right now; `POST`
-     * with `{ session, tier }` chooses it, and `tier: null` hands the Session back
-     * to the configured default. Nothing here touches a provider row: the relay
-     * writes `service_tier` into the request body on the way out, so switching is a
-     * runtime change like `reasoningEffort` rather than a new provider.
+     * `GET ?session=<id>` reports what that Session would send right now; `POST` with
+     * `{ session, preset }` chooses it, and `preset: null` hands the Session back to
+     * the configured default. Nothing here touches a provider row: the relay writes
+     * `service_tier`, `provider.sort` or a model variant into the request body on the
+     * way out, so switching is a runtime change like `reasoningEffort` rather than a
+     * new provider.
      */
     [`${CONTROL_PREFIX}/tier`]: controlRoute(async (req, res) => {
       if (req.method === 'GET') {
         const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
         const session = (query.get('session') ?? '').trim()
+        const recipe = recipeForSession(session)
         sendJson(res, 200, {
           ok: true,
           session,
-          tier: tierForSession(session),
-          chosen: sessionTiers.get(session) ?? null,
-          default: defaultTier(),
-          tiers: KNOWN_TIERS,
+          preset: recipe.preset,
+          wire: { serviceTier: recipe.serviceTier, sort: recipe.sort, variant: recipe.variant },
+          chosen: sessionPresets.get(session) ?? null,
+          default: defaultPreset(),
+          presets: PRESET_IDS,
         })
         return
       }
@@ -867,51 +960,56 @@ export function apply(ctx, rawConfig) {
       const body = await readJsonBody(req)
       const session = typeof body.session === 'string' ? body.session.trim() : ''
       if (!session) {
-        sendJson(res, 400, { error: { message: 'session is required: the Session whose tier is being set' } })
+        sendJson(res, 400, { error: { message: 'session is required: the Session whose preset is being set' } })
         return
       }
       if (session.length > 128) {
         sendJson(res, 400, { error: { message: 'session must be at most 128 characters' } })
         return
       }
-      const raw = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
-      if (raw !== '' && !KNOWN_TIERS.includes(raw)) {
+      // `tier` is the 0.8.0 spelling and still maps onto the preset that sends it.
+      const raw = typeof body.preset === 'string' ? body.preset : typeof body.tier === 'string' ? body.tier : ''
+      const text = raw.trim().toLowerCase()
+      const preset = text === '' ? null : normalizePresetId(text)
+      if (text !== '' && preset === null) {
         sendJson(res, 400, {
-          error: { message: `unknown service tier ${JSON.stringify(raw)}; use one of ${KNOWN_TIERS.join(', ')} or null for the default` },
+          error: { message: `unknown preset ${JSON.stringify(text)}; use one of ${PRESET_IDS.join(', ')} or null for the profile default` },
         })
         return
       }
-      const tier = raw === '' ? null : raw
       // No config write and no transaction escape: this touches memory only.
-      writeSessionTier(session, tier)
-      log('info', 'chose service tier for session', { session, tier })
+      writeSessionPreset(session, preset)
+      log('info', 'chose service tier preset for session', { session, preset })
+      const recipe = recipeForSession(session)
       sendJson(res, 200, {
         ok: true,
         session,
-        tier: tierForSession(session),
-        chosen: tier,
-        default: defaultTier(),
-        tiers: KNOWN_TIERS,
+        preset: recipe.preset,
+        wire: { serviceTier: recipe.serviceTier, sort: recipe.sort, variant: recipe.variant },
+        chosen: preset,
+        default: defaultPreset(),
+        presets: PRESET_IDS,
       })
     }),
 
-    // The tier an unchosen Session inherits. Separate from `/tier` because it is a
-    // profile preference rather than one Session's choice, and it is the only tier
+    // The preset an unchosen Session inherits. Separate from `/tier` because it is a
+    // profile preference rather than one Session's choice, and it is the only preset
     // setting that outlives a restart by design.
     [`${CONTROL_PREFIX}/tier/default`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)
-      const raw = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
-      if (raw !== '' && !KNOWN_TIERS.includes(raw)) {
+      const raw = typeof body.preset === 'string' ? body.preset : typeof body.tier === 'string' ? body.tier : ''
+      const text = raw.trim().toLowerCase()
+      const preset = text === '' ? 'none' : normalizePresetId(text)
+      if (preset === null) {
         sendJson(res, 400, {
-          error: { message: `unknown service tier ${JSON.stringify(raw)}; use one of ${KNOWN_TIERS.join(', ')} or null for no tier` },
+          error: { message: `unknown preset ${JSON.stringify(text)}; use one of ${PRESET_IDS.join(', ')} or none` },
         })
         return
       }
-      const tier = raw === '' ? null : raw
-      await outsideHmrTransaction(ctx, () => writeDefaultTier(tier))
-      log('info', 'chose the default service tier', { tier })
-      sendJson(res, 200, { ok: true, default: tier, tiers: KNOWN_TIERS })
+      await outsideHmrTransaction(ctx, () => writeDefaultPreset(preset))
+      log('info', 'chose the default service tier preset', { preset })
+      sendJson(res, 200, { ok: true, default: preset, presets: PRESET_IDS })
     }),
 
     // There is deliberately no `/routes/twin`: switching a Session's tier must not
@@ -1126,7 +1224,7 @@ export function apply(ctx, rawConfig) {
     resolveTarget,
     // The tier a bare mount should use for the Session carrying the request. The
     // relay only asks; every choice lives here, in this plugin's own config.
-    resolveSessionTier: (session) => tierForSession(session),
+    resolveSessionRecipe: (session) => recipeForSession(session),
     onRecord: (entry) => metrics.record(entry),
   })
 

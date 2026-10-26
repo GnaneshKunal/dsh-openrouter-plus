@@ -3,7 +3,7 @@ import http from 'node:http'
 import { after, test } from 'node:test'
 
 import { createMetrics } from '../lib/metrics.js'
-import { createRelay, findUsage, sessionKeyOf } from '../lib/proxy.js'
+import { applyRecipe, baseModelId, createRelay, findUsage, normalizeRecipe, sessionKeyOf } from '../lib/proxy.js'
 
 /** @type {Array<() => Promise<void>>} */
 const cleanups = []
@@ -602,7 +602,7 @@ test('sessionKeyOf() reads a Session header first, then prompt_cache_key', () =>
   assert.equal(sessionKeyOf({ 'x-session-id': 'x'.repeat(400) }, {}).length, 128, 'the key is clamped')
 })
 
-test('a bare target mount asks the resolver per Session and writes that tier', async () => {
+test('a bare target mount asks the resolver per Session and applies that recipe', async () => {
   /** @type {Array<{ body: Record<string, unknown>, url: string }>} */
   const seen = []
   const gateway = await startServer(async (req, res) => {
@@ -615,11 +615,14 @@ test('a bare target mount asks the resolver per Session and writes that tier', a
   const asked = []
   const { address } = await startRelay(gateway.origin, { '/v1': null }, {
     resolveTarget: () => ({ upstream: gateway.origin }),
-    resolveSessionTier: (session) => {
+    resolveSessionRecipe: (session) => {
       asked.push(session)
-      if (session === 'cheap') return 'flex'
-      if (session === 'fast') return 'priority'
-      return null
+      if (session === 'flex') return { preset: 'flex', serviceTier: 'flex', sort: null, variant: null }
+      if (session === 'fast') return { preset: 'fastest', serviceTier: null, sort: 'throughput', variant: null }
+      if (session === 'floor') return { preset: 'floor', serviceTier: null, sort: null, variant: 'floor' }
+      if (session === 'legacy') return 'priority'
+      // The pass-through preset answers too: it is an answer, not a missing one.
+      return { preset: 'none', serviceTier: null, sort: null, variant: null }
     },
   })
 
@@ -629,13 +632,73 @@ test('a bare target mount asks the resolver per Session and writes that tier', a
     body: JSON.stringify(body),
   })
 
-  assert.equal((await send({ 'x-session-id': 'cheap' })).status, 200)
+  assert.equal((await send({ 'x-session-id': 'flex' })).status, 200)
   assert.equal((await send({}, { model: 'm', prompt_cache_key: 'fast' })).status, 200)
-  assert.equal((await send({ 'x-session-id': 'none' })).status, 200)
+  assert.equal((await send({ 'x-session-id': 'floor' })).status, 200)
+  assert.equal((await send({ 'x-session-id': 'legacy' })).status, 200)
+  // A client that pinned its own tier is not trusted to outlive the picker.
+  assert.equal((await send({ 'x-session-id': 'none' }, { model: 'm', service_tier: 'priority' })).status, 200)
 
-  assert.deepEqual(asked, ['cheap', 'fast', 'none'], 'one lookup per request, keyed by the Session')
+  assert.deepEqual(asked, ['flex', 'fast', 'floor', 'legacy', 'none'], 'one lookup per request, keyed by the Session')
   assert.equal(seen[0].body.service_tier, 'flex')
-  assert.equal(seen[1].body.service_tier, 'priority', 'pi-ai`s prompt_cache_key is enough on its own')
-  assert.equal('service_tier' in seen[2].body, false, 'a Session with no choice writes nothing')
+  assert.equal(seen[1].body.service_tier, undefined, 'a sort preset writes no tier')
+  assert.deepEqual(seen[1].body.provider, { sort: 'throughput' }, 'the comparator rides provider.sort')
+  assert.equal(seen[2].body.model, 'm:floor', 'the floor preset is a model variant, not a parameter')
+  assert.equal(seen[3].body.service_tier, 'priority', 'a 0.8.0 bare tier string still works')
+  assert.equal('service_tier' in seen[4].body, false, 'pass-through strips a tier the client pinned')
   assert.equal(seen[0].body.model, 'm', 'every other body field survives the rewrite')
+})
+
+test('normalizeRecipe() accepts a bare tier and keeps the three levers apart', () => {
+  assert.deepEqual(normalizeRecipe('flex'), { preset: 'flex', serviceTier: 'flex', sort: null, variant: null })
+  assert.equal(normalizeRecipe(''), null)
+  assert.equal(normalizeRecipe(null), null)
+  assert.deepEqual(normalizeRecipe({ preset: 'none' }), { preset: 'none', serviceTier: null, sort: null, variant: null })
+  assert.deepEqual(normalizeRecipe({ serviceTier: 'PRIORITY' }), {
+    preset: null,
+    serviceTier: 'priority',
+    sort: null,
+    variant: null,
+  })
+  assert.deepEqual(normalizeRecipe({ sort: 'throughput', variant: 'floor', preset: 'x' }), {
+    preset: 'x',
+    serviceTier: null,
+    sort: 'throughput',
+    variant: 'floor',
+  })
+  assert.equal(normalizeRecipe({}), null, 'an empty recipe names nothing, so it is no recipe')
+})
+
+test('applyRecipe() merges provider fields and never clobbers the caller`s own', () => {
+  const body = {
+    model: 'vendor/model',
+    provider: { only: ['deepinfra'], order: ['a', 'b'], allow_fallbacks: false },
+  }
+  assert.equal(applyRecipe(body, normalizeRecipe({ preset: 'cheapest' })), false, 'a preset-only recipe names no lever')
+  assert.deepEqual(body.provider, { only: ['deepinfra'], order: ['a', 'b'], allow_fallbacks: false }, 'nothing to do')
+
+  assert.equal(applyRecipe(body, normalizeRecipe({ sort: 'price' })), true)
+  assert.deepEqual(body.provider, { only: ['deepinfra'], order: ['a', 'b'], allow_fallbacks: false, sort: 'price' })
+  assert.equal('service_tier' in body, false)
+
+  assert.equal(applyRecipe(body, normalizeRecipe({ serviceTier: 'default' })), true)
+  assert.equal(body.service_tier, 'default')
+  assert.equal(applyRecipe(body, normalizeRecipe({ serviceTier: 'default' })), false, 'idempotent')
+
+  assert.equal(applyRecipe(body, normalizeRecipe({ variant: 'floor' })), true)
+  assert.equal(body.model, 'vendor/model:floor')
+  assert.equal(applyRecipe(body, normalizeRecipe({ variant: 'floor' })), false, 'idempotent')
+
+  // Dropping the variant and the tier is how the pass-through preset gets honest again.
+  assert.equal(applyRecipe(body, normalizeRecipe({ preset: 'none' })), true)
+  assert.equal(body.model, 'vendor/model')
+  assert.equal('service_tier' in body, false)
+})
+
+test('baseModelId() only strips the two relay-owned variants', () => {
+  assert.equal(baseModelId('vendor/model:floor'), 'vendor/model')
+  assert.equal(baseModelId('vendor/model:nitro'), 'vendor/model')
+  assert.equal(baseModelId('vendor/model:online'), 'vendor/model:online', 'a caller suffix survives')
+  assert.equal(baseModelId('vendor/model:free'), 'vendor/model:free')
+  assert.equal(baseModelId('vendor/model'), 'vendor/model')
 })
