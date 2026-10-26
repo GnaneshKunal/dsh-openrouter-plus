@@ -2,18 +2,19 @@
 
 **Service-tier routing for OpenRouter — as a DeepSeek Harness plugin, with no patched packages.**
 
-OpenRouter prices and schedules by *service tier*: `flex` halves token cost in exchange for a
-slower pool, while `priority` / `fast` / `ultrafast` pay a multiplier for lower latency. In
-`@deepseek-ai/dsh-llm-pi-ai` that tier is unreachable — provider profiles expose `baseURL` and
-`headers`, but no request-body fields
+OpenRouter lets you steer where a request is served from: `flex` endpoints bill half price on a
+slower pool, `priority` endpoints bill a multiplier for lower latency, and the throughput or price
+comparators reorder the pool in between. In `@deepseek-ai/dsh-llm-pi-ai` none of that is reachable —
+provider profiles expose `baseURL` and `headers`, but no request-body fields
 ([discussion #9787](https://github.com/deepseek-ai/deepseek-harness/discussions/9787)).
 
 This plugin reaches the same wire result from the outside. It runs a **loopback relay**; a provider
-route points at it, and the relay writes the `service_tier` key into the request body on the way
-upstream. Because it only uses schema fields the profile already has, it survives
+route points at it, and the relay writes the routing fields into the request body on the way
+upstream — `service_tier`, `provider.sort`, or the `:floor` model variant, depending on the
+**preset** you picked. Because it only uses schema fields the profile already has, it survives
 `bun install -g` upgrades and never touches `~/.bun/install/global`.
 
-The tier is chosen **per session, at request time**. One provider row keeps serving every tier, so
+The preset is chosen **per session, at request time**. One provider row keeps serving every preset, so
 switching never mints a provider, a route or a model list.
 
 ```
@@ -22,34 +23,36 @@ switching never mints a provider, a route or a model list.
       ▼
   dsh-llm-pi-ai ──►  dsh-openrouter-plus relay  ──►  https://openrouter.ai/api/v1
       baseURL =           │ reads the session from x-session-id / prompt_cache_key,
-  127.0.0.1:8791/t/<id>/v1  │ injects {"service_tier":"priority"}
+  127.0.0.1:8791/t/<id>/v1  │ applies that session's preset to the body
                             └── /__openrouter-plus/* ──► OpenRouter Plus settings page
 ```
 
 ## What you get
 
-- **One provider row, any tier.** A routed provider keeps its key, protocol and models and gains one
-  thing: a composable **service tier** that the relay writes into each request. No per-tier provider
-  copies, no sibling route per tier, no model list duplicated seven times.
+- **One provider row, any preset.** A routed provider keeps its key, protocol and models and gains
+  one thing: a composable **preset** that the relay applies to each request. No per-preset provider
+  copies, no sibling route per preset, no model list duplicated nine times.
 - **Tier mounts** — `/flex/v1`, `/priority/v1`, `/fast/v1`, `/ultrafast/v1`, `/scale/v1`,
   `/auto/v1`, `/default/v1`, plus a `/v1` passthrough that sends no tier at all. Each mount is a
   `baseURL` you can paste into any OpenAI-compatible provider route when you want a *permanently*
-  pinned tier instead of a per-session one.
+  pinned service tier instead of a per-session preset.
 - **Its own settings page** (Settings → OpenRouter Plus) showing relay state, every mount with a
   copy button, live request/token counters per tier, the weighted cost multiplier, and recent
   requests.
-- **A tier chip in the composer** — next to the model selector, a compact chip shows the tier this
-  Session will actually send and switches it in one click. The switch is **per session**: it changes
-  what the next request from *this* conversation carries, so two conversations can sit on `flex` and
-  `priority` at the same time. It shows up on a brand-new Session too — before the first message the
-  chip reads the plugin's default tier, so a tier can be picked *before* you start typing. The
-  reasoning effort you chose stays put: switching a tier touches no provider row and no model list.
+- **A preset chip in the composer** — next to the model selector, a compact chip shows the preset
+  this Session will actually apply and switches it in one click. The switch is **per session**: it
+  changes what the next request from *this* conversation carries, so two conversations can sit on
+  `Flex` and `Priority` at the same time. It shows up on a brand-new Session too — before the first
+  message the chip reads the profile default, so a preset can be picked *before* you start typing.
+  The reasoning effort you chose stays put: switching a preset touches no provider row and no model
+  list.
 - **A switch on every provider row** — in Settings → Models, each `llm-pi-ai` provider gets a
   **Route through OpenRouter Plus** checkbox. Tick it and that provider's traffic flows through the
   relay to the endpoint you already gave it; untick it and the endpoint comes back. Your provider
   entry, protocol, key and models are left exactly as they were.
-- **A default tier for the profile** — the settings page sets what an unchosen Session inherits, and
-  the composer chip's `Default (…)` entry hands a Session back to it.
+- **A default preset for the profile** — the settings page sets what an unchosen Session inherits
+  (and explains what every preset sends), and the composer chip's `Profile default (…)` entry hands
+  a Session back to it.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
   header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
   construction.
@@ -67,19 +70,20 @@ the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mou
 
 ## Use it
 
-### Two clicks: tick the provider, pick the tier
+### Two clicks: tick the provider, pick the preset
 
 1. **Settings → Models** → tick **Route through OpenRouter Plus** on the provider you already use
    (for example `openrouter-custom`). That provider's traffic now flows through the relay; its
    `api`, `apiKeyEnv`, headers and models are untouched.
-2. Open the composer of any Session and pick a tier in the chip next to the model selector. Every
-   request that Session sends now carries `service_tier: "<tier>"`.
+2. Open the composer of any Session and pick a preset in the chip next to the model selector. Every
+   request that Session sends now applies that preset.
 
 Nothing else to create, and nothing to clean up: the provider row is the only row that ever existed,
-and the tier is a per-Session choice rather than a provider.
+and the preset is a per-Session choice rather than a provider.
 
-The settings page manages the profile-level **Default service tier** and lists the routes that
-currently point at this relay (with **Remove** for the ones you no longer want).
+The settings page manages the profile-level **Service tier for new sessions** — with a short table
+of what each preset sends — and lists the routes that currently point at this relay (with **Remove**
+for the ones you no longer want).
 
 ### From a provider row (the switch)
 
@@ -91,7 +95,7 @@ Ticking it does three things, all through the control API:
 1. records the endpoint that row currently points at (that is your real base URL) as a *target* in
    this plugin's own config;
 2. gives that target a mount — `http://127.0.0.1:8791/t/<targetId>/v1` — which *mounts* the
-   endpoint without pinning a tier: the tiers come from the Sessions that call it;
+   endpoint without pinning a service tier: the presets come from the Sessions that call it;
 3. repoints **only** that provider row's `baseURL` at the mount. `api`, `apiKeyEnv`, headers and
    models are not touched, and no plugin bookkeeping is written into the provider entry (it is
    schema-validated, so it stays clean).
@@ -101,13 +105,13 @@ config, so the Loader re-applies the Host row and the listener rebinds — which
 response to that very request. It is not a failure: the strip re-probes `/health`, re-reads
 `/targets` and shows the truth, and every write here is idempotent, so a retry lands cleanly. Later
 attaches (a detach, a re-attach of a known endpoint) reuse the target row and do not reload anything.
-**A tier switch never writes anything**, so it never reloads anything either.
+**A preset switch never writes anything**, so it never reloads anything either.
 
 What happens to a request: the relay strips the mount prefix, appends the rest of the path to your
-recorded endpoint, asks which tier the Session carrying that request chose, and writes
-`service_tier` into the JSON body when it has one. With no tier chosen the body goes out untouched —
-and a `service_tier` the client put there itself is removed, so this Session's silence stays silence
-rather than inheriting whatever a UI happened to send.
+recorded endpoint, resolves the preset the Session carrying that request chose, and applies it to the
+JSON body. `No pin` sends neither a tier nor a comparator — and a `service_tier` the client put there
+itself is removed, so a Session that pinned nothing stays unpinned rather than inheriting whatever a
+UI happened to send.
 
 Untick it (**Detach**) and the row's `baseURL` goes back to the endpoint recorded for that target;
 the mount stays until you remove the target. Everything is idempotent: the same endpoint always maps
@@ -197,27 +201,49 @@ entirely, and use **Add reasoning to N models** in the settings page (or
 Either way it only ever touches routes whose `baseURL` points at the relay, never overwrites a
 declared map, never resurrects an explicit `false`, and writes nothing when there is nothing to do.
 
-### From the composer (the tier chip)
+## Presets
 
-Once a provider row is routed, a compact chip appears in the composer next to the model selector
-showing the tier the next request will carry. Picking another tier there does **not** rewrite any
+A service tier is not one field. OpenRouter exposes three levers — `service_tier` (which pools may
+serve, and in what order), `provider.sort` (the comparator over that pool) and two slug suffixes
+(`:nitro`, `:floor`) that mix the two — and each preset is a combination the API actually defines:
+
+| Preset | Sends | What it does |
+| --- | --- | --- |
+| **No pin** | nothing | OpenRouter's own routing. |
+| **Standard** | `service_tier: "default"` | The standard tier only; priority endpoints are excluded. |
+| **Fastest · any price** | `provider.sort: "throughput"` | The whole eligible pool sorted by throughput. On an open-weight model this *is* nitro — its priority endpoints already compete in default routing. On a closed-weight one it stops short, because those endpoints are opt-in. |
+| **Fastest · standard price** | `sort: "throughput"` + `service_tier: "default"` | The same race over the standard pool only, so the priority premium is unreachable. |
+| **Cheapest** | `provider.sort: "price"` | Lowest price over the standard pool — usually a quantized version of the model. It never admits a flex endpoint, so it cannot reach a flex rate. |
+| **Flex** | `service_tier: "flex"` | Flex endpoints only, at flex rates. Not necessarily the cheapest, and a flex capacity error surfaces instead of falling back to standard. |
+| **Priority** | `service_tier: "priority"` | Priority endpoints serve first, then standard. OpenAI calls this Fast mode. The premium is charged only when a priority endpoint actually serves, and within each group endpoints sort by throughput unless you set a comparator. |
+| **Ultra** | `service_tier: "ultrafast"` | ultrafast, then priority, then standard. OpenAI models only, and it needs `max_tokens` to hold — without one it silently degrades to priority. |
+| **Floor** | `model: "…:floor"` | A blind price sort across the standard **and** flex pools. No parameter form exists for this, which is why it is a slug. `:nitro` is deliberately not offered separately: for the models where it changes the outcome, **Fastest · any price** is the same race. |
+
+Two rows sit between "no tier" and "priority" for a reason: `provider.sort` and `service_tier`
+decide different things. Sorting by throughput reorders whatever pool the tier admitted; pinning
+`service_tier: "default"` is what keeps the premium out of it. Neither one alone can say
+"fastest, and never at a premium".
+
+### From the composer (the preset chip)
+
+Once a provider row is routed, a compact chip appears in the composer next to the model selector,
+showing the preset the next request will apply. Picking another one there does **not** rewrite any
 config and does **not** mint a provider: the Host records the choice for this Session in memory, and
 the relay applies it to the request body on the way out.
 
-- `flex` — half price, slower pool.
-- `priority` / `fast` / `ultrafast` — a multiplier for a faster pool.
-- `scale` / `auto` / `default` — OpenRouter's own scheduling modes.
-- **No tier (pass-through)** — the body leaves without a `service_tier` key at all.
-- **Default (no tier)** / **Default (flex)**, … — stop choosing for this Session and inherit the profile default again.
+The menu carries labels only — `Fastest · any price`, `Cheapest`, `Flex`, `Priority`, … — and the
+long explanation of what each one sends lives on the settings page, where it is read once. The first
+entry, **Profile default (…)**, stops choosing for this Session and shows which preset it will
+inherit.
 
-That is why it is per session: two conversations can be on `flex` and `priority` at the same time,
+That is why it is per session: two conversations can be on `Flex` and `Priority` at the same time,
 neither of them rewrites the other's provider row, and the reasoning effort you selected survives
 the switch because the selection itself never changes.
 
 The choice lives in the Host's memory — it is runtime state, like the effort level — so it survives
-the whole Session but not a Host restart (a default-tier write reloads the plugin, which drops those
-choices too). Want a tier that outlives every restart? Either set the profile **Default service tier**
-or point a provider at a pinned mount by hand (`/flex/v1`).
+the whole Session but not a Host restart (a default-preset write reloads the plugin, which drops
+those choices too). Want a preset that outlives every restart? Either set the profile **Service tier
+for new sessions** or point a provider at a pinned mount by hand (`/flex/v1`).
 
 The chip only appears when the Session's current provider is routed through a mount
 (`/t/<targetId>/…`). Elsewhere the Models-page switch is the control: it is the one that moves the
@@ -231,10 +257,10 @@ Served on the same loopback listener, outside the proxy path space:
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
 | `GET /__openrouter-plus/status` | address, upstream, mounts, metrics |
-| `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the tier table (`{ default, tiers }`) |
-| `GET /__openrouter-plus/tier?session=<id>` | what that Session would send now: `tier`, `chosen`, `default`, `tiers` |
-| `POST /__openrouter-plus/tier` | `{ session, tier }` — choose this Session's tier; `tier: null` hands it back to the default. **Memory only, never a config write** |
-| `POST /__openrouter-plus/tier/default` | `{ tier }` — the tier an unchosen Session inherits; `tier: null` clears it |
+| `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
+| `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
+| `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
+| `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
 | `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream }` — record the endpoint and point that provider at the relay |
@@ -245,8 +271,10 @@ Served on the same loopback listener, outside the proxy path space:
 `attach`/`detach` are what the Models-page switch calls; both are idempotent and report
 `changed: false` when the row is already in the requested state. A rejected request answers `400`
 with `{ error: { message } }` — for example a body that is not an http(s) URL, or one that points
-back at the relay. `POST /tier` answers `400` for an unknown tier name (`turbo`) or a missing
-`session`, and accepts `tier: null`/`""` to clear.
+back at the relay. `POST /tier` answers `400` for an unknown preset (`turbo`) or a missing
+`session`, and accepts `preset: null` (or no `preset` at all) to clear. The 0.8.0 body shape is still
+read: `tier: "fast"` maps onto the `priority` preset, and any other legacy name maps onto the preset
+that sends the same field.
 
 Everything in `/tier` is deliberately write-free: a config write would re-apply this plugin row and
 restart the listener, which is not something a mid-conversation click should risk. Only
@@ -273,7 +301,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
 | `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
-| `defaultTier` | `null` | the tier an unchosen Session inherits; `null` sends no `service_tier` at all. Written by **Default service tier** on the settings page |
+| `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A 0.8.0 `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 
 ## Security model
@@ -292,10 +320,12 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | --- | --- |
 | Card says *relay offline* | The port range is busy, or the row is `enabled: false`. Check the Host log for `[openrouter-plus]`; set a fixed `port`. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
-| Requests work but no tier is applied | This Session has no tier chosen (`No tier` / no default), the mount is the bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
-| The chip shows a tier, but another Session still bills full price | The tier is per Session by design. Set it in that Session's composer, or set a profile **Default service tier**. |
-| The chip disappeared after a Host restart | Choices are runtime state and the memory table is dropped on restart (and on a default-tier write, which reloads the plugin). Re-pick it, or set the default tier. |
-| `flex` still bills full price | The provider decides the served tier; a pinned tier only *requests* it. Confirm with `usage` / the OpenRouter dashboard. |
+| Requests work but nothing is steered | The Session is on **No pin** (or the profile default is), the mount is a bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
+| The chip shows a preset, but another Session still bills full price | Every preset is per Session by design. Set it in that Session's composer, or set a profile **Service tier for new sessions**. |
+| The chip disappeared after a Host restart | Choices are runtime state and the memory table is dropped on restart (and on a default-preset write, which reloads the plugin). Re-pick it, or set the profile default. |
+| `Flex` still bills full price | The provider decides which endpoint served; a preset only decides which ones may be asked. Confirm the served endpoint with `usage` or the OpenRouter dashboard. |
+| `Fastest · any price` did not get faster | The comparator only reorders the pool the tier admitted. On a closed-weight model the fastest endpoints are priority-only, so use **Priority** — or compare against the `:nitro` slug in the OpenRouter dashboard. |
+| `Ultra` behaves like `Priority` | `ultrafast` only holds on OpenAI models that receive a `max_tokens` limit; without one the API degrades to priority. The relay never invents a limit, so set one on the model row. |
 | No effort selector for a relay route's model | The model has no `reasoningEfforts` — usually because the model list was edited in Settings → Models afterwards. It is restored automatically; if `autoRepairReasoning` is off, press **Add reasoning to N models** on the OpenRouter Plus page. See "Reasoning effort on a relay route". |
 
 ## Uninstall
@@ -310,7 +340,7 @@ dsh plugin remove dsh-openrouter-plus
 
 ```bash
 node --check index.js && node --check client.js
-node --test            # 92 tests, no network, no profile writes
+node --test            # 95 tests, no network, no profile writes
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module contract, and

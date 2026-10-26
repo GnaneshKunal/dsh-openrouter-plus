@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "OpenRouter Plus",
-    "description": "Service-tier routing for OpenRouter and any OpenAI-compatible API. Runs a loopback relay that applies flex / priority / fast / ultrafast to each Session at request time — one provider row, pick the tier in the composer, with live cost-multiplier telemetry and a profile-wide default. No patching of shipped packages."
+    "description": "Routing presets for OpenRouter and any OpenAI-compatible API. Runs a loopback relay that applies a preset to each Session at request time — fastest, cheapest, flex, priority, ultra or floor — chosen in the composer, with live telemetry and a profile-wide default. No patching of shipped packages."
   }
 }

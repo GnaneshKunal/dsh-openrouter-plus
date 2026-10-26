@@ -1,9 +1,9 @@
 {
   "name": "dsh-openrouter-plus",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
-  "description": "OpenRouter service-tier routing for DeepSeek Harness \u2014 a loopback relay that applies a service tier (flex / priority / fast / ultrafast) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default tier.",
+  "description": "OpenRouter routing presets for DeepSeek Harness \u2014 a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset.",
   "keywords": [
     "deepseek",
     "harness",
@@ -11,6 +11,7 @@
     "dsh-plugin",
     "openrouter",
     "service-tier",
+    "provider-sorting",
     "flex",
     "llm"
   ],

@@ -1,21 +1,27 @@
 # dsh-openrouter-plus — architecture & module contract
 
 A DeepSeek Harness plugin that adds **OpenRouter service-tier routing** without patching any
-shipped package: it runs a loopback relay that pins `service_tier` in OpenAI-compatible request
-bodies, exposes a live status API, and adds an **OpenRouter Plus settings page** that can create
-a real provider route in the profile pointing at the relay.
+shipped package: it runs a loopback relay that applies a routing *preset* to OpenAI-compatible
+request bodies, exposes a live status API, and adds an **OpenRouter Plus settings page** that can
+create a real provider route in the profile pointing at the relay.
 
 Background: `deepseek-harness` discussion #9787 asks for a `serviceTier` field on
 `@deepseek-ai/dsh-llm-pi-ai` provider profiles. That field lives in a package a third-party
-plugin cannot patch. The relay achieves the same wire effect (a `service_tier` key in the
-request body) entirely through configuration, so it survives `bun install -g` upgrades.
+plugin cannot patch. The relay achieves the same wire effect entirely through configuration, so it
+survives `bun install -g` upgrades.
+
+A preset is more than one field. `service_tier`, `provider.sort` and the `:floor` / `:nitro` model
+suffixes are three levers with three contracts, and only certain combinations are defined — which is
+why the plugin exposes outcomes (`Fastest · standard price`, `Flex`, `Floor`) and keeps the wire
+recipe in one table (`PRESET_WIRE`) rather than offering the raw fields.
 
 ```
 composer/model picker
-      │  baseURL = http://127.0.0.1:8791/flex/v1
+      │  baseURL = http://127.0.0.1:8791/t/<id>/v1
       ▼
 dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.ai/api/v1
-                        │ injects {"service_tier":"flex"} into the JSON body
+                        │ applies that session's preset to the JSON body
+                        │   service_tier / provider.sort / model suffix
                         └ /__openrouter-plus/status ──► OpenRouter Plus page (client.js)
 ```
 
@@ -59,16 +65,16 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
-| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, tiers }, reasoning: { fill, levels } }` | |
+| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, reasoning: { fill, levels } }` | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
 | `POST /__openrouter-plus/routes/detach` | `{ route, id }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
 | `POST /__openrouter-plus/targets/register` | `{ upstream, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |
 | `POST /__openrouter-plus/targets/remove` | `{ id }` | `{ ok: true, id }`, or `409 { error, route }` while a provider still uses it |
-| `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, tier, chosen, default, tiers }` — what that Session sends *now* |
-| `POST /__openrouter-plus/tier` | `{ session, tier }` | `{ ok, session, tier, chosen, default }`; `tier: null`/`""` clears. **Memory only** |
-| `POST /__openrouter-plus/tier/default` | `{ tier }` | `{ ok, default, tiers }`; one config write, because it is a preference |
+| `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, preset, wire: { serviceTier, sort, variant }, chosen, default, presets }` — what that Session applies *now* |
+| `POST /__openrouter-plus/tier` | `{ session, preset }` (or the 0.8.0 `tier`) | the same body; `preset: null`/absent clears. **Memory only** |
+| `POST /__openrouter-plus/tier/default` | `{ preset }` (or `tier`) | `{ ok, default, presets }`; one config write, because it is a preference. An absent preset means `none` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
@@ -151,7 +157,11 @@ Target mounts (added in 0.5.0, alongside the legacy tier mounts):
   after trailing-slash stripping, with the base query merged into the request query.
 - `createRelay({ …, resolveTarget })`, `resolveTarget(targetId) -> { upstream, tier } | null` (a
   promise is awaited). The relay reads only those two fields and never touches config. The mount
-  shape decides *whether* a tier is written; the resolver's `tier` supplies the value.
+  shape decides *whether* a pinned tier is written; the resolver's `tier` supplies the value.
+- `resolveSessionRecipe(session) -> { preset, serviceTier, sort, variant } | string | null` (a
+  promise is awaited) is the per-Session seam, and it is asked **after** the mount shape and pins
+  nothing itself: a recipe whose three levers are all `null` is the pass-through preset, and it is an
+  answer, not a missing one.
 - Rejections happen before any upstream call: unknown target → `404` in the legacy unknown-mount
   shape; unusable upstream (missing, non-`http(s)`, carrying credentials) → `400`; a target pointing
   back at this listener → `400` "refusing to proxy it to itself".
@@ -169,6 +179,10 @@ Target mounts (added in 0.5.0, alongside the legacy tier mounts):
  * @param {string} options.upstream      e.g. 'https://openrouter.ai/api/v1' (no trailing slash)
  * @param {Record<string,string|null>} options.routes
  *        map of mount path -> tier, e.g. { '/flex/v1': 'flex', '/v1': null }
+ * @param {(session: string) => object|string|null} [options.resolveSessionRecipe]
+ *        per-Session preset; applied after the mount shape, on any mount
+ * @param {(session: string) => string|null} [options.resolveSessionTier]
+ *        0.8.0 spelling of the same seam: a bare tier string
  * @param {Record<string, (req,res)=>Promise<void>|void>} [options.control]
  *        absolute pathname -> handler, checked before proxying
  * @param {(entry: object) => void} [options.onRecord]   per-request metric sink
@@ -195,16 +209,21 @@ Behaviour that the caller relies on:
 1. **Mount matching** — longest `routes` key that is a prefix of the pathname and ends on a segment
    boundary (`/flex/v1/chat/completions` matches `/flex/v1`, not `/fle`). The mount is stripped;
    the remainder is appended to `upstream`. `/v1/...` with a `null` tier is a pure passthrough.
-2. **Tier injection** — only for `POST` with a JSON body and a non-null tier: parse the body, set the
-   top-level `service_tier` (replacing any existing value), re-serialize, fix `content-length`.
-   Invalid JSON or a non-JSON content type is forwarded untouched (never throw at the client).
+2. **Recipe application** — for `POST` with a JSON body, parse it and apply the resolved recipe
+   (`applyRecipe`): `service_tier` is set or deleted, `provider.sort` is *merged* into whatever
+   `provider` object the caller sent (never replacing `only` / `order` / `allow_fallbacks`), and the
+   relay-owned `:floor` / `:nitro` suffix is appended to or stripped from `model`. Applying the
+   pass-through preset is a real action: it deletes a tier the client pinned. Invalid JSON or a
+   non-JSON content type is forwarded untouched (never throw at the client).
 3. **Streaming** — the upstream response is piped straight through, unbuffered, so SSE deltas keep
    their timing. `accept-encoding: identity` is sent upstream (no gunzip/re-chunk), `host` and
    `content-length` are rebuilt, everything else (notably `authorization`) is forwarded verbatim.
 4. **Timeouts** — no request timeout on the server and no upstream timeout unless configured, so a
    long completion is not cut. Client aborts propagate upstream.
 5. **Metrics** — `onRecord` receives one entry per proxied request:
-   `{ at, tier, model, streaming, status, ms, bytes, promptTokens, completionTokens }`.
+   `{ at, tier, preset, model, streaming, status, ms, bytes, promptTokens, completionTokens }`.
+   `tier` is the wire field that was sent (if any), `preset` the outcome the Session picked — a sort
+   preset sends no tier, so these two are not the same thing.
    Token counts come from a `usage` object when one is visible in a non-streaming JSON response or
    in the tail of an SSE stream; otherwise they are `null` and `bytes` is the signal.
 6. **Errors** — an unreachable upstream yields a `502` JSON body `{ error: { message } }`; no stack
@@ -226,12 +245,15 @@ export function createMetrics(options)
 //   promptTokens, completionTokens, bytes,
 //   byTier: Record<string, { requests, promptTokens, completionTokens, multiplier, effectiveTokens }>,
 //   effectiveMultiplier,          // weighted average billed multiplier across tiers with traffic
-//   recent: entry[]               // newest first, capped at recentLimit
+//   recent: entry[]               // newest first, capped at recentLimit; carries `preset` too
 // }
 ```
 
 Default multipliers (OpenAI/OpenRouter tier pricing): `flex: 0.5`, `scale: 1.0`, `auto: 1.0`,
-`default: 1.0`, `priority: 2.0`, `fast: 2.0`, `ultrafast: 4.0`, and `null/unset: 1.0`.
+`default: 1.0`, `priority: 2.0`, `fast: 2.0`, `ultrafast: 4.0`, and `null/unset: 1.0`. They are a
+*rough* weight for the cost signal, not a promise: the page shows the preset a request actually ran
+under, and a preset that sends no `service_tier` sorts by price or throughput instead of billing a
+multiplier.
 `effectiveTokens = (promptTokens + completionTokens) * multiplier`.
 
 `snapshot()` must be cheap and non-throwing for a stats endpoint polled every few seconds, and the
@@ -318,9 +340,11 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, OpenRouterPlusPage))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
 - The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
   on unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
-  "routes on this relay" block that reads `/targets`, sets the profile **Default service tier**
-  (`POST /tier/default`) and posts `/routes/remove` — all with the `x-oorp-client: web` header.
-  The per-Session tier control is the composer chip, not this page.
+  "routes on this relay" block that reads `/targets`, sets the profile **Service tier for new
+  sessions** (`POST /tier/default`) together with a short table of what each preset sends, and posts
+  `/routes/remove` — all with the `x-oorp-client: web` header. The per-Session control is the
+  composer chip, not this page. The split is deliberate: the picker carries labels only, and the
+  explanations live where they can be read once.
 - Styling: inherit the host theme (`var(--dsw-alias-*)` tokens, `var(--dsw-font-*)`). No global CSS
   file, no `document.body` mutation, no reading other plugins' DOM.
 - Every user-visible string goes through the locale namespace.
@@ -338,13 +362,15 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - **The composer chip.** A third seat, `conversation.input.right` (a free `list` slot — "compact
   controls before the composer submit action", `replaceRisk: none`), registered as
   `{ name: 'conversation.input.right', id: 'openrouter-plus-tier', order: 0 }`. It exists because
-  `ModelSelection` is `{ provider, model, reasoningEffort? }` and carries no tier, so a per-session
-  tier cannot ride the selection the way effort does. The chip therefore changes **nothing** about
-  the selection: it `POST`s `/tier { session, tier }`, the Host keeps the choice in memory, and the
-  relay reads it off the request's Session key on the way upstream. Switching costs one POST, no
-  config write, no provider, no model list — and the effort level you picked stays picked because
-  the selection was never touched. It renders nothing unless the Session's current provider sits on
-  a `/t/<targetId>/…` mount and never calls `settings.mutate`.
+  `ModelSelection` is `{ provider, model, reasoningEffort? }` and carries no routing field, so a
+  per-session preset cannot ride the selection the way effort does. The chip therefore changes
+  **nothing** about the selection: it `POST`s `/tier { session, preset }`, the Host expands that
+  preset through `PRESET_WIRE` and keeps the choice in memory, and the relay applies it to the
+  request's Session on the way upstream. Switching costs one POST, no config write, no provider, no
+  model list — and the effort level you picked stays picked because the selection was never touched.
+  Its menu carries labels only; the descriptions are on the settings page. It renders nothing unless
+  the Session's current provider sits on a `/t/<targetId>/…` mount and never calls
+  `settings.mutate`.
 - Do not replace `conversation.input.model`: it is a `single` seat owned by
   `ui-model-selection` (`replaceRisk: shadows-shipped-ui`), and occupying it means reimplementing the
   two-level provider/model menu, effort levels, search and `/model` parity.
