@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenRouter Plus",
+    "description": "为 OpenRouter 及任何 OpenAI 兼容 API 提供 service_tier 路由。在本地回环上运行中转服务，把 flex / priority / fast / ultrafast 直接写进请求体，提供实时的费用倍率遥测，并在“模型”设置里生成指向它的 provider 路由 —— 无需修改官方包。"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "dsh-openrouter-plus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenRouter service-tier routing for DeepSeek Harness \u2014 a loopback relay that pins service_tier (flex / priority / fast / ultrafast) on OpenAI-compatible request bodies, a live status API, and a Models-page card that creates the provider route for you.",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "openrouter",
+    "service-tier",
+    "flex",
+    "llm"
+  ],
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check client.js && node --check lib/proxy.js && node --check lib/metrics.js && node --check lib/config-bridge.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings-models"
+      ]
+    }
+  }
+}

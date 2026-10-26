@@ -1,0 +1,41 @@
+# dsh-openrouter-plus bundle patch.
+#
+# Inserts one Host row: the loopback service-tier relay. The relay owns its own
+# listener (nothing is mounted on the DSH web server), so it needs no other row
+# and cannot interfere with the GUI's auth fence.
+#
+# Everything here is hot-reloadable (`patchReload: live` in the profile):
+# changing `port`, `upstream` or `routes` restarts the listener in place.
+- insert:
+    - id: openrouter-plus
+      name: 'dsh-openrouter-plus'
+      config:
+        # Master switch. false keeps the plugin installed but binds nothing.
+        enabled: true
+
+        # Loopback only. Do not bind a routable interface: the relay forwards the
+        # caller's Authorization header and holds no key of its own.
+        host: 127.0.0.1
+        port: 8791
+        # When the preferred port is taken, fall forward to the next free one
+        # (8792, 8793, ...). The Models card probes the same range.
+        portFallback: true
+
+        # The OpenAI-compatible API the relay forwards to, without a trailing slash.
+        upstream: https://openrouter.ai/api/v1
+
+        # Mount path -> pinned service_tier. A `null` tier is a pure passthrough
+        # (no service_tier key is written). Values must be one of the tiers the
+        # endpoint serves; the relay does not second-guess provider vocabularies.
+        routes:
+          /flex/v1: flex
+          /priority/v1: priority
+          /fast/v1: fast
+          /ultrafast/v1: ultrafast
+          /scale/v1: scale
+          /auto/v1: auto
+          /default/v1: default
+          /v1: null
+
+        # 0 disables the upstream timeout, which is what long SSE completions need.
+        upstreamTimeoutMs: 0
