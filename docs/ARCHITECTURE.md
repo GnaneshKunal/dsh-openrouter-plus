@@ -338,6 +338,13 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - `inject: ['slots', 'locale']`; register a locale namespace (`dsh-openrouter-plus`) with `en` and
   `zh` dictionaries through `ctx.locale.register(ns, { en, zh })` and bind it.
 - `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, OpenRouterPlusPage))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
+- **The relay and the page update independently.** A Host restart re-applies `index.js`; the page
+  keeps the client bundle it already evaluated until the document is reloaded, because the loader
+  fetches each bundle once per document. So the client reads both payload shapes: `/tier` answers
+  `preset` in 0.9.0 and `tier` before it, `/targets` answers `tier.presets` or the older
+  `tier.tiers` — a missing key degrades a picker to the built-in preset list instead of throwing the
+  page out of its boundary. `__test` on the module object exports those readers for
+  `test/client.test.mjs`; the loader ignores it.
 - The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
   on unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
   "routes on this relay" block that reads `/targets`, sets the profile **Service tier for new

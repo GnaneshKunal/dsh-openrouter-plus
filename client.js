@@ -72,6 +72,25 @@ window.__ModuleLoader__.load({
       'floor',
     ]);
 
+    /** The 0.8.0 tier vocabulary, so a client paired with an older relay still maps. */
+    const LEGACY_TIER_PRESET = Object.freeze({
+      auto: 'none',
+      default: 'standard',
+      flex: 'flex',
+      priority: 'priority',
+      fast: 'priority',
+      ultrafast: 'ultra',
+      scale: 'none',
+    });
+
+    /** A 0.8.0 tier name as the preset it now means; `null` when nothing is pinned. */
+    function presetFromLegacyTier(value) {
+      const text = stringValue(value).trim().toLowerCase();
+      if (text === '') return null;
+      if (PRESET_IDS.includes(text)) return text;
+      return LEGACY_TIER_PRESET[text] ?? null;
+    }
+
     /**
      * Attaching writes our target table first, which makes the Loader re-apply this
      * plugin and restart the listener, so the HTTP response itself can be cut. These
@@ -172,9 +191,9 @@ window.__ModuleLoader__.load({
       'providers.unavailableNoReason': 'Route editing is unavailable in this environment.',
       'providers.createdCaption': 'Routes on this relay',
       'providers.createdEmpty': 'No provider route points at this relay yet.',
-      'providers.defaultTierCaption': 'Service tier for new sessions',
+      'providers.defaultTierCaption': 'Preset for new sessions',
       'providers.defaultTierHint': 'A session inherits this until it picks its own preset in the composer.',
-      'providers.defaultTierAria': 'Service tier for new sessions',
+      'providers.defaultTierAria': 'Preset for new sessions',
       'providers.presetCaption': 'What each preset sends',
       'providers.noticeDefaultTier': 'Saved the service tier for new sessions.',
       'providers.routeMeta': '{source} · {tier} · {count} models',
@@ -308,9 +327,9 @@ window.__ModuleLoader__.load({
       'providers.unavailableNoReason': '当前环境无法编辑路由。',
       'providers.createdCaption': '经由此中继的路由',
       'providers.createdEmpty': '尚无提供商路由指向此中继。',
-      'providers.defaultTierCaption': '新会话的服务等级',
+      'providers.defaultTierCaption': '新会话的预设',
       'providers.defaultTierHint': '会话会继承该设置，直到在输入框中选定自己的预设。',
-      'providers.defaultTierAria': '新会话的服务等级',
+      'providers.defaultTierAria': '新会话的预设',
       'providers.presetCaption': '各预设实际发送什么',
       'providers.noticeDefaultTier': '已保存新会话的服务等级。',
       'providers.routeMeta': '{source} · {tier} · {count} 个模型',
@@ -605,14 +624,33 @@ window.__ModuleLoader__.load({
     function normalizePresetState(payload) {
       if (!isPlainObject(payload)) return null;
       if (payload.ok === false) return null;
-      if (!Object.prototype.hasOwnProperty.call(payload, 'preset')) return null;
-      const chosen = stringValue(payload.chosen).trim();
-      const fallback = stringValue(payload.default).trim();
-      const effective = stringValue(payload.preset).trim();
+      /* `preset` is the 0.9.0 answer. A relay that predates it answers `tier`, and a
+         client showing "the relay did not confirm" while the change *was* applied is a
+         worse failure than reading the older field, so both are accepted. */
+      const modern = Object.prototype.hasOwnProperty.call(payload, 'preset');
+      if (!modern && !Object.prototype.hasOwnProperty.call(payload, 'tier')) return null;
+      const chosen = presetFromLegacyTier(payload.chosen);
+      const fallback = presetFromLegacyTier(payload.default) ?? 'none';
+      const effective = presetFromLegacyTier(payload.preset ?? payload.tier) ?? 'none';
+      return { chosen: chosen, default: fallback, preset: effective };
+    }
+
+    /**
+     * The preset table a picker renders. `/targets` carries `tier: { default, presets }`;
+     * anything else (an older relay, a half-read response) degrades to the built-in list
+     * rather than throwing the settings page out of its error boundary.
+     */
+    function normalizePresetTable(value) {
+      const table = isPlainObject(value) ? value : {};
+      const advertised = Array.isArray(table.presets) ? table.presets : [];
+      const presets = advertised.filter(
+        (id) => typeof id === 'string' && PRESET_IDS.includes(id),
+      );
+      const known = presets.length > 0 ? presets : PRESET_IDS.slice();
+      const fallback = presetFromLegacyTier(table.default) ?? 'none';
       return {
-        chosen: chosen === '' ? null : chosen,
-        default: fallback === '' ? 'none' : fallback,
-        preset: effective === '' ? 'none' : effective,
+        presets: known,
+        default: known.includes(fallback) ? fallback : known[0],
       };
     }
 
@@ -2358,7 +2396,7 @@ window.__ModuleLoader__.load({
         /* One profile-level preference, next to the routes it applies to: the preset an
            unchosen Session inherits. Which preset a *particular* Session runs on is the
            composer chip, so the two never compete for the same click. */
-        const presetTable = targetsData.tier;
+        const presetTable = normalizePresetTable(targetsData.tier);
         const presetChoice =
           presetTable !== null && presetTable.presets.length > 0
             ? h(
@@ -3357,6 +3395,14 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale'],
+      /* Pure payload readers, exported only so `test/client.test.mjs` can pin the shape
+         tolerance the settings page and the chip depend on. Nothing here touches React or
+         the DOM, and the loader ignores extra fields on a module object. */
+      __test: {
+        normalizePresetTable,
+        normalizePresetState,
+        presetFromLegacyTier,
+      },
       apply(ctx) {
         /* Dictionary registration is owned by the plugin context and disposed with it. */
         ctx.effect(
