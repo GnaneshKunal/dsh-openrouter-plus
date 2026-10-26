@@ -39,8 +39,22 @@ jobs:
       - run: npm run check
       - run: npm test
 
+      # A manual bootstrap publish and this workflow can describe the same version; publishing it
+      # twice is an error, but the GitHub Release should still exist.
+      - name: Check whether npm already has this version
+        id: published
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if npm view "dsh-openrouter-plus@$version" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "npm already has $version; skipping the publish step"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
-        run: npm publish --access public
+        if: steps.published.outputs.exists != 'true'
+        run: npm publish --access public --provenance
 
       - name: Publish the GitHub release
         env:

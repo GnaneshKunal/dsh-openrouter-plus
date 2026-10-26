@@ -95,10 +95,19 @@ The job refuses a tag that disagrees with `package.json`, runs the suite, publis
 opens the GitHub Release with the matching `CHANGELOG.md` section as its notes. It fails rather
 than skipping when npm already has that version: a release is a new version, never a re-upload.
 
-One-time npm setup: reserve `dsh-openrouter-plus`, then add a trusted publisher — GitHub Actions,
-repository `GnaneshKunal/dsh-openrouter-plus`, workflow `release.yml`, environment `release`. npm
-then accepts OIDC from the workflow run, so no token is stored here, and it attaches a provenance
-attestation linking the tarball to the commit and run that built it.
+npm needs the package to exist before it can trust a publisher, so the first version goes up by
+hand, once, from a logged-in machine:
+
+```bash
+npm login
+npm publish --access public
+npm trust github dsh-openrouter-plus --file release.yml \
+  --repo GnaneshKunal/dsh-openrouter-plus --env release --allow-publish
+```
+
+After that the tag does everything: the workflow run's OIDC identity is accepted, npm attaches a
+provenance attestation linking the tarball to the commit and run that built it, and no
+`NPM_TOKEN` exists in the repository. `npm trust list dsh-openrouter-plus` shows the grant.
 
 Publishing to npm is optional for users: `dsh plugin add github:…` installs the same code from a
 tag, which is how most of the community ships.
