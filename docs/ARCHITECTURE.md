@@ -43,7 +43,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
-| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, repointRoute, restoreRoute, twinRoute, listRoutes }` |
+| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus" and the `settings.models.provider-card` row extension. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
@@ -59,15 +59,16 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
-| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], reasoning: { fill, levels } }` |
-| `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` | `{ ok: true, name, baseURL, source, tier, reasoning: { filled, unresolved } }` |
-| `POST /__openrouter-plus/routes/twin` | `{ route, tier?, name? }` | `{ ok: true, name, baseURL, tier, source, created, reasoning: { filled, unresolved } }` |
+| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, tiers }, reasoning: { fill, levels } }` | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
-| `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier?, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
+| `POST /__openrouter-plus/routes/attach` | `{ route, upstream, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
 | `POST /__openrouter-plus/routes/detach` | `{ route, id }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
-| `POST /__openrouter-plus/targets/register` | `{ upstream, tier?, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |
+| `POST /__openrouter-plus/targets/register` | `{ upstream, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |
 | `POST /__openrouter-plus/targets/remove` | `{ id }` | `{ ok: true, id }`, or `409 { error, route }` while a provider still uses it |
+| `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, tier, chosen, default, tiers }` — what that Session sends *now* |
+| `POST /__openrouter-plus/tier` | `{ session, tier }` | `{ ok, session, tier, chosen, default }`; `tier: null`/`""` clears. **Memory only** |
+| `POST /__openrouter-plus/tier/default` | `{ tier }` | `{ ok, default, tiers }`; one config write, because it is a preference |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
@@ -110,7 +111,7 @@ targets:
   report `changed: false` when the row is already where it was asked to point, so a double-click
   cannot churn the profile.
 - **Ownership.** A route whose `baseURL` is under the relay origin is not repointed by `attach` (it
-  is already ours — that is `createRoute`/`repairRoutes` territory); only `restoreRoute` may move a
+  is already ours — that is `repairRoutes` territory); only `restoreRoute` may move a
   relay-backed route away, and only to the upstream recorded for it. A target whose upstream is the
   relay itself is rejected at resolve time *and* proxying time, so a mis-typed endpoint cannot make
   the relay call itself.
@@ -253,14 +254,12 @@ export function createConfigBridge(options)
 //   sources: Array<{ key, displayName, api, apiKeyEnv, baseURL, modelCount, attachedTier?, targetId? }>,
 //   created: Array<{ name, source, tier, baseURL, modelCount, targetId? }>,
 // }>
-// createRoute({ source, tier, name?, displayName? }): Promise<{ name, baseURL, source, tier }>
 // removeRoute({ name }): Promise<{ name }>
 // repairRoutes(): Promise<{ patched, unresolved, owned, changed }>
 // repointRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRepoint
 // restoreRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRestore
-// twinRoute({ route, tier?, name? }): Promise<{                      // planTwin
-//   name, baseURL, tier, source, created, reasoning: { filled, unresolved } }>
 // listRoutes(): Promise<Array<{ name, source, tier, baseURL, modelCount }>>
+// reasoning(): { fill: 'never'|'evidence'|'default', levels: string[] }
 ```
 
 Rules:
@@ -269,33 +268,33 @@ Rules:
   `configEditor.configuration()` for read, and `configEditor.edit(entry, change)` for write.
 - `change(current, inherited)` must return the **effective** providers map (`inherited` merged under
   `current`) so a route that only exists in an inherited layer survives the write.
-- A created route clones the source route's `api`, `apiKeyEnv`, `api`-related fields and `models`
-  verbatim, and sets `baseURL` to `${origin}/${tier}/v1` and a `displayName` such as
-  `OpenRouter (flex) — OpenRouter Plus`. Default `name` is `${source}-${tier}`.
+- **No route is ever created.** The tier is applied to a request, not encoded in a provider row, so
+  the bridge only ever *moves* an existing row (`repointRoute`/`restoreRoute`), adds reasoning
+  capability to rows that point at the relay, and removes rows the operator asks it to remove. An
+  older release cloned a route per tier; `inferSource` survives so a route left over from it is
+  still attributed to its source.
 - **Ownership test:** a route belongs to this plugin iff its `baseURL` starts with the relay origin.
   `removeRoute` refuses (throws a clear error) for any other route. Never mutate a route the plugin
   did not create.
 - **`planRepoint` / `planRestore` are the two halves of the per-provider switch.** `repointRoute`
   moves a provider the operator already had (`baseURL` = their own endpoint) onto a relay mount,
   leaving `api`, `apiKeyEnv`, headers and `models` byte-identical; it refuses a route that is
-  already relay-backed (that is `planCreate`/`planRepair` territory — rewriting it would fight the
-  owner) and refuses a target that is the relay itself. `restoreRoute` is the inverse and the only
+  already relay-backed (`planRepair` territory — rewriting it would fight the owner) and refuses a
+  target that is the relay itself. `restoreRoute` is the inverse and the only
   path allowed to move a relay-backed route away. Both report `changed: false` and skip the write
   when the row already points where it was asked to, so a repeated click cannot churn the profile.
-  Neither writes plugin bookkeeping into the provider entry: everything they need (which endpoint,
-  which tier) lives in the plugin's own `targets` table.
-- Reject a create whose name already exists; reject an unknown `source`; reject a `tier` outside the
-  accepted set.
+  Neither writes plugin bookkeeping into the provider entry: the endpoint they need lives in the
+  plugin's own `targets` table, and the tier never belongs to a row at all.
+- Reject a remove whose name the plugin does not own; reject an unknown `route`.
 - **Reasoning capability is not inherited by a new provider key.** `dsh-llm-pi-ai` resolves a model's
   `reasoning` from the model's own `reasoningEfforts`, then from the *installed catalog* entry for
   that provider key. A route this plugin invents has no catalog entry, so an unfilled model
   materializes as `reasoning: false` and the composer renders "This model provides no reasoning
-  effort levels." `planCreate` therefore runs `lib/reasoning.js` over the clone, and `planRepair`
-  runs it over every owned route; both keep a declared map byte-identical, prefer a sibling
+  effort levels." `planRepair` therefore runs `lib/reasoning.js` over every owned route; both keep a declared map byte-identical, prefer a sibling
   variant's declaration over the configured fallback, and report the rest as `unresolved` instead of
   guessing. Filling is opt-out (`reasoningEfforts: false`), and an opted-out model is never filled:
   `lib/reasoning.js` tests `false` before it tests for a usable map, so the deliberate "no levels"
-  answer survives both `planCreate` and `planRepair`.
+  answer survives every `planRepair` pass.
 - **The capability is re-applied after edits, not just at creation.** One shipped editor destroys it:
   `adopt()` in `@deepseek-ai/dsh-client-ui-settings-models` rebuilds a model picked from the catalog
   as `{ id, name, contextWindow, maxTokens, input }`, so re-selecting models on a relay route strips
@@ -319,8 +318,9 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, OpenRouterPlusPage))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
 - The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
   on unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
-  "provider routes" block that reads `/targets` and posts to `/routes/create` / `/routes/remove`
-  with the `x-oorp-client: web` header.
+  "routes on this relay" block that reads `/targets`, sets the profile **Default service tier**
+  (`POST /tier/default`) and posts `/routes/remove` — all with the `x-oorp-client: web` header.
+  The per-Session tier control is the composer chip, not this page.
 - Styling: inherit the host theme (`var(--dsw-alias-*)` tokens, `var(--dsw-font-*)`). No global CSS
   file, no `document.body` mutation, no reading other plugins' DOM.
 - Every user-visible string goes through the locale namespace.
@@ -339,13 +339,12 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   controls before the composer submit action", `replaceRisk: none`), registered as
   `{ name: 'conversation.input.right', id: 'openrouter-plus-tier', order: 0 }`. It exists because
   `ModelSelection` is `{ provider, model, reasoningEffort? }` and carries no tier, so a per-session
-  tier cannot ride the request the way effort does. Instead a tier **is** a mount, so the chip
-  switches the session's provider: `ctx.modelDirectories.directoryFor(sessionId).select({ provider:
-  '<route>-<tier>', model, reasoningEffort })`. Provisioning a sibling is one idempotent
-  `POST /routes/twin` (`created: false` and no write when it already exists), which is why a tier
-  known to the family costs zero config writes. It renders nothing unless the session's current
-  provider sits on a `/t/<targetId>/…` mount, never touches `settings.mutate`, and retries the
-  selection while the freshly created provider key is still missing from the client catalog.
+  tier cannot ride the selection the way effort does. The chip therefore changes **nothing** about
+  the selection: it `POST`s `/tier { session, tier }`, the Host keeps the choice in memory, and the
+  relay reads it off the request's Session key on the way upstream. Switching costs one POST, no
+  config write, no provider, no model list — and the effort level you picked stays picked because
+  the selection was never touched. It renders nothing unless the Session's current provider sits on
+  a `/t/<targetId>/…` mount and never calls `settings.mutate`.
 - Do not replace `conversation.input.model`: it is a `single` seat owned by
   `ui-model-selection` (`replaceRisk: shadows-shipped-ui`), and occupying it means reimplementing the
   two-level provider/model menu, effort levels, search and `/model` parity.

@@ -118,7 +118,7 @@ test('available() is false without configEditor and reads stay empty', async () 
   assert.deepEqual(await bridge.targets(), { sources: [], created: [] })
   assert.deepEqual(await bridge.listRoutes(), [])
   await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' }),
+    () => bridge.repointRoute({ route: 'openrouter-custom', baseURL: `${RELAY}/t/abc/v1` }),
     /configuration editor is not available/i,
   )
   await assert.rejects(
@@ -151,7 +151,7 @@ test('reads stay empty (and never throw) when the llm-pi-ai row is missing', asy
   assert.deepEqual(await bridge.targets(), { sources: [], created: [] })
   assert.ok(logged.some(([level]) => level === 'warn'))
   await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' }),
+    () => bridge.repointRoute({ route: 'openrouter-custom', baseURL: `${RELAY}/t/abc/v1` }),
     /cannot find the @deepseek-ai\/dsh-llm-pi-ai configuration/i,
   )
 })
@@ -245,10 +245,6 @@ test('targets() attributes a custom-named relay route through its display name',
   })
 })
 
-// ---------------------------------------------------------------------------
-// createRoute()
-// ---------------------------------------------------------------------------
-
 test('targets() reports the inherited layer when the row has no config of its own', async () => {
   const { editor } = createFakeEditor({
     config: {},
@@ -287,211 +283,6 @@ test('targets() reports the inherited layer when the row has no config of its ow
     },
   ])
 })
-
-test('createRoute() clones the source route for the relay under the default name', async () => {
-  const { editor, state, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor)
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-
-  assert.deepEqual(result, {
-    name: 'openrouter-custom-flex',
-    baseURL: `${RELAY}/flex/v1`,
-    source: 'openrouter-custom',
-    tier: 'flex',
-    // The fixtures declare no reasoningEfforts anywhere, so evidence-only
-    // filling adds nothing and reports every model as still unresolved.
-    reasoning: {
-      filled: [],
-      unresolved: ['deepseek/deepseek-v4-flash-0731', 'google/gemini-3.8-flash'],
-    },
-  })
-  assert.equal(edits.length, 1)
-
-  const created = edits[0].next.providers['openrouter-custom-flex']
-  assert.equal(created.baseURL, `${RELAY}/flex/v1`)
-  assert.equal(created.displayName, 'openrouter-custom (flex) — OpenRouter Plus')
-
-  // Cloned verbatim.
-  assert.equal(created.api, 'openai-responses')
-  assert.equal(created.apiKeyEnv, 'OPENROUTER_API_KEY')
-  assert.deepEqual(created.headers, {
-    'HTTP-Referer': 'https://harness.example',
-    'X-Title': 'DeepSeek Harness',
-  })
-
-  // models is a deep copy, not a shared reference.
-  const sourceModels = state.config.providers['openrouter-custom'].models
-  assert.deepEqual(created.models, sourceModels)
-  assert.notEqual(created.models, sourceModels)
-  assert.notEqual(created.models[0], sourceModels[0])
-  created.models[0].name = 'mutated'
-  assert.equal(sourceModels[0].name, 'DeepSeek: DeepSeek V4 Flash 0731')
-
-  // The untouched source route survives.
-  assert.deepEqual(edits[0].next.providers['openrouter-custom'], sourceRoute())
-
-  // The edit payload is the whole effective row config, providers included.
-  assert.deepEqual(Object.keys(edits[0].next), ['providers'])
-})
-
-test('createRoute() drops displayName/serviceTier from the clone and honours overrides', async () => {
-  const { editor, edits } = createFakeEditor({
-    config: { providers: { 'openrouter-custom': sourceRoute({ serviceTier: 'flex' }) } },
-  })
-  const { bridge } = bridgeFor(editor)
-
-  await bridge.createRoute({
-    source: 'openrouter-custom',
-    tier: 'priority',
-    name: 'custom-fast',
-    displayName: '  Fast lane  ',
-  })
-
-  const created = edits[0].next.providers['custom-fast']
-  assert.equal(created.displayName, 'Fast lane')
-  assert.equal(created.baseURL, `${RELAY}/priority/v1`)
-  assert.equal(Object.hasOwn(created, 'serviceTier'), false)
-  // Only the clone is rewritten; the source keeps its own fields.
-  assert.equal(edits[0].next.providers['openrouter-custom'].serviceTier, 'flex')
-})
-
-test('createRoute() accepts a tier case-insensitively and canonicalises it', async () => {
-  const { editor } = openRouterWorld()
-  const { bridge } = bridgeFor(editor)
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'FLEX' })
-  assert.equal(result.tier, 'flex')
-  assert.equal(result.baseURL, `${RELAY}/flex/v1`)
-})
-
-test('createRoute() rejects a duplicate name without writing', async () => {
-  const { editor, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor)
-
-  await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  assert.equal(edits.length, 1)
-
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' }),
-    /already exists/i,
-  )
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'openrouter-custom' }),
-    /already exists/i,
-  )
-  assert.equal(edits.length, 1, 'a rejected create must not write')
-})
-
-test('createRoute() rejects a name that only collides after trimming', async () => {
-  const { editor, edits } = createFakeEditor({
-    config: {
-      providers: {
-        'openrouter-custom': sourceRoute(),
-        'openrouter-flex ': sourceRoute(), // hand-edited key with a trailing space
-      },
-    },
-  })
-  const { bridge } = bridgeFor(editor)
-
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'openrouter-flex' }),
-    /collides with the existing route "openrouter-flex "/i,
-  )
-  assert.equal(edits.length, 0)
-})
-
-test('createRoute() rejects a duplicate that only exists in the inherited layer', async () => {
-  const { editor, edits } = createFakeEditor({
-    config: { providers: { 'openrouter-custom': sourceRoute() } },
-    inherited: { providers: { 'openrouter-custom-flex': sourceRoute({ baseURL: `${RELAY}/flex/v1` }) } },
-  })
-  const { bridge } = bridgeFor(editor)
-
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' }),
-    /already exists/i,
-  )
-  assert.equal(edits.length, 0)
-})
-
-test('createRoute() rejects an unknown source, an unknown tier and missing input', async () => {
-  const { editor, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor)
-
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'does-not-exist', tier: 'flex' }),
-    /Provider route "does-not-exist" does not exist/i,
-  )
-  // The message names the routes that do exist so the user can correct it.
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'does-not-exist', tier: 'flex' }),
-    /Existing routes: openrouter-custom/,
-  )
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'turbo' }),
-    /Service tier "turbo" is not enabled\. Choose one of: flex, priority\./,
-  )
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom' }),
-    /Choose a service tier before linking a route: flex, priority\./,
-  )
-  await assert.rejects(() => bridge.createRoute(), /Choose the existing provider route to copy/i)
-  assert.equal(edits.length, 0)
-})
-
-test('createRoute() preserves routes and keys that only exist in the inherited layer', async () => {
-  const inheritedRoute = {
-    api: 'openai-completions',
-    apiKeyEnv: 'BUNDLE_API_KEY',
-    baseURL: 'https://bundle.example/v1',
-    models: [{ id: 'bundle/model' }],
-  }
-  const { editor, edits } = createFakeEditor({
-    config: { providers: { 'openrouter-custom': sourceRoute() }, retryPolicy: { mode: 'normal' } },
-    inherited: {
-      providers: { 'bundle-route': inheritedRoute },
-      retryPolicy: { mode: 'inherited' },
-      futureTopLevelKey: { kept: true },
-    },
-  })
-  const { bridge } = bridgeFor(editor)
-
-  await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-
-  const next = edits[0].next
-  assert.deepEqual(next.providers['bundle-route'], inheritedRoute)
-  assert.deepEqual(Object.keys(next.providers).sort(), ['bundle-route', 'openrouter-custom', 'openrouter-custom-flex'])
-  // Explicit keys win; inherited-only keys are carried over so the write is lossless.
-  assert.deepEqual(next.retryPolicy, { mode: 'normal' })
-  assert.deepEqual(next.futureTopLevelKey, { kept: true })
-})
-
-test('createRoute() rejects when the relay has no address yet', async () => {
-  const { editor, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor, { origin: () => undefined })
-
-  await assert.rejects(
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' }),
-    /relay has no address/i,
-  )
-  assert.equal(edits.length, 0)
-  // Nothing can be attributed to the relay while it has no address.
-  assert.deepEqual((await bridge.targets()).created, [])
-})
-
-test('createRoute() works with the real Loader entry shape (options.name only)', async () => {
-  const { editor, edits } = openRouterWorld({ entryShape: 'options' })
-  const { bridge } = bridgeFor(editor)
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  assert.equal(result.name, 'openrouter-custom-flex')
-  assert.equal(edits.length, 1)
-})
-
-// ---------------------------------------------------------------------------
-// removeRoute()
-// ---------------------------------------------------------------------------
 
 test('removeRoute() refuses a route the plugin did not create', async () => {
   const { editor, edits } = createFakeEditor({
@@ -548,17 +339,23 @@ test('removeRoute() refuses a route without a baseURL and an unknown name', asyn
 })
 
 test('removeRoute() removes an owned route and keeps every other route', async () => {
-  const { editor, state, edits } = openRouterWorld()
+  const { editor, state, edits } = createFakeEditor({
+    config: {
+      providers: {
+        'openrouter-custom': sourceRoute(),
+        'openrouter-custom-flex': sourceRoute({ baseURL: `${RELAY}/t/abc/v1` }),
+      },
+    },
+  })
   const { bridge } = bridgeFor(editor)
 
-  await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
   const removed = await bridge.removeRoute({ name: 'openrouter-custom-flex' })
 
   assert.deepEqual(removed, { name: 'openrouter-custom-flex' })
-  assert.equal(edits.length, 2)
+  assert.equal(edits.length, 1)
 
-  // The page after the write no longer carries the clone...
-  assert.deepEqual(Object.keys(edits[1].next.providers), ['openrouter-custom'])
+  // The page after the write no longer carries the removed row...
+  assert.deepEqual(Object.keys(edits[0].next.providers), ['openrouter-custom'])
   assert.deepEqual(state.config.providers['openrouter-custom'], sourceRoute())
   assert.deepEqual(await bridge.listRoutes(), [])
 })
@@ -583,15 +380,16 @@ test('removeRoute() can remove an inherited-only relay route by shadowing the in
 })
 
 test('removeRoute() stops treating a route as owned when the relay origin changes', async () => {
-  const { editor, edits } = openRouterWorld()
-  await bridgeFor(editor).bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
+  const { editor, edits } = createFakeEditor({
+    config: { providers: { 'openrouter-custom-flex': sourceRoute({ baseURL: `${RELAY}/t/abc/v1` }) } },
+  })
 
   const moved = bridgeFor(editor, { origin: () => ({ host: '127.0.0.1', port: 8792 }) }).bridge
   await assert.rejects(
     () => moved.removeRoute({ name: 'openrouter-custom-flex' }),
     /is not managed by OpenRouter Plus/i,
   )
-  assert.equal(edits.length, 1)
+  assert.equal(edits.length, 0)
 })
 
 // ---------------------------------------------------------------------------
@@ -602,14 +400,14 @@ test('every write really changes the config, and rejections never write', async 
   const { editor, edits } = openRouterWorld()
   const { bridge } = bridgeFor(editor)
 
-  await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'lane-flex' })
-  await bridge.createRoute({ source: 'openrouter-custom', tier: 'priority', name: 'lane-priority' })
-  await assert.rejects(() => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'lane-flex' }))
-  await assert.rejects(() => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'openrouter-custom' }))
-  await assert.rejects(() => bridge.removeRoute({ name: 'openrouter-custom' }))
-  await bridge.removeRoute({ name: 'lane-priority' })
+  // Every accepted write must change the config; every rejected one must not write.
+  await bridge.repointRoute({ route: 'openrouter-custom', baseURL: `${RELAY}/t/abc/v1` })
+  await assert.rejects(() => bridge.repointRoute({ route: 'ghost', baseURL: `${RELAY}/t/abc/v1` }))
+  await assert.rejects(() => bridge.repointRoute({ route: 'openrouter-custom', baseURL: 'not-a-url' }))
+  await assert.rejects(() => bridge.removeRoute({ name: 'ghost' }))
+  await bridge.restoreRoute({ route: 'openrouter-custom', baseURL: 'https://openrouter.ai/api/v1' })
 
-  assert.equal(edits.length, 3)
+  assert.equal(edits.length, 2)
   for (const edit of edits) {
     const effective = { ...edit.inherited, ...edit.current, providers: { ...(edit.inherited.providers ?? {}), ...(edit.current.providers ?? {}) } }
     assert.equal(
@@ -626,10 +424,10 @@ test('error messages are user-readable and never leak internal values', async ()
   const { bridge } = bridgeFor(editor)
 
   const cases = [
-    () => bridge.createRoute({}),
-    () => bridge.createRoute({ source: 'nope', tier: 'flex' }),
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'nope' }),
-    () => bridge.createRoute({ source: 'openrouter-custom', tier: 'flex', name: 'not a route' }),
+    () => bridge.repointRoute({}),
+    () => bridge.repointRoute({ route: 'nope', baseURL: `${RELAY}/t/abc/v1` }),
+    () => bridge.repointRoute({ route: 'openrouter-custom', baseURL: '' }),
+    () => bridge.repointRoute({ route: 'openrouter-custom', baseURL: 'ftp://example/x' }),
     () => bridge.removeRoute({ name: 'ghost' }),
     () => bridge.removeRoute({ name: 'openrouter-custom' }),
   ]
@@ -683,68 +481,6 @@ test('listRoutes() reports only plugin-owned routes', async () => {
 // ---------------------------------------------------------------------------
 
 const EFFORTS = { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }
-
-test('createRoute() carries a capability the source models already declare', async () => {
-  const source = sourceRoute({
-    models: [{ id: 'google/gemini-4-argon:flex', name: 'Gemini 4 Argon', reasoningEfforts: { off: null, medium: 'medium' } }],
-  })
-  const { editor, edits } = createFakeEditor({ config: { providers: { 'openrouter-custom': source } } })
-  const { bridge } = bridgeFor(editor)
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  // Nothing to fill: the clone already carries the declaration verbatim.
-  assert.deepEqual(result.reasoning, { filled: [], unresolved: [] })
-
-  // The clone keeps the declaration it inherited from the source models.
-  const created = edits[0].next.providers['openrouter-custom-flex']
-  assert.deepEqual(created.models[0].reasoningEfforts, { off: null, medium: 'medium' })
-  assert.deepEqual(edits[0].next.providers['openrouter-custom'], source, 'the source route is untouched')
-})
-
-test('createRoute() fills from the configured fallback map when nothing can be inferred', async () => {
-  const { editor, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  assert.deepEqual(result.reasoning, {
-    filled: [
-      { id: 'deepseek/deepseek-v4-flash-0731', from: 'default' },
-      { id: 'google/gemini-3.8-flash', from: 'default' },
-    ],
-    unresolved: [],
-  })
-  const created = edits[0].next.providers['openrouter-custom-flex']
-  assert.deepEqual(created.models.map((model) => model.reasoningEfforts), [EFFORTS, EFFORTS])
-})
-
-test('createRoute() leaves models alone when filling is disabled', async () => {
-  const { editor, edits } = openRouterWorld()
-  const { bridge } = bridgeFor(editor, { reasoningEfforts: false })
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  assert.deepEqual(result.reasoning.filled, [])
-  assert.deepEqual(result.reasoning.unresolved, [
-    'deepseek/deepseek-v4-flash-0731',
-    'google/gemini-3.8-flash',
-  ])
-  const created = edits[0].next.providers['openrouter-custom-flex']
-  assert.equal(created.models[0].reasoningEfforts, undefined)
-})
-
-test('createRoute() never overwrites a capability the model already declares', async () => {
-  const source = sourceRoute({
-    models: [{ id: 'vendor/one', reasoningEfforts: { off: null, max: 'max' } }],
-  })
-  const { editor, edits } = createFakeEditor({ config: { providers: { 'openrouter-custom': source } } })
-  const { bridge } = bridgeFor(editor, { reasoningEfforts: EFFORTS })
-
-  const result = await bridge.createRoute({ source: 'openrouter-custom', tier: 'flex' })
-  assert.deepEqual(result.reasoning, { filled: [], unresolved: [] })
-  assert.deepEqual(edits[0].next.providers['openrouter-custom-flex'].models[0].reasoningEfforts, {
-    off: null,
-    max: 'max',
-  })
-})
 
 test('targets() counts the models a repair would fix', async () => {
   const { editor } = createFakeEditor({
@@ -1352,183 +1088,4 @@ test('describeSources() reports the stored base URL verbatim, mounts included', 
   assert.equal(paddedRow.targetId, 'acme-gw-9f3a')
   assert.equal(Object.hasOwn(legacy, 'targetId'), false)
   assert.equal(Object.hasOwn(upstream, 'targetId'), false)
-})
-
-// ---------------------------------------------------------------------------
-// twinRoute(): the idempotent per-tier sibling provider
-// ---------------------------------------------------------------------------
-
-/** A target-mounted source row: the pass-through mount of one relay target. */
-function twinWorld(providers = {}) {
-  return createFakeEditor({
-    config: {
-      providers: {
-        acme: acmeRoute({ baseURL: TARGET_A }),
-        'openrouter-custom': sourceRoute(),
-        ...providers,
-      },
-    },
-  })
-}
-
-test('twinRoute() creates the sibling of a target-mounted route for one tier', async () => {
-  const world = twinWorld()
-  const { bridge } = bridgeFor(world.editor)
-
-  const twin = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
-
-  assert.deepEqual(twin, {
-    name: 'acme-flex',
-    baseURL: TARGET_A_FLEX,
-    tier: 'flex',
-    source: 'acme',
-    created: true,
-    // Evidence-only filling: the fixture declares no reasoningEfforts anywhere.
-    reasoning: { filled: [], unresolved: ['acme-gw-large'] },
-  })
-  assert.equal(world.edits.length, 1)
-
-  const created = world.edits[0].next.providers['acme-flex']
-  assert.equal(created.baseURL, TARGET_A_FLEX)
-  assert.equal(created.displayName, 'acme gateway (flex) — OpenRouter Plus')
-  // Cloned verbatim, like every other relay route this module writes.
-  assert.equal(created.api, 'openai-responses')
-  assert.equal(created.apiKeyEnv, 'ACME_API_KEY')
-  const sourceModels = world.state.config.providers.acme.models
-  assert.deepEqual(created.models, sourceModels)
-  assert.notEqual(created.models, sourceModels, 'models is a deep copy, not a shared reference')
-  assert.notEqual(created.models[0], sourceModels[0])
-  // The source and the unrelated route are untouched.
-  assert.deepEqual(world.edits[0].next.providers.acme, acmeRoute({ baseURL: TARGET_A }))
-  assert.deepEqual(world.edits[0].next.providers['openrouter-custom'], sourceRoute())
-})
-
-test('twinRoute() is idempotent: the second identical call writes nothing', async () => {
-  const world = twinWorld()
-  const { bridge } = bridgeFor(world.editor)
-
-  const first = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.equal(first.created, true)
-  assert.equal(world.edits.length, 1)
-
-  const second = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  // Reuse computes nothing, so it reports an empty fill against the same row.
-  assert.deepEqual(second, { ...first, created: false, reasoning: { filled: [], unresolved: [] } })
-  assert.equal(world.edits.length, 1, 'the second POST must not call editor.edit at all')
-
-  // A sibling that already exists under a non-default key is reused by mount,
-  // not duplicated: the tier family is the target id, not the route name.
-  const custom = createFakeEditor({
-    config: {
-      providers: {
-        acme: acmeRoute({ baseURL: TARGET_A }),
-        'renamed-flex': acmeRoute({ baseURL: TARGET_A_FLEX }),
-      },
-    },
-  })
-  const reused = await bridgeFor(custom.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.deepEqual(reused, {
-    name: 'renamed-flex',
-    baseURL: TARGET_A_FLEX,
-    tier: 'flex',
-    source: 'acme',
-    created: false,
-    reasoning: { filled: [], unresolved: [] },
-  })
-  assert.equal(custom.edits.length, 0)
-})
-
-test('twinRoute() supports the tierless mount as one tier of the family', async () => {
-  const world = twinWorld({ acme: acmeRoute({ baseURL: TARGET_A_FLEX }) })
-  const { bridge } = bridgeFor(world.editor)
-
-  const twin = await bridge.twinRoute({ route: 'acme', tier: '' })
-  assert.deepEqual(twin, {
-    name: 'acme-pass',
-    baseURL: TARGET_A,
-    tier: null,
-    source: 'acme',
-    created: true,
-    reasoning: { filled: [], unresolved: ['acme-gw-large'] },
-  })
-  assert.equal(world.edits[0].next.providers['acme-pass'].baseURL, TARGET_A)
-  assert.equal(world.edits[0].next.providers['acme-pass'].displayName, 'acme gateway (pass-through) — OpenRouter Plus')
-
-  // Asking again for the tierless row finds it (undefined behaves like '').
-  const again = await bridgeFor(world.editor).bridge.twinRoute({ route: 'acme' })
-  assert.equal(again.name, 'acme-pass')
-  assert.equal(again.created, false)
-  assert.equal(world.edits.length, 1)
-})
-
-test('twinRoute() is family-scoped: another target or another tier is not reused', async () => {
-  const otherTarget = twinWorld({ 'other-flex': acmeRoute({ baseURL: TARGET_B_FLEX }) })
-  const { bridge } = bridgeFor(otherTarget.editor)
-  const twin = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.equal(twin.name, 'acme-flex', 'a sibling of a different target is not this family')
-  assert.equal(twin.created, true)
-  assert.equal(otherTarget.edits[0].next.providers['acme-flex'].baseURL, TARGET_A_FLEX)
-
-  const otherTier = twinWorld({ 'acme-priority': acmeRoute({ baseURL: TARGET_A_PRIORITY }) })
-  const tiered = await bridgeFor(otherTier.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.equal(tiered.name, 'acme-flex', 'a sibling of the same target at another tier is not reused')
-  assert.equal(tiered.created, true)
-
-  // The tier the source row pins itself is its own twin, so nothing is created.
-  const sourceAtFlex = twinWorld({ acme: acmeRoute({ baseURL: TARGET_A_FLEX }) })
-  const itself = await bridgeFor(sourceAtFlex.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.deepEqual(itself, {
-    name: 'acme',
-    baseURL: TARGET_A_FLEX,
-    tier: 'flex',
-    source: 'acme',
-    created: false,
-    reasoning: { filled: [], unresolved: [] },
-  })
-  assert.equal(sourceAtFlex.edits.length, 0)
-})
-
-test('twinRoute() refuses a route with no tier family, an unknown tier or a taken name', async () => {
-  const notAFamily = twinWorld({ legacy: acmeRoute({ baseURL: `${RELAY}/flex/v1` }), plain: acmeRoute() })
-  const { bridge } = bridgeFor(notAFamily.editor)
-  const noFamily = /is not routed through a per-endpoint target yet, so it has no tier family; route it from Settings → Models first\./
-  await assert.rejects(() => bridge.twinRoute({ route: 'legacy', tier: 'flex' }), noFamily)
-  await assert.rejects(() => bridge.twinRoute({ route: 'plain', tier: 'flex' }), noFamily)
-  await assert.rejects(() => bridge.twinRoute({ route: 'openrouter-custom', tier: 'flex' }), noFamily)
-  assert.equal(notAFamily.edits.length, 0, 'a refusal never writes')
-
-  const world = twinWorld({ 'acme-priority': acmeRoute({ baseURL: TARGET_A_PRIORITY }) })
-  const familyBridge = bridgeFor(world.editor).bridge
-  await assert.rejects(
-    () => familyBridge.twinRoute({ route: 'acme', tier: 'turbo' }),
-    /Service tier "turbo" is not enabled\. Choose one of: flex, priority\./,
-  )
-  await assert.rejects(
-    () => familyBridge.twinRoute({ route: 'acme', tier: 'flex', name: 'acme-priority' }),
-    /A provider route named "acme-priority" already exists\./,
-  )
-  await assert.rejects(
-    () => familyBridge.twinRoute({ route: 'ghost', tier: 'flex' }),
-    /No provider route named "ghost" is configured, so there is no tier family to clone\./,
-  )
-  await assert.rejects(
-    () => familyBridge.twinRoute({ tier: 'flex' }),
-    /Choose the provider route to derive a tier sibling from\./,
-  )
-  assert.equal(world.edits.length, 0, 'no refusal may reach the editor')
-})
-
-test('twinRoute() honours an explicit name and fills reasoning like createRoute()', async () => {
-  const world = twinWorld()
-  const filled = await bridgeFor(world.editor, { reasoningEfforts: EFFORTS }).bridge.twinRoute({ route: 'acme', tier: 'flex', name: 'acme-fast' })
-  assert.equal(filled.name, 'acme-fast')
-  assert.deepEqual(filled.reasoning, { filled: [{ id: 'acme-gw-large', from: 'default' }], unresolved: [] })
-  assert.equal(world.edits[0].next.providers['acme-fast'].baseURL, TARGET_A_FLEX)
-  assert.deepEqual(world.edits[0].next.providers['acme-fast'].models[0].reasoningEfforts, EFFORTS)
-
-  // reasoningEfforts: false is an opt-out, and the result names what stays bare.
-  const optedOut = twinWorld()
-  const bare = await bridgeFor(optedOut.editor, { reasoningEfforts: false }).bridge.twinRoute({ route: 'acme', tier: 'flex' })
-  assert.deepEqual(bare.reasoning, { filled: [], unresolved: ['acme-gw-large'] })
-  assert.equal(optedOut.edits[0].next.providers['acme-flex'].models[0].reasoningEfforts, undefined)
 })

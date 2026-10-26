@@ -13,39 +13,43 @@ route points at it, and the relay writes the `service_tier` key into the request
 upstream. Because it only uses schema fields the profile already has, it survives
 `bun install -g` upgrades and never touches `~/.bun/install/global`.
 
+The tier is chosen **per session, at request time**. One provider row keeps serving every tier, so
+switching never mints a provider, a route or a model list.
+
 ```
-  model picker
-      │  baseURL = http://127.0.0.1:8791/flex/v1
+  composer chip: this session runs on «priority»
+      │
       ▼
   dsh-llm-pi-ai ──►  dsh-openrouter-plus relay  ──►  https://openrouter.ai/api/v1
-                          │ injects {"service_tier":"flex"}
-                          └── /__openrouter-plus/status ──► OpenRouter Plus settings page
+      baseURL =           │ reads the session from x-session-id / prompt_cache_key,
+  127.0.0.1:8791/t/<id>/v1  │ injects {"service_tier":"priority"}
+                            └── /__openrouter-plus/* ──► OpenRouter Plus settings page
 ```
 
 ## What you get
 
+- **One provider row, any tier.** A routed provider keeps its key, protocol and models and gains one
+  thing: a composable **service tier** that the relay writes into each request. No per-tier provider
+  copies, no sibling route per tier, no model list duplicated seven times.
 - **Tier mounts** — `/flex/v1`, `/priority/v1`, `/fast/v1`, `/ultrafast/v1`, `/scale/v1`,
   `/auto/v1`, `/default/v1`, plus a `/v1` passthrough that sends no tier at all. Each mount is a
-  `baseURL` you can paste into any OpenAI-compatible provider route.
+  `baseURL` you can paste into any OpenAI-compatible provider route when you want a *permanently*
+  pinned tier instead of a per-session one.
 - **Its own settings page** (Settings → OpenRouter Plus) showing relay state, every mount with a
   copy button, live request/token counters per tier, the weighted cost multiplier, and recent
   requests.
-- **One-click provider routes** — the page creates a real `llm-pi-ai` route (a clone of an existing
-  one, with `baseURL` pointed at a tier mount) so it appears in the model picker like any other
-  provider, and removes it again. Routes the plugin did not create are never touched.
-- **A tier chip in the composer** — next to the model selector, a compact chip shows the service
-  tier the current provider is running and switches it in one click. The switch is **per session**:
-  it moves this conversation onto the sibling provider that carries the requested tier, so another
-  session can sit on a different one. Tiers slide in beside the model name, not instead of it.
-  It shows up on a brand-new Session too — before the first message the chip reads the composer's
-  own default selection, so a tier can be picked *before* you start typing; the reasoning effort you
-  chose travels with the switch instead of being reset to the new route's default. Siblings are
-  named after the tier *family* (`openrouter-<tier>`), so switching back and forth reuses one row per
-  tier instead of stacking suffixes.
+- **A tier chip in the composer** — next to the model selector, a compact chip shows the tier this
+  Session will actually send and switches it in one click. The switch is **per session**: it changes
+  what the next request from *this* conversation carries, so two conversations can sit on `flex` and
+  `priority` at the same time. It shows up on a brand-new Session too — before the first message the
+  chip reads the plugin's default tier, so a tier can be picked *before* you start typing. The
+  reasoning effort you chose stays put: switching a tier touches no provider row and no model list.
 - **A switch on every provider row** — in Settings → Models, each `llm-pi-ai` provider gets a
-  **Route through OpenRouter Plus** checkbox and a service-tier picker. Tick it and that provider's
-  traffic flows through the relay to the endpoint you already gave it; untick it and the endpoint
-  comes back. Your provider entry, protocol, key and models are left exactly as they were.
+  **Route through OpenRouter Plus** checkbox. Tick it and that provider's traffic flows through the
+  relay to the endpoint you already gave it; untick it and the endpoint comes back. Your provider
+  entry, protocol, key and models are left exactly as they were.
+- **A default tier for the profile** — the settings page sets what an unchosen Session inherits, and
+  the composer chip's `Default (…)` entry hands a Session back to it.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
   header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
   construction.
@@ -63,28 +67,31 @@ the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mou
 
 ## Use it
 
-### Through the settings page (recommended)
+### Two clicks: tick the provider, pick the tier
 
-1. Pick a source route (for example `openrouter-custom`) and a tier (`flex`).
-2. Press **Create route**. The page writes a new provider route named `<source>-<tier>` whose
-   `baseURL` is `http://127.0.0.1:8791/<tier>/v1` and whose models are cloned from the source.
-3. Choose one of that route's models in the model picker. Every request it makes now carries
-   `service_tier: "<tier>"`.
-4. **Remove** the route from the same page when you are done. Its deletion is safe and leaves your
-   original route untouched.
+1. **Settings → Models** → tick **Route through OpenRouter Plus** on the provider you already use
+   (for example `openrouter-custom`). That provider's traffic now flows through the relay; its
+   `api`, `apiKeyEnv`, headers and models are untouched.
+2. Open the composer of any Session and pick a tier in the chip next to the model selector. Every
+   request that Session sends now carries `service_tier: "<tier>"`.
+
+Nothing else to create, and nothing to clean up: the provider row is the only row that ever existed,
+and the tier is a per-Session choice rather than a provider.
+
+The settings page manages the profile-level **Default service tier** and lists the routes that
+currently point at this relay (with **Remove** for the ones you no longer want).
 
 ### From a provider row (the switch)
 
 In **Settings → Models**, every `llm-pi-ai` provider row carries a compact strip added by this
-plugin: a **Route through OpenRouter Plus** checkbox and, once ticked, a **tier** picker
-(`No tier (pass-through)`, `auto`, `default`, `flex`, `scale`, `priority`, `fast`, `ultrafast`).
+plugin: a **Route through OpenRouter Plus** checkbox.
 
 Ticking it does three things, all through the control API:
 
 1. records the endpoint that row currently points at (that is your real base URL) as a *target* in
    this plugin's own config;
-2. gives that target a mount — `http://127.0.0.1:8791/t/<targetId>/<tier>/v1`, or
-   `…/t/<targetId>/v1` when no tier is pinned;
+2. gives that target a mount — `http://127.0.0.1:8791/t/<targetId>/v1` — which *mounts* the
+   endpoint without pinning a tier: the tiers come from the Sessions that call it;
 3. repoints **only** that provider row's `baseURL` at the mount. `api`, `apiKeyEnv`, headers and
    models are not touched, and no plugin bookkeeping is written into the provider entry (it is
    schema-validated, so it stays clean).
@@ -93,13 +100,14 @@ Ticking it does three things, all through the control API:
 config, so the Loader re-applies the Host row and the listener rebinds — which can cut the HTTP
 response to that very request. It is not a failure: the strip re-probes `/health`, re-reads
 `/targets` and shows the truth, and every write here is idempotent, so a retry lands cleanly. Later
-attaches (a tier change, a detach, a re-attach of a known endpoint) reuse the target row and do not
-reload anything.
+attaches (a detach, a re-attach of a known endpoint) reuse the target row and do not reload anything.
+**A tier switch never writes anything**, so it never reloads anything either.
 
 What happens to a request: the relay strips the mount prefix, appends the rest of the path to your
-recorded endpoint, and — only when a tier is pinned — writes `service_tier` into the JSON body. With
-**No tier (pass-through)** it forwards the request body untouched, which is what you want for a
-self-hosted gateway that has no notion of OpenRouter tiers.
+recorded endpoint, asks which tier the Session carrying that request chose, and writes
+`service_tier` into the JSON body when it has one. With no tier chosen the body goes out untouched —
+and a `service_tier` the client put there itself is removed, so this Session's silence stays silence
+rather than inheriting whatever a UI happened to send.
 
 Untick it (**Detach**) and the row's `baseURL` goes back to the endpoint recorded for that target;
 the mount stays until you remove the target. Everything is idempotent: the same endpoint always maps
@@ -152,9 +160,11 @@ the base URL:
           - id: acme-large
 ```
 
-`/t/<targetId>/<tier>/v1` pins `<tier>`; `/t/<targetId>/v1` pins nothing. The target's endpoint is
-declared once, in the plugin's config (see `targets` below), so one listener can front any number of
-OpenAI- or Anthropic-style endpoints.
+`/t/<targetId>/v1` is the shape the switch writes: it mounts the endpoint and pins nothing, so each
+Session's chip decides. `/t/<targetId>/<tier>/v1` is the older pinned shape and still works — useful
+when a row must sit on one tier regardless of who calls it. The target's endpoint is declared once,
+in the plugin's config (see `targets` below), so one listener can front any number of OpenAI- or
+Anthropic-style endpoints.
 
 ### Reasoning effort on a relay route
 
@@ -190,18 +200,28 @@ declared map, never resurrects an explicit `false`, and writes nothing when ther
 ### From the composer (the tier chip)
 
 Once a provider row is routed, a compact chip appears in the composer next to the model selector
-showing its tier. Picking another tier there does **not** rewrite any config: a tier is a property
-of the mount, so the chip switches *this session* to the sibling provider that already carries that
-mount (`<route>-<tier>`, or `<route>-pass` for pass-through), and the first time you use a tier it
-creates that sibling once.
+showing the tier the next request will carry. Picking another tier there does **not** rewrite any
+config and does **not** mint a provider: the Host records the choice for this Session in memory, and
+the relay applies it to the request body on the way out.
+
+- `flex` — half price, slower pool.
+- `priority` / `fast` / `ultrafast` — a multiplier for a faster pool.
+- `scale` / `auto` / `default` — OpenRouter's own scheduling modes.
+- **No tier (pass-through)** — the body leaves without a `service_tier` key at all.
+- **Default (no tier)** / **Default (flex)**, … — stop choosing for this Session and inherit the profile default again.
 
 That is why it is per session: two conversations can be on `flex` and `priority` at the same time,
-and neither of them re-writes the other's provider row. The selected provider's name is visible in
-the model label, so the tier is always readable without opening the chip.
+neither of them rewrites the other's provider row, and the reasoning effort you selected survives
+the switch because the selection itself never changes.
 
-The chip only appears when the session's current provider is routed through a per-endpoint mount
+The choice lives in the Host's memory — it is runtime state, like the effort level — so it survives
+the whole Session but not a Host restart (a default-tier write reloads the plugin, which drops those
+choices too). Want a tier that outlives every restart? Either set the profile **Default service tier**
+or point a provider at a pinned mount by hand (`/flex/v1`).
+
+The chip only appears when the Session's current provider is routed through a mount
 (`/t/<targetId>/…`). Elsewhere the Models-page switch is the control: it is the one that moves the
-provider itself, which is the right choice when you want the endpoint to *stay* on one tier.
+provider itself.
 
 ## Control API
 
@@ -211,12 +231,13 @@ Served on the same loopback listener, outside the proxy path space:
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
 | `GET /__openrouter-plus/status` | address, upstream, mounts, metrics |
-| `GET /__openrouter-plus/targets` | source routes, routes this plugin created, and the `targets` table |
-| `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` |
+| `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the tier table (`{ default, tiers }`) |
+| `GET /__openrouter-plus/tier?session=<id>` | what that Session would send now: `tier`, `chosen`, `default`, `tiers` |
+| `POST /__openrouter-plus/tier` | `{ session, tier }` — choose this Session's tier; `tier: null` hands it back to the default. **Memory only, never a config write** |
+| `POST /__openrouter-plus/tier/default` | `{ tier }` — the tier an unchosen Session inherits; `tier: null` clears it |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
 | `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
-| `POST /__openrouter-plus/routes/twin` | `{ route, tier?, name? }` — the sibling provider that carries another tier of the same endpoint (`created: false` when it already exists) |
-| `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier? }` — record the endpoint and point that provider at the relay |
+| `POST /__openrouter-plus/routes/attach` | `{ route, upstream }` — record the endpoint and point that provider at the relay |
 | `POST /__openrouter-plus/routes/detach` | `{ route, id }` — put that provider back on its own endpoint |
 | `POST /__openrouter-plus/targets/register` | `{ upstream, tier?, id? }` — record an endpoint without touching a provider |
 | `POST /__openrouter-plus/targets/remove` | `{ id }` — refuse while a provider still routes through it |
@@ -224,7 +245,12 @@ Served on the same loopback listener, outside the proxy path space:
 `attach`/`detach` are what the Models-page switch calls; both are idempotent and report
 `changed: false` when the row is already in the requested state. A rejected request answers `400`
 with `{ error: { message } }` — for example a body that is not an http(s) URL, or one that points
-back at the relay.
+back at the relay. `POST /tier` answers `400` for an unknown tier name (`turbo`) or a missing
+`session`, and accepts `tier: null`/`""` to clear.
+
+Everything in `/tier` is deliberately write-free: a config write would re-apply this plugin row and
+restart the listener, which is not something a mid-conversation click should risk. Only
+`/tier/default` writes, because it is a preference rather than one Session's state.
 
 `POST` requires `x-oorp-client: web`. CORS is reflected only for loopback GUI origins.
 
@@ -243,11 +269,12 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `port` | `8791` | preferred port |
 | `portFallback` | `true` | fall forward to the next free port (the page probes 8791–8794) |
 | `upstream` | `https://openrouter.ai/api/v1` | where requests are forwarded, no trailing slash |
-| `routes` | tier mounts | mount path → tier; `null` tier is a pure passthrough |
+| `routes` | tier mounts | mount path → tier, for pinned URLs (`/flex/v1`); `null` tier is a pure passthrough. The per-session design needs only `/v1` |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
-| `reasoningEfforts` | `false`-able map | levels written onto created routes' models; `false` disables, omit for evidence-only |
+| `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
-| `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream, tier } }`, `tier: null` for pass-through. Written by the switch; edit by hand only if you want one without a provider row |
+| `defaultTier` | `null` | the tier an unchosen Session inherits; `null` sends no `service_tier` at all. Written by **Default service tier** on the settings page |
+| `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 
 ## Security model
 
@@ -265,7 +292,9 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | --- | --- |
 | Card says *relay offline* | The port range is busy, or the row is `enabled: false`. Check the Host log for `[openrouter-plus]`; set a fixed `port`. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
-| Requests work but no tier is applied | The route's mount has a `null` tier (`/v1`), or the request is not `POST` with a JSON body. |
+| Requests work but no tier is applied | This Session has no tier chosen (`No tier` / no default), the mount is the bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
+| The chip shows a tier, but another Session still bills full price | The tier is per Session by design. Set it in that Session's composer, or set a profile **Default service tier**. |
+| The chip disappeared after a Host restart | Choices are runtime state and the memory table is dropped on restart (and on a default-tier write, which reloads the plugin). Re-pick it, or set the default tier. |
 | `flex` still bills full price | The provider decides the served tier; a pinned tier only *requests* it. Confirm with `usage` / the OpenRouter dashboard. |
 | No effort selector for a relay route's model | The model has no `reasoningEfforts` — usually because the model list was edited in Settings → Models afterwards. It is restored automatically; if `autoRepairReasoning` is off, press **Add reasoning to N models** on the OpenRouter Plus page. See "Reasoning effort on a relay route". |
 
@@ -281,7 +310,7 @@ dsh plugin remove dsh-openrouter-plus
 
 ```bash
 node --check index.js && node --check client.js
-node --test test/
+node --test            # 92 tests, no network, no profile writes
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module contract, and

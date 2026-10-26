@@ -36,7 +36,7 @@ const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 /** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.7.0'
+const VERSION = '0.8.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -48,7 +48,8 @@ const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/
  * @returns {{
  *   enabled: boolean, host: string, port: number, portFallback: boolean,
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
- *   autoRepairReasoning: boolean,
+ *   autoRepairReasoning: boolean, defaultTier: string|null,
+ *   sessionTiers: Record<string, string>, sessionTierStamp: Record<string, number>,
  * }}
  */
 export function normalizeConfig(raw) {
@@ -56,6 +57,7 @@ export function normalizeConfig(raw) {
   const upstream = typeof config.upstream === 'string' && config.upstream.trim()
     ? config.upstream.trim().replace(/\/+$/, '')
     : DEFAULT_UPSTREAM
+  const sessionTiers = normalizeSessionTiers(config.sessionTiers)
   return {
     enabled: config.enabled !== false,
     host: typeof config.host === 'string' && config.host.trim() ? config.host.trim() : '127.0.0.1',
@@ -76,7 +78,59 @@ export function normalizeConfig(raw) {
     // Extra upstreams this relay forwards to, keyed by the id used in their
     // mount path. Written by the control API when a provider is attached.
     targets: normalizeTargets(config.targets),
+    // The tier a Session runs on when it has not chosen one. The tier is a runtime
+    // decision, so it lives here next to the table rather than in any provider row.
+    defaultTier: normalizeTierName(config.defaultTier),
+    sessionTiers: sessionTiers.tiers,
+    sessionTierStamp: sessionTiers.stamp,
   }
+}
+
+/**
+ * Normalise a tier name against the tiers this relay knows, or null.
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizeTierName(value) {
+  const tier = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return KNOWN_TIERS.includes(tier) ? tier : null
+}
+
+/** How many Sessions keep a chosen tier before the oldest choices are dropped. */
+export const SESSION_TIER_LIMIT = 200
+
+/**
+ * Normalise the per-Session tier table. Entries are `{ tier, at }` objects written
+ * by the control API; a bare string is accepted too so a hand-edited config still
+ * works. Oldest entries are dropped past {@link SESSION_TIER_LIMIT} so the table
+ * cannot grow without bound as Sessions are created.
+ *
+ * @param {unknown} raw
+ * @returns {{ tiers: Record<string, string>, stamp: Record<string, number> }}
+ */
+export function normalizeSessionTiers(raw) {
+  if (!isPlainObject(raw)) return { tiers: {}, stamp: {} }
+  /** @type {Array<[string, string, number]>} */
+  const kept = []
+  for (const [rawId, value] of Object.entries(raw)) {
+    const id = typeof rawId === 'string' ? rawId.trim() : ''
+    if (!id || id.length > 128) continue
+    const object = isPlainObject(value) ? value : { tier: value }
+    const tier = normalizeTierName(object.tier)
+    if (tier === null) continue
+    const at = Number.isFinite(object.at) ? Number(object.at) : 0
+    kept.push([id, tier, at])
+  }
+  kept.sort((a, b) => b[2] - a[2])
+  /** @type {Record<string, string>} */
+  const tiers = {}
+  /** @type {Record<string, number>} */
+  const stamp = {}
+  for (const [id, tier, at] of kept.slice(0, SESSION_TIER_LIMIT)) {
+    tiers[id] = tier
+    stamp[id] = at
+  }
+  return { tiers, stamp }
 }
 
 /**
@@ -528,6 +582,89 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * The tier each Session chose, live in memory so a request never pays for a
+   * config read, and mirrored into this plugin's own row so a restart keeps it.
+   * The tier is a runtime decision — the same shape `reasoningEffort` has — so it
+   * is deliberately *not* a property of any provider row.
+   *
+   * @type {Map<string, string>}
+   */
+  const sessionTiers = new Map(Object.entries(config.sessionTiers ?? {}))
+
+  /** When each choice was made, for bounded eviction. @type {Map<string, number>} */
+  const sessionTierStamp = new Map(Object.entries(config.sessionTierStamp ?? {}))
+
+  /** The tier a Session runs on when it has chosen nothing. */
+  function defaultTier() {
+    return normalizeTierName(config.defaultTier)
+  }
+
+  /**
+   * Persist the tier every unchosen Session inherits.
+   *
+   * Written into this plugin's own row because it is a preference, not a request
+   * property: unlike a Session's choice there is nothing to keep in memory, so the
+   * next request reads it straight from the reloaded config.
+   *
+   * @param {string | null} tier
+   */
+  async function writeDefaultTier(tier) {
+    const { editor, entry, current } = ownRow()
+    await editor.edit(entry, (currentConfig) => ({
+      ...(isPlainObject(currentConfig) ? currentConfig : current),
+      defaultTier: tier,
+    }))
+  }
+
+  /**
+   * The tier one Session runs on: its own choice, else the configured default.
+   * An unknown/blank Session gets the default — a proxy hop with no tier is still
+   * the correct answer, never an error.
+   *
+   * @param {unknown} session
+   * @returns {string | null}
+   */
+  function tierForSession(session) {
+    const key = typeof session === 'string' ? session.trim() : ''
+    if (key !== '') {
+      const chosen = sessionTiers.get(key)
+      if (chosen !== undefined) return chosen
+    }
+    return defaultTier()
+  }
+
+  /**
+   * Record one Session's tier — or clear it, which hands that Session back to the
+   * configured default.
+   *
+   * Deliberately memory-only. A Session's choice is runtime state, exactly like
+   * `reasoningEffort`; persisting it would write the plugin row on every switch, and
+   * that write reloads this plugin and restarts the listener mid-conversation. The one
+   * tier setting that outlives a restart is `POST /tier/default`.
+   *
+   * @param {string} session
+   * @param {string | null} tier
+   */
+  function writeSessionTier(session, tier) {
+    if (tier === null) {
+      sessionTiers.delete(session)
+      sessionTierStamp.delete(session)
+      return
+    }
+    sessionTiers.set(session, tier)
+    sessionTierStamp.set(session, Date.now())
+    // Evict the oldest choices past the cap so a long-lived Host cannot grow a table
+    // of every Session it ever ran.
+    if (sessionTiers.size > SESSION_TIER_LIMIT) {
+      const ordered = [...sessionTierStamp.entries()].sort((a, b) => a[1] - b[1])
+      for (const [key] of ordered.slice(0, sessionTiers.size - SESSION_TIER_LIMIT)) {
+        sessionTiers.delete(key)
+        sessionTierStamp.delete(key)
+      }
+    }
+  }
+
+  /**
    * The target mount a baseURL names, if it is one of ours.
    * @param {unknown} value
    * @returns {{ targetId: string, tier: string | null } | null}
@@ -691,6 +828,9 @@ export function apply(ctx, rawConfig) {
         available: true,
         ...targets,
         custom,
+        // The tier is a Session-level runtime choice, so the page only needs to know
+        // what new Sessions inherit and which tiers a Session may pick.
+        tier: { default: defaultTier(), tiers: KNOWN_TIERS },
         // What a repair would fill: `false` = never, `null` = only from evidence
         // already declared elsewhere in the profile, object = the fallback map.
         reasoning: {
@@ -700,38 +840,83 @@ export function apply(ctx, rawConfig) {
       })
     }),
 
-    [`${CONTROL_PREFIX}/routes/create`]: controlRoute(async (req, res) => {
+    /**
+     * The service tier one Session runs on.
+     *
+     * `GET ?session=<id>` reports what that Session would send right now; `POST`
+     * with `{ session, tier }` chooses it, and `tier: null` hands the Session back
+     * to the configured default. Nothing here touches a provider row: the relay
+     * writes `service_tier` into the request body on the way out, so switching is a
+     * runtime change like `reasoningEffort` rather than a new provider.
+     */
+    [`${CONTROL_PREFIX}/tier`]: controlRoute(async (req, res) => {
+      if (req.method === 'GET') {
+        const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
+        const session = (query.get('session') ?? '').trim()
+        sendJson(res, 200, {
+          ok: true,
+          session,
+          tier: tierForSession(session),
+          chosen: sessionTiers.get(session) ?? null,
+          default: defaultTier(),
+          tiers: KNOWN_TIERS,
+        })
+        return
+      }
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)
-      const created = await outsideHmrTransaction(ctx, () =>
-        bridge.createRoute({
-          source: typeof body.source === 'string' ? body.source : '',
-          tier: typeof body.tier === 'string' ? body.tier : '',
-          name: typeof body.name === 'string' ? body.name : undefined,
-          displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
-        }),
-      )
-      log('info', 'created provider route', created)
-      sendJson(res, 200, { ok: true, ...created })
+      const session = typeof body.session === 'string' ? body.session.trim() : ''
+      if (!session) {
+        sendJson(res, 400, { error: { message: 'session is required: the Session whose tier is being set' } })
+        return
+      }
+      if (session.length > 128) {
+        sendJson(res, 400, { error: { message: 'session must be at most 128 characters' } })
+        return
+      }
+      const raw = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
+      if (raw !== '' && !KNOWN_TIERS.includes(raw)) {
+        sendJson(res, 400, {
+          error: { message: `unknown service tier ${JSON.stringify(raw)}; use one of ${KNOWN_TIERS.join(', ')} or null for the default` },
+        })
+        return
+      }
+      const tier = raw === '' ? null : raw
+      // No config write and no transaction escape: this touches memory only.
+      writeSessionTier(session, tier)
+      log('info', 'chose service tier for session', { session, tier })
+      sendJson(res, 200, {
+        ok: true,
+        session,
+        tier: tierForSession(session),
+        chosen: tier,
+        default: defaultTier(),
+        tiers: KNOWN_TIERS,
+      })
     }),
 
-    // A tier is a property of the mount, so "switch this session's tier"
-    // becomes "switch this session to the sibling provider that carries that
-    // mount". Idempotent on purpose: the composer chip always posts here, and an
-    // existing sibling is returned with `created: false` and no config write.
-    [`${CONTROL_PREFIX}/routes/twin`]: controlRoute(async (req, res) => {
+    // The tier an unchosen Session inherits. Separate from `/tier` because it is a
+    // profile preference rather than one Session's choice, and it is the only tier
+    // setting that outlives a restart by design.
+    [`${CONTROL_PREFIX}/tier/default`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)
-      const twinned = await providerWrite(() =>
-        bridge.twinRoute({
-          route: typeof body.route === 'string' ? body.route : '',
-          tier: typeof body.tier === 'string' ? body.tier : '',
-          name: typeof body.name === 'string' ? body.name : undefined,
-        }),
-      )
-      log('info', twinned.created ? 'created tier sibling route' : 'reused tier sibling route', twinned)
-      sendJson(res, 200, { ok: true, ...twinned })
+      const raw = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
+      if (raw !== '' && !KNOWN_TIERS.includes(raw)) {
+        sendJson(res, 400, {
+          error: { message: `unknown service tier ${JSON.stringify(raw)}; use one of ${KNOWN_TIERS.join(', ')} or null for no tier` },
+        })
+        return
+      }
+      const tier = raw === '' ? null : raw
+      await outsideHmrTransaction(ctx, () => writeDefaultTier(tier))
+      log('info', 'chose the default service tier', { tier })
+      sendJson(res, 200, { ok: true, default: tier, tiers: KNOWN_TIERS })
     }),
+
+    // There is deliberately no `/routes/twin`: switching a Session's tier must not
+    // mint a provider route. The relay writes the tier into the request body, so the
+    // only state a switch touches is the Session tier table (`POST /tier`).
 
     [`${CONTROL_PREFIX}/routes/remove`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
@@ -846,7 +1031,20 @@ export function apply(ctx, rawConfig) {
         }
         request = { ...body, upstream: known.upstream }
       }
-      const registered = await outsideHmrTransaction(ctx, () => ensureTarget(request))
+      // No tier is pinned on the way in: one target serves every tier, and which one a
+      // request runs on is decided per Session by the relay.
+      // A tier in the body is accepted and ignored (older clients still send one), but it
+      // is validated: silently swallowing a typo would teach the caller the wrong thing.
+      const suppliedTier = typeof body.tier === 'string' ? body.tier.trim().toLowerCase() : ''
+      if (suppliedTier && !KNOWN_TIERS.includes(suppliedTier)) {
+        sendJson(res, 400, {
+          error: { message: `unknown service tier ${JSON.stringify(suppliedTier)}; use one of ${KNOWN_TIERS.join(', ')} or no tier` },
+        })
+        return
+      }
+      const registered = await outsideHmrTransaction(ctx, () =>
+        ensureTarget({ upstream: request.upstream, id: typeof body.id === 'string' ? body.id : undefined }),
+      )
       if (current && current.targetId !== registered.target.id) {
         sendJson(res, 400, {
           error: {
@@ -857,7 +1055,11 @@ export function apply(ctx, rawConfig) {
         })
         return
       }
-      const baseURL = baseUrlFor(registered.target.id, registered.target.tier)
+      // The row is pointed at the *bare* per-target mount on purpose: which tier a
+      // request runs on is the Session's choice, applied by the relay while the body
+      // is on its way out. A row per tier would be a provider per tier, which is
+      // exactly what the tier feature must never need.
+      const baseURL = baseUrlFor(registered.target.id, null)
       const planned = await providerWrite(() => bridge.repointRoute({ route, baseURL }))
       log('info', 'routed provider through the relay', { route, baseURL, changed: planned.changed })
       sendJson(res, 200, { ok: true, route, baseURL, changed: planned.changed, target: registered.target })
@@ -922,6 +1124,9 @@ export function apply(ctx, rawConfig) {
     log,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
     resolveTarget,
+    // The tier a bare mount should use for the Session carrying the request. The
+    // relay only asks; every choice lives here, in this plugin's own config.
+    resolveSessionTier: (session) => tierForSession(session),
     onRecord: (entry) => metrics.record(entry),
   })
 

@@ -65,17 +65,6 @@ window.__ModuleLoader__.load({
     const RECONCILE_DELAYS_MS = Object.freeze([350, 450, 550]);
     const MUTATION_TIMEOUT_MS = 6000;
 
-    /**
-     * Gaps before re-sending a Session model selection to a freshly minted tier sibling.
-     * `/routes/twin` returns before the composer's model catalog — and the Host's llm
-     * registry behind `selectModel` — has picked up the new provider route; a key either
-     * of them has not seen yet is a race, not a verdict. Three gaps keep the chip from
-     * stranding a click on a slow reload without pinning it open indefinitely.
-     */
-    const SELECT_RETRY_DELAYS_MS = Object.freeze([250, 500, 900]);
-
-    /** Accepted tiers when the relay has not reported a mount list yet. */
-    const TIER_FALLBACK = Object.freeze(['flex', 'scale', 'auto', 'priority', 'fast', 'ultrafast']);
     /** Documented pricing multipliers, used only when metrics have not seen a tier yet. */
     const TIER_MULTIPLIER_FALLBACK = Object.freeze({
       flex: 0.5,
@@ -111,9 +100,6 @@ window.__ModuleLoader__.load({
       'common.defaultTier': 'default',
       'common.version': 'v{version}',
 
-      'status.checking': 'Checking relay…',
-      'status.online': 'Relay online',
-      'status.offline': 'Relay offline',
 
       'header.relay': 'Relay',
       'header.upstream': 'Upstream',
@@ -127,7 +113,6 @@ window.__ModuleLoader__.load({
       'offline.hint': 'Start DSH with the dsh-openrouter-plus plugin enabled, then retry.',
 
       'error.http': 'HTTP {status}',
-      'error.fetch': 'Request failed: {message}',
       'error.badStatus': 'The relay returned an unexpected status payload.',
       'error.badTargets': 'The relay returned an unexpected provider-routes payload.',
       'error.badRepair': 'The relay returned an unexpected repair result.',
@@ -164,31 +149,23 @@ window.__ModuleLoader__.load({
 
       'providers.caption': 'Provider routes',
       'providers.explain':
-        'A created route appears in the model picker as its own provider; removing it here only deletes routes this page created.',
+        'Tick \u201cRoute through OpenRouter Plus\u201d on a provider in Settings \u2192 Models, then pick the service tier in the composer. The provider keeps its models and key; only its base URL moves onto this relay.',
       'providers.loading': 'Loading provider routes…',
       'providers.retry': 'Reload',
       'providers.unavailable': 'Route editing is unavailable: {reason}',
       'providers.unavailableNoReason': 'Route editing is unavailable in this environment.',
-      'providers.sourcesCaption': 'Sources',
-      'providers.createdCaption': 'Created routes',
-      'providers.emptySources': 'No provider sources are configured.',
-      'providers.createdEmpty': 'No route has been created from this page yet.',
-      'providers.sourceModels': '{api} · {count} models',
-      'providers.sourceKey': 'key env: {env}',
+      'providers.createdCaption': 'Routes on this relay',
+      'providers.createdEmpty': 'No provider route points at this relay yet.',
       'providers.tierOption': '{tier} · {multiplier}',
-      'providers.tierAria': 'Service tier for {name}',
-      'providers.routeName': 'Route name: {name}',
+      'providers.defaultTierCaption': 'Default service tier',
+      'providers.defaultTierHint': 'What a Session inherits until it picks a tier in the composer.',
+      'providers.defaultTierAria': 'Default service tier for new Sessions',
+      'providers.noticeDefaultTier': 'Saved the default service tier.',
       'providers.routeMeta': '{source} · {tier} · {count} models',
       'providers.routeBase': 'Base URL: {url}',
-      'providers.create': 'Create route',
-      'providers.creating': 'Creating…',
-      'providers.createAria': 'Create route {name}',
-      'providers.exists': 'Route {name} already exists.',
       'providers.remove': 'Remove',
       'providers.removing': 'Removing…',
       'providers.removeAria': 'Remove route {name}',
-      'providers.noticeCreated': 'Created route {name}.',
-      'providers.noticeRemoved': 'Removed route {name}.',
       'providers.actionFailed': 'Route change failed: {message}',
       'providers.missingReasoning': 'no effort levels \u00b7 {count} models',
       'providers.repair': 'Add effort levels to {count} models',
@@ -207,19 +184,18 @@ window.__ModuleLoader__.load({
       'strip.routed': 'Routed via OpenRouter Plus',
       'strip.tierAria': 'Service tier for {name}',
       'strip.tierNone': 'No tier (pass-through)',
-      'strip.apply': 'Route requests',
       'strip.applying': 'Routing\u2026',
-      'strip.detach': 'Detach',
       'strip.detaching': 'Restoring\u2026',
-      'strip.detachAria': 'Detach {name} from OpenRouter Plus',
       'strip.tierHint': 'Tiers only apply to endpoints that accept an OpenAI-style service_tier (OpenRouter itself, and some compatible gateways).',
+      'strip.routedHint': 'Requests from this provider go through the relay. The service tier is chosen per session from the composer chip.',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
 
       'tier.aria': 'Service tier for {name}: {tier}',
       'tier.switching': 'Switching tier\u2026',
       'tier.error': 'Could not switch the tier: {message}',
-      'tier.hint': 'Moves this session to the sibling route that pins the tier. Other sessions keep their own.',
-      'tier.unavailable': 'This session has no model directory yet, so its route cannot be switched here.',
+      'tier.hint': 'Only this session switches. Other sessions keep their own tier.',
+      'tier.followDefault': 'Default ({tier})',
+      'tier.followDefaultNone': 'Default (no tier)',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -248,9 +224,6 @@ window.__ModuleLoader__.load({
       'common.defaultTier': '默认',
       'common.version': 'v{version}',
 
-      'status.checking': '正在检测中继…',
-      'status.online': '中继在线',
-      'status.offline': '中继离线',
 
       'header.relay': '中继',
       'header.upstream': '上游',
@@ -264,7 +237,6 @@ window.__ModuleLoader__.load({
       'offline.hint': '请确认 DSH 已启用 dsh-openrouter-plus 插件后重试。',
 
       'error.http': 'HTTP {status}',
-      'error.fetch': '请求失败：{message}',
       'error.badStatus': '中继返回了无法识别的状态数据。',
       'error.badTargets': '中继返回了无法识别的提供商路由数据。',
       'error.badRepair': '中继返回了无法识别的修复结果。',
@@ -297,31 +269,23 @@ window.__ModuleLoader__.load({
       'savings.note': '倍率为相对 token 价格。中继不知道各模型的实际价格，因此不显示金额。',
 
       'providers.caption': '提供商路由',
-      'providers.explain': '创建的路由会作为独立提供商出现在模型选择器中；在此移除只会删除本页面创建的路由。',
+      'providers.explain': '在设置 → 模型里勾选“经 OpenRouter Plus 转发”，再到编辑器中选择服务等级。提供商会保留自己的模型与密钥，只有基址切换到本中继。',
       'providers.loading': '正在加载提供商路由…',
       'providers.retry': '重新加载',
       'providers.unavailable': '无法编辑路由：{reason}',
       'providers.unavailableNoReason': '当前环境无法编辑路由。',
-      'providers.sourcesCaption': '可用来源',
-      'providers.createdCaption': '已创建的路由',
-      'providers.emptySources': '尚未配置任何提供商来源。',
-      'providers.createdEmpty': '尚未通过此页面创建路由。',
-      'providers.sourceModels': '{api} · {count} 个模型',
-      'providers.sourceKey': '密钥环境变量：{env}',
+      'providers.createdCaption': '经由此中继的路由',
+      'providers.createdEmpty': '尚无提供商路由指向此中继。',
       'providers.tierOption': '{tier} · {multiplier}',
-      'providers.tierAria': '{name} 的服务等级',
-      'providers.routeName': '路由名称：{name}',
+      'providers.defaultTierCaption': '默认服务等级',
+      'providers.defaultTierHint': '在编辑器中选定等级之前，会话会继承该等级。',
+      'providers.defaultTierAria': '新会话的默认服务等级',
+      'providers.noticeDefaultTier': '已保存默认服务等级。',
       'providers.routeMeta': '{source} · {tier} · {count} 个模型',
       'providers.routeBase': '基址：{url}',
-      'providers.create': '创建路由',
-      'providers.creating': '正在创建…',
-      'providers.createAria': '创建路由 {name}',
-      'providers.exists': '路由 {name} 已存在。',
       'providers.remove': '移除',
       'providers.removing': '正在移除…',
       'providers.removeAria': '移除路由 {name}',
-      'providers.noticeCreated': '已创建路由 {name}。',
-      'providers.noticeRemoved': '已移除路由 {name}。',
       'providers.actionFailed': '路由修改失败：{message}',
       'providers.missingReasoning': '无强度档位 \u00b7 {count} 个模型',
       'providers.repair': '为 {count} 个模型补充强度档位',
@@ -340,19 +304,18 @@ window.__ModuleLoader__.load({
       'strip.routed': '已通过 OpenRouter Plus 转发',
       'strip.tierAria': '{name} 的服务等级',
       'strip.tierNone': '无等级（直通）',
-      'strip.apply': '开始转发',
       'strip.applying': '正在转发\u2026',
-      'strip.detach': '解除',
       'strip.detaching': '正在恢复\u2026',
-      'strip.detachAria': '将 {name} 从 OpenRouter Plus 解除',
       'strip.tierHint': '服务等级只对接受 OpenAI service_tier 的端点生效（如 OpenRouter 本身及部分兼容网关）。',
+      'strip.routedHint': '该提供商已通过中继转发。服务等级在输入框的等级按钮里按会话选择。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
 
       'tier.aria': '{name} 的服务等级：{tier}',
       'tier.switching': '正在切换等级\u2026',
       'tier.error': '无法切换服务等级：{message}',
-      'tier.hint': '仅把当前会话切换到固定该等级的兄弟路由；其他会话不受影响。',
-      'tier.unavailable': '该会话还没有可用的模型目录，无法在这里切换路由。',
+      'tier.hint': '只切换当前会话；其他会话保持各自的等级。',
+      'tier.followDefault': '默认（{tier}）',
+      'tier.followDefaultNone': '默认（不指定等级）',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -483,28 +446,6 @@ window.__ModuleLoader__.load({
       return left.path < right.path ? -1 : 1;
     }
 
-    /** Unique tier names from the relay mounts, in mount-table order. */
-    function tiersFromMounts(mounts) {
-      const seen = Object.create(null);
-      const tiers = [];
-      for (const mount of mounts) {
-        if (mount.tier === null || seen[mount.tier] === true) continue;
-        seen[mount.tier] = true;
-        tiers.push(mount.tier);
-      }
-      return tiers.length > 0 ? tiers : TIER_FALLBACK.slice();
-    }
-
-    function defaultTierFor(source, tiers) {
-      if (source.attachedTier !== null && tiers.indexOf(source.attachedTier) >= 0) return source.attachedTier;
-      if (tiers.indexOf('flex') >= 0) return 'flex';
-      return tiers.length > 0 ? tiers[0] : 'flex';
-    }
-
-    function proposedRouteName(sourceKey, tier) {
-      return sourceKey + '-' + tier;
-    }
-
     function errorMessage(t, error) {
       if (error && error.name === 'AbortError') {
         return t('offline.timeout', { seconds: String(STATUS_TIMEOUT_MS / 1000) });
@@ -620,36 +561,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The provider route that already pins `tier` for the same relay target, or ''. A
-     * twin write is idempotent, so a cut response is read back through `/targets`
-     * instead of guessed: the sibling is either there or the click failed.
+     * `/tier` bodies, normalised: `chosen` is what the Session picked (null while it
+     * follows the default), `tier` what a request will carry, `default` the configured
+     * fallback. Null means the Host answered something that is not this API.
      */
-    function twinSiblingOf(data, targetId, tier) {
-      if (!isPlainObject(data) || !Array.isArray(data.sources) || targetId === '') return '';
-      const wanted = tier === '' ? null : tier;
-      for (const entry of data.sources) {
-        if (!isPlainObject(entry)) continue;
-        if (stringValue(entry.targetId).trim() !== targetId) continue;
-        const attached = stringValue(entry.attachedTier).trim();
-        if ((attached === '' ? null : attached) !== wanted) continue;
-        const key = stringValue(entry.key).trim();
-        if (key !== '') return key;
-      }
-      return '';
-    }
-
-    /** `/routes/twin` success body, or null when the relay answered something else. */
-    function twinRouteOf(payload) {
-      if (!isPlainObject(payload) || payload.ok === false) return null;
-      const name = stringValue(payload.name).trim();
-      if (name === '') return null;
-      const tier = stringValue(payload.tier).trim();
+    function normalizeTierState(payload) {
+      if (!isPlainObject(payload)) return null;
+      if (payload.ok === false) return null;
+      if (!Object.prototype.hasOwnProperty.call(payload, 'tier')) return null;
+      const chosen = stringValue(payload.chosen).trim();
+      const fallback = stringValue(payload.default).trim();
+      const effective = stringValue(payload.tier).trim();
       return {
-        name: name,
-        tier: tier === '' ? null : tier,
-        source: stringValue(payload.source).trim(),
-        baseURL: stringValue(payload.baseURL).trim(),
-        created: payload.created === true,
+        chosen: chosen === '' ? null : chosen,
+        default: fallback,
+        tier: effective === '' ? null : effective,
       };
     }
 
@@ -680,58 +606,6 @@ window.__ModuleLoader__.load({
         return effort === '' ? { provider: provider, model: model } : { provider: provider, model: model, reasoningEffort: effort };
       }
       return null;
-    }
-
-    /**
-     * The model-selection request the chip submits: same model, sibling provider, and the
-     * Session's effort only when it has one. An absent effort must stay absent — sending
-     * `reasoningEffort: undefined` would ask the Host to clear a level the user chose.
-     */
-    function modelSelectionRequest(selection, provider) {
-      const model = isPlainObject(selection) ? stringValue(selection.model).trim() : '';
-      const effort = isPlainObject(selection) ? stringValue(selection.reasoningEffort).trim() : '';
-      return effort === ''
-        ? { provider: provider, model: model }
-        : { provider: provider, model: model, reasoningEffort: effort };
-    }
-
-    /** Failure text a `RemoteResult` carries, or '' when it reports none. */
-    function remoteFailureMessage(result) {
-      if (!isPlainObject(result) || !isPlainObject(result.error)) return '';
-      const message = stringValue(result.error.message).trim();
-      if (message !== '') return message;
-      return stringValue(result.error.code).trim();
-    }
-
-    /** Failure code a `RemoteResult` carries, or '' when it reports none. */
-    function remoteFailureCode(result) {
-      if (!isPlainObject(result) || !isPlainObject(result.error)) return '';
-      return stringValue(result.error.code).trim();
-    }
-
-    /** Whether the shared model catalog has heard of `provider` yet. */
-    function catalogHasProvider(directory, provider) {
-      if (directory === null || directory === undefined) return false;
-      const store = directory.store;
-      if (store === null || store === undefined || typeof store.getSnapshot !== 'function') return false;
-      const snapshot = store.getSnapshot();
-      const groups = isPlainObject(snapshot) && Array.isArray(snapshot.groups) ? snapshot.groups : [];
-      for (const group of groups) {
-        if (isPlainObject(group) && stringValue(group.id).trim() === provider) return true;
-      }
-      return false;
-    }
-
-    /**
-     * Whether a failed selection is worth retrying. Two faces of the same race: the
-     * provider key is not in the catalog the composer renders from, or the Host's llm
-     * registry has not resolved it yet and answers `session/model-unavailable`. Anything
-     * else — a client-side refusal, a writer hold, a permission error — is a verdict.
-     */
-    function selectionRetryable(directory, provider, code, attempt) {
-      if (attempt >= SELECT_RETRY_DELAYS_MS.length) return false;
-      if (!catalogHasProvider(directory, provider)) return true;
-      return code === 'session/model-unavailable';
     }
 
     /* ------------------------------------------------------------------ normalizers */
@@ -949,6 +823,21 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /* The tier table: which tiers a Session may pick, and the one an unchosen
+         Session inherits. Absent on an older Host, so both halves stay optional. */
+      let tierDefault = null;
+      let tiers = [];
+      if (isPlainObject(payload.tier)) {
+        const fallback = stringValue(payload.tier.default).trim();
+        tierDefault = fallback === '' ? null : fallback;
+        if (Array.isArray(payload.tier.tiers)) {
+          for (const level of payload.tier.tiers) {
+            const name = stringValue(level).trim();
+            if (name !== '' && tiers.indexOf(name) === -1) tiers.push(name);
+          }
+        }
+      }
+
       return {
         available: payload.available !== false,
         reason: stringValue(payload.reason).trim(),
@@ -956,6 +845,7 @@ window.__ModuleLoader__.load({
         created,
         custom,
         reasoning,
+        tier: { default: tierDefault, tiers: tiers },
       };
     }
 
@@ -1288,17 +1178,6 @@ window.__ModuleLoader__.load({
       font: FONTS.small,
     };
 
-    const STRIP_CHOOSER_STYLE = {
-      display: 'flex',
-      flexWrap: 'wrap',
-      alignItems: 'center',
-      gap: '4px 10px',
-      flex: '1 0 100%',
-      minWidth: 0,
-      paddingTop: '6px',
-      borderTop: '1px solid ' + COLORS.border,
-    };
-
     const STRIP_HINT_STYLE = { margin: 0, flexBasis: '100%', color: COLORS.secondary, font: FONTS.tiny };
 
     /* Composer chip: 24px tall to sit on the composer's 28px control row without
@@ -1497,6 +1376,27 @@ window.__ModuleLoader__.load({
     }
 
     /** Secondary-style button with a real focus outline (inline styles cannot use :focus). */
+    /** Native select styled like the page's secondary controls. */
+    function TierSelect(props) {
+      const [focused, setFocused] = React.useState(false);
+      const disabled = props.disabled === true;
+      return h(
+        'select',
+        {
+          value: props.value,
+          disabled: disabled,
+          'aria-label': props.ariaLabel,
+          onChange: (event) => {
+            if (!disabled) props.onChange(event.target.value);
+          },
+          onFocus: () => setFocused(true),
+          onBlur: () => setFocused(false),
+          style: selectStyle({ focused: focused, disabled: disabled }),
+        },
+        props.options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
+      );
+    }
+
     function ActionButton(props) {
       const [hovered, setHovered] = React.useState(false);
       const [focused, setFocused] = React.useState(false);
@@ -1519,27 +1419,6 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Native select styled like the page's secondary controls. */
-    function TierSelect(props) {
-      const [focused, setFocused] = React.useState(false);
-      const disabled = props.disabled === true;
-      return h(
-        'select',
-        {
-          value: props.value,
-          disabled: disabled,
-          'aria-label': props.ariaLabel,
-          onChange: (event) => {
-            if (!disabled) props.onChange(event.target.value);
-          },
-          onFocus: () => setFocused(true),
-          onBlur: () => setFocused(false),
-          style: selectStyle({ focused: focused, disabled: disabled }),
-        },
-        props.options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
-      );
-    }
-
     /**
      * The page body. Everything stateful lives here so the slot wrapper stays trivial and
      * unmounting the slot tears down every timer, fetch and listener this page owns.
@@ -1556,7 +1435,6 @@ window.__ModuleLoader__.load({
       const [refreshKey, setRefreshKey] = React.useState(0);
       const [targets, setTargets] = React.useState({ status: 'idle', data: null, error: '' });
       const [targetsKey, setTargetsKey] = React.useState(0);
-      const [tierChoices, setTierChoices] = React.useState({});
       const [busy, setBusy] = React.useState(null);
       const [actionError, setActionError] = React.useState('');
       const [notice, setNotice] = React.useState('');
@@ -1841,6 +1719,108 @@ window.__ModuleLoader__.load({
         })();
       };
 
+      /* The tier every unchosen Session inherits. One profile-level preference, so it
+         writes the plugin row (unlike a Session's choice, which is runtime state). */
+      /*
+       * Read back the profile default from the relay. It is a config write, so the Loader
+       * re-applies this plugin's row and the POST's own response can be cut mid-rebind.
+       * The answer that matters is in `/targets`, read again with small gaps because the
+       * listener may still be coming back up.
+       */
+      const readDefaultTier = async (controller) => {
+        for (let attempt = 0; attempt < RECONCILE_DELAYS_MS.length; attempt += 1) {
+          await sleepUntil(RECONCILE_DELAYS_MS[attempt], controller === undefined ? null : controller.signal);
+          if (!mountedRef.current) return null;
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/targets', {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: { accept: 'application/json' },
+            });
+            if (!response.ok) continue;
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            const normalized = normalizeTargets(payload);
+            if (normalized !== null) return normalized;
+          } catch (error) {
+            /* Still rebinding: try the next gap. */
+          }
+        }
+        return null;
+      };
+
+      /*
+       * The profile-level default tier. Unlike the composer chip this one is a config
+       * write, so it is the only tier action that can reload the plugin; the re-read
+       * below decides between success and failure, exactly like the Models-page switch.
+       */
+      const runDefaultTier = (tier) => {
+        if (busy !== null || busyRef.current !== null) return;
+        const controller = new AbortController();
+        busyRef.current = 'tier-default';
+        actionControllerRef.current = controller;
+        setBusy({ kind: 'tier-default', key: 'tier-default' });
+        setActionError('');
+        setNotice('');
+        (async () => {
+          const wanted = tier === '' ? null : tier;
+          let failure = '';
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/tier/default', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: JSON.stringify({ tier: wanted }),
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            if (!response.ok) {
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+          } catch (error) {
+            if (error && error.name === 'AbortError') return;
+            failure = errorMessage(t, error);
+          }
+
+          const fresh = await readDefaultTier(controller);
+          if (!mountedRef.current) return;
+          if (fresh !== null) {
+            const landed = fresh.tier === null ? null : fresh.tier.default;
+            setTargets({ status: 'ready', data: fresh, error: '' });
+            if (landed === wanted) failure = '';
+          }
+          busyRef.current = null;
+          setBusy(null);
+          if (actionControllerRef.current === controller) actionControllerRef.current = null;
+          if (failure !== '') {
+            setActionError(t('providers.actionFailed', { message: failure }));
+            return;
+          }
+          setNotice(t('providers.noticeDefaultTier'));
+          setTargetsKey((key) => key + 1);
+          if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current);
+          noticeTimerRef.current = setTimeout(() => {
+            noticeTimerRef.current = null;
+            if (mountedRef.current) setNotice('');
+          }, NOTICE_MS);
+        })();
+      };
+
       /*
        * Ask the relay to fill effort levels onto every route this page owns.
        * It is a config write, so it shares the create/remove guards: one action
@@ -1949,15 +1929,7 @@ window.__ModuleLoader__.load({
       const mounts = snapshot !== null ? snapshot.mounts : [];
       const metrics = snapshot !== null ? snapshot.metrics : null;
       const totalTokens = metrics !== null ? metrics.promptTokens + metrics.completionTokens : 0;
-      const availableTiers = snapshot !== null ? tiersFromMounts(mounts) : TIER_FALLBACK.slice();
       const byTier = metrics !== null ? metrics.byTier : {};
-      const tierOptions = availableTiers.map((tier) => ({
-        value: tier,
-        label: t('providers.tierOption', {
-          tier: tier,
-          multiplier: multiplierLabel(t, tierMultiplierFor(tier, byTier)),
-        }),
-      }));
 
       const targetsData = targets.data;
       const createdNames = Object.create(null);
@@ -2254,79 +2226,6 @@ window.__ModuleLoader__.load({
         );
       };
 
-      const renderSources = () => {
-        const rows = [];
-        if (targetsData.sources.length === 0) {
-          rows.push(h('p', { key: 'empty', style: HINT_STYLE }, t('providers.emptySources')));
-        } else {
-          for (const source of targetsData.sources) {
-            const chosen = hasOwn(tierChoices, source.key) ? tierChoices[source.key] : '';
-            const tier = availableTiers.indexOf(chosen) >= 0 ? chosen : defaultTierFor(source, availableTiers);
-            const routeName = proposedRouteName(source.key, tier);
-            const exists = createdNames[routeName] === true;
-            const creating = busy !== null && busy.kind === 'create' && busy.key === source.key;
-            rows.push(
-              h(
-                'div',
-                { key: source.key, style: ROW_STYLE },
-                h(
-                  'div',
-                  { style: ROW_INFO_STYLE },
-                  h('span', { style: { font: FONTS.strong } }, source.displayName),
-                  h(
-                    'span',
-                    { style: HINT_STYLE },
-                    t('providers.sourceModels', {
-                      api: source.api !== '' ? source.api : t('common.unknown'),
-                      count: formatCount(source.modelCount),
-                    }),
-                  ),
-                  source.apiKeyEnv !== ''
-                    ? h('span', { style: HINT_STYLE }, t('providers.sourceKey', { env: source.apiKeyEnv }))
-                    : null,
-                  h('span', { style: HINT_STYLE }, t('providers.routeName', { name: routeName })),
-                  exists ? h('span', { style: HINT_STYLE }, t('providers.exists', { name: routeName })) : null,
-                ),
-                h(
-                  'div',
-                  { style: ROW_CONTROL_STYLE },
-                  h(TierSelect, {
-                    value: tier,
-                    options: tierOptions,
-                    disabled: busy !== null,
-                    ariaLabel: t('providers.tierAria', { name: source.displayName }),
-                    onChange: (nextTier) =>
-                      setTierChoices((previous) => {
-                        const updated = Object.assign({}, previous);
-                        updated[source.key] = nextTier;
-                        return updated;
-                      }),
-                  }),
-                  h(ActionButton, {
-                    label: creating ? t('providers.creating') : t('providers.create'),
-                    ariaLabel: t('providers.createAria', { name: routeName }),
-                    disabled: busy !== null || exists,
-                    onClick: () =>
-                      runRouteAction(
-                        'create',
-                        { source: source.key, tier: tier, name: routeName },
-                        'providers.noticeCreated',
-                        routeName,
-                      ),
-                  }),
-                ),
-              ),
-            );
-          }
-        }
-        return h(
-          'div',
-          { key: 'sources', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
-          h('div', { style: SUB_LABEL_STYLE }, t('providers.sourcesCaption')),
-          rows,
-        );
-      };
-
       const renderCreated = () => {
         const rows = [];
         const repairing = busy !== null && busy.kind === 'repair';
@@ -2400,10 +2299,47 @@ window.__ModuleLoader__.load({
                 reasoningHint !== '' ? h('p', { key: 'hint', style: HINT_STYLE }, reasoningHint) : null,
               )
             : null;
+        /* One profile-level preference, next to the routes it applies to: the tier an
+           unchosen Session inherits. Which tier a *particular* Session runs on is the
+           composer chip, so the two never compete for the same click. */
+        const tierTable = targetsData.tier;
+        const tierChoice =
+          tierTable !== null && tierTable.tiers.length > 0
+            ? h(
+                'div',
+                { key: 'tier-default', style: ROW_STYLE },
+                h(
+                  'div',
+                  { style: ROW_INFO_STYLE },
+                  h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultTierCaption')),
+                  h('span', { style: HINT_STYLE }, t('providers.defaultTierHint')),
+                ),
+                h(
+                  'div',
+                  { style: ROW_CONTROL_STYLE },
+                  h(TierSelect, {
+                    value: tierTable.default === null ? '' : tierTable.default,
+                    options: [{ value: '', label: t('strip.tierNone') }].concat(
+                      tierTable.tiers.map((tier) => ({
+                        value: tier,
+                        label: t('providers.tierOption', {
+                          tier: tier,
+                          multiplier: multiplierLabel(t, tierMultiplierFor(tier, null)),
+                        }),
+                      })),
+                    ),
+                    ariaLabel: t('providers.defaultTierAria'),
+                    disabled: busy !== null,
+                    onChange: runDefaultTier,
+                  }),
+                ),
+              )
+            : null;
         return h(
           'div',
           { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
           h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
+          tierChoice,
           rows,
           repair,
         );
@@ -2434,7 +2370,7 @@ window.__ModuleLoader__.load({
             ),
           ];
         }
-        return [renderSources(), renderCreated()];
+        return [renderCreated()];
       };
 
       const renderProviders = () =>
@@ -2611,6 +2547,32 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /** Hard stop for the chip: a thrown render must leave the composer intact. */
+    class ChipBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { failed: false };
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      componentDidCatch(error, info) {
+        try {
+          if (typeof console !== 'undefined' && typeof console.error === 'function') {
+            console.error('[dsh-openrouter-plus] composer tier chip render failed', error, info);
+          }
+        } catch (ignored) {
+          /* logging must never throw out of an error boundary */
+        }
+      }
+
+      render() {
+        return this.state.failed === true ? null : this.props.children;
+      }
+    }
+
     /** Hard stop for the strip: a thrown render must leave the provider card intact. */
     class StripBoundary extends React.Component {
       constructor(props) {
@@ -2650,8 +2612,6 @@ window.__ModuleLoader__.load({
       const isPiAi = provider !== null && stringValue(provider.settingsNs).trim() === PI_AI_NS;
 
       const [feedState, setFeedState] = React.useState(() => feed.snapshot());
-      const [chooserOpen, setChooserOpen] = React.useState(false);
-      const [tier, setTier] = React.useState('');
       const [pending, setPending] = React.useState(null);
       const [error, setError] = React.useState('');
 
@@ -2692,8 +2652,6 @@ window.__ModuleLoader__.load({
          from the row's id, never from object identity, and drop local state when the row
          changes underneath us. */
       React.useEffect(() => {
-        setChooserOpen(false);
-        setTier('');
         setPending(null);
         setError('');
       }, [route]);
@@ -2778,7 +2736,9 @@ window.__ModuleLoader__.load({
          still have changed the config, so the re-read decides between success and error. */
       const attach = async () => {
         if (pending !== null || upstream === '') return;
-        const body = { route: route, upstream: upstream, tier: tier };
+        /* No tier on the way in: the target is the bare mount and the tier is chosen per
+           Session, so attaching never pins one. */
+        const body = { route: route, upstream: upstream };
         setPending('attach');
         setError('');
         let failure = '';
@@ -2806,13 +2766,8 @@ window.__ModuleLoader__.load({
         }
         if (!aliveRef.current) return;
         if (backed) {
-          /* The row is routed now, so the local chooser starts over next time it opens:
-             a detach/attach cycle must not silently reuse the last tier. */
-          setChooserOpen(false);
-          setTier('');
           setError('');
         } else {
-          setChooserOpen(false);
           setError(t('providers.actionFailed', { message: failure !== '' ? failure : t('strip.stalled') }));
         }
         setPending(null);
@@ -2850,8 +2805,6 @@ window.__ModuleLoader__.load({
         if (attached) {
           setError(t('providers.actionFailed', { message: failure !== '' ? failure : t('strip.stalled') }));
         } else {
-          setChooserOpen(false);
-          setTier('');
           setError('');
         }
         setPending(null);
@@ -2859,34 +2812,9 @@ window.__ModuleLoader__.load({
 
       const errorLine = error === '' ? null : h('p', { role: 'alert', style: ALERT_STYLE }, error);
 
-      if (own !== null) {
-        return h(
-          'div',
-          {
-            role: 'group',
-            'aria-label': groupAria,
-            'aria-busy': pending === null ? undefined : 'true',
-            style: STRIP_STYLE,
-          },
-          h(
-            'span',
-            { role: 'status', 'aria-live': 'polite', style: STRIP_STATUS_STYLE },
-            h('span', null, t('strip.routed')),
-            h('span', { style: BADGE_STYLE }, own.tier === null ? t('mounts.passthrough') : own.tier),
-          ),
-          errorLine,
-          h(ActionButton, {
-            label: pending === 'detach' ? t('strip.detaching') : t('strip.detach'),
-            ariaLabel: t('strip.detachAria', { name: name }),
-            disabled: pending !== null,
-            onClick: () => {
-              void detach();
-            },
-          }),
-        );
-      }
-
-      if (routed !== null) {
+      /* A legacy leg (`<origin>/<tier>/v1`) predates targets: it still reaches the relay,
+         but there is no stored endpoint to restore the row to, so it is shown read-only. */
+      if (own === null && routed !== null) {
         return h(
           'div',
           { role: 'group', 'aria-label': groupAria, style: STRIP_STYLE },
@@ -2902,20 +2830,16 @@ window.__ModuleLoader__.load({
 
       /* No stored row and no default: there is nothing this extension can repoint, and an
          attach would need a route the config does not have yet. */
-      if (source === null || upstream === '') return null;
+      if (own === null && (source === null || upstream === '')) return null;
 
-      const options = ATTACH_TIERS.map((value) => ({
-        value: value,
-        label:
-          value === ''
-            ? t('strip.tierNone')
-            : t('providers.tierOption', {
-                tier: value,
-                multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
-              }),
-      }));
-
-      const ticked = chooserOpen || pending === 'attach';
+      /*
+       * One check, and no tier chooser here: ticking it points this provider row at the
+       * relay's bare per-endpoint mount, and the tier is then chosen per Session in the
+       * composer chip. That is what keeps this feature from minting a provider row per
+       * tier — the check exposes the tiers, the chip picks one, nothing else is created.
+       */
+      const ticked = own !== null;
+      const busyLabel = pending === 'attach' ? t('strip.applying') : pending === 'detach' ? t('strip.detaching') : '';
 
       return h(
         'div',
@@ -2933,67 +2857,21 @@ window.__ModuleLoader__.load({
             checked: ticked,
             disabled: pending !== null,
             style: { margin: 0 },
-            onChange: (event) => {
-              const next = event.target.checked === true;
-              setChooserOpen(next);
-              if (!next) setTier('');
+            onChange: () => {
               if (error !== '') setError('');
+              void (ticked ? detach() : attach());
             },
           }),
           h('span', null, t('strip.route')),
         ),
+        pending === null
+          ? null
+          : h('span', { role: 'status', 'aria-live': 'polite', style: STRIP_HINT_STYLE }, busyLabel),
+        h('p', { style: STRIP_HINT_STYLE }, ticked ? t('strip.routedHint') : t('strip.tierHint')),
         errorLine,
-        chooserOpen || pending === 'attach'
-          ? h(
-              'div',
-              { style: STRIP_CHOOSER_STYLE },
-              h(TierSelect, {
-                value: tier,
-                ariaLabel: t('strip.tierAria', { name: name }),
-                disabled: pending !== null,
-                options: options,
-                onChange: (value) => setTier(value),
-              }),
-              h(ActionButton, {
-                label: pending === 'attach' ? t('strip.applying') : t('strip.apply'),
-                disabled: pending !== null,
-                onClick: () => {
-                  void attach();
-                },
-              }),
-              h('p', { style: STRIP_HINT_STYLE }, t('strip.tierHint')),
-            )
-          : null,
       );
     }
 
-    /* -------------------------------------------------------------- composer chip */
-
-    /** Hard stop for the composer chip: a throw must leave the composer itself intact. */
-    class ChipBoundary extends React.Component {
-      constructor(props) {
-        super(props);
-        this.state = { failed: false };
-      }
-
-      static getDerivedStateFromError() {
-        return { failed: true };
-      }
-
-      componentDidCatch(error, info) {
-        try {
-          if (typeof console !== 'undefined' && typeof console.error === 'function') {
-            console.error('[dsh-openrouter-plus] composer tier chip render failed', error, info);
-          }
-        } catch (ignored) {
-          /* logging must never throw out of an error boundary */
-        }
-      }
-
-      render() {
-        return this.state.failed === true ? null : this.props.children;
-      }
-    }
 
     /** One tier row inside the chip's menu. */
     function ChipOption(props) {
@@ -3026,9 +2904,9 @@ window.__ModuleLoader__.load({
 
     /**
      * The composer's tier chip. It re-tiers the *Session*, not the provider row: the relay
-     * pins one tier per mount, so the only way to change it for one conversation is to
-     * move that conversation to the sibling route that pins the tier. The sibling is
-     * minted on demand by the relay (`/routes/twin`); this chip never writes provider
+     * writes `service_tier` into the request body on the way out, so switching is a runtime
+     * choice like `reasoningEffort` and never mints a provider route per tier. This chip
+     * talks to the Host's `/tier` API and nothing else; it writes no provider
      * configuration, never touches the settings draft, and renders nothing unless the
      * Session runs on a row mounted from one of our targets.
      *
@@ -3091,34 +2969,15 @@ window.__ModuleLoader__.load({
       const [pendingTier, setPendingTier] = React.useState(null);
       const [error, setError] = React.useState('');
       const [anchor, setAnchor] = React.useState(null);
+      /* What the Host reports for this Session: `{ tier, chosen, default }`. `chosen` is
+         empty until the Session picks a tier, and then it follows the configured default. */
+      const [tierState, setTierState] = React.useState(null);
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
       const aliveRef = React.useRef(true);
       const lifetimeRef = React.useRef(null);
       const actionRef = React.useRef(null);
-      /* The row a successful switch just moved to, until `/targets` reports it. Without
-         it the badge would blink out between the projection update and the next load. */
-      const movedRef = React.useRef(null);
-      /* `"<provider>|<effort>"` of the last effort repair, so a lost level is restored once
-         and a genuinely unsupported level is never retried in a loop. */
-      const repairedRef = React.useRef('');
-
-      /* A tier switch rewrites the whole selection, and the freshly minted sibling can sit
-         outside the client's model catalog for a beat; a Host write that normalises the
-         effort away would silently reset a level the user chose. Put it back exactly once. */
-      React.useEffect(() => {
-        const moved = movedRef.current;
-        if (moved === null || moved.reasoningEffort === '') return;
-        if (selection === null || selection.provider !== moved.key) return;
-        const carried = selection.reasoningEffort === undefined ? '' : selection.reasoningEffort;
-        if (carried === moved.reasoningEffort) return;
-        const stamp = moved.key + '|' + moved.reasoningEffort;
-        if (repairedRef.current === stamp) return;
-        repairedRef.current = stamp;
-        if (directory === null || typeof directory.select !== 'function') return;
-        void directory.select({ provider: moved.key, model: moved.model, reasoningEffort: moved.reasoningEffort });
-      }, [selection, directory]);
 
       React.useEffect(() => {
         aliveRef.current = true;
@@ -3147,7 +3006,7 @@ window.__ModuleLoader__.load({
         return feed.subscribe(() => setFeedState(feed.snapshot()));
       }, [feed]);
 
-      /* A different provider is a different tier family: drop the open menu, the pending
+      /* A different provider is a different route: drop the open menu, the pending
          effort and the failure, and re-measure on the next open. */
       React.useEffect(() => {
         setOpen(false);
@@ -3155,6 +3014,43 @@ window.__ModuleLoader__.load({
         setError('');
         setAnchor(null);
       }, [providerKey]);
+
+      /*
+       * Read this Session's tier from the Host. It is Session state, not config, so it is
+       * fetched rather than derived from the provider row; a Session that never chose one
+       * answers `chosen: null` and follows the configured default. Re-read when the relay
+       * address changes, since a rebind means the Host plugin may have restarted.
+       */
+      React.useEffect(() => {
+        const origin = feedState.origin;
+        if (origin === null || typeof sessionId !== 'string' || sessionId === '') {
+          setTierState(null);
+          return undefined;
+        }
+        const controller = new AbortController();
+        void (async () => {
+          try {
+            const response = await fetch(
+              origin + CONTROL_PREFIX + '/tier?session=' + encodeURIComponent(sessionId),
+              { method: 'GET', mode: 'cors', cache: 'no-store', headers: { accept: 'application/json' }, signal: controller.signal },
+            );
+            const payload = await readJsonSafe(response);
+            if (!response.ok) return;
+            const next = normalizeTierState(payload);
+            if (next !== null && aliveRef.current) setTierState(next);
+          } catch (error) {
+            /* A chip must never be the thing that breaks the composer: no answer simply
+               leaves the badge on its "no tier" fallback. */
+          }
+        })();
+        return () => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+        };
+      }, [feedState.origin, sessionId]);
 
       /* Anchor the popover above the trigger, in viewport coordinates: the composer bar
          clips vertical overflow, so an absolutely positioned menu would be cut off. */
@@ -3201,52 +3097,44 @@ window.__ModuleLoader__.load({
       const data = feedState.data;
       if (data === null || providerKey === '' || modelKey === '') return null;
 
-      const live = providerSourceOf(data, providerKey);
-      const moved =
-        movedRef.current !== null && movedRef.current.key === providerKey ? movedRef.current.source : null;
-      const source = live !== null ? live : moved;
+      const source = providerSourceOf(data, providerKey);
       if (source === null) return null;
 
-      const targetId = stringValue(source.targetId).trim();
       /* A plain upstream link (or a legacy `<origin>/<tier>/v1` leg) mounts nothing of
-         ours, so there is no tier family to move within. */
-      if (targetId === '') return null;
+         ours, so the relay would ignore a tier for it: no chip. */
+      if (stringValue(source.targetId).trim() === '') return null;
 
-      const currentTier = stringValue(source.attachedTier).trim();
       const name = stringValue(source.displayName).trim() || providerKey;
       const busy = pendingTier !== null;
-      const badge = busy ? t('tier.switching') : currentTier === '' ? t('strip.tierNone') : currentTier;
-      const tierText = currentTier === '' ? t('strip.tierNone') : currentTier;
+      /* `chosen` is what this Session picked, empty while it follows the default; `tier`
+         is what the next request will actually carry. */
+      const chosenTier = tierState === null ? '' : stringValue(tierState.chosen).trim();
+      const defaultTier = tierState === null ? '' : stringValue(tierState.default).trim();
+      const effectiveTier = tierState === null ? '' : stringValue(tierState.tier).trim();
+      const tierOptionLabel = (value) =>
+        value === '' || value === null
+          ? t('strip.tierNone')
+          : t('providers.tierOption', {
+              tier: value,
+              multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
+            });
+      const badge = busy ? t('tier.switching') : effectiveTier === '' ? t('strip.tierNone') : effectiveTier;
+      const tierText = effectiveTier === '' ? t('strip.tierNone') : effectiveTier;
       const options = ATTACH_TIERS.map((value) => ({
         value: value,
         label:
           value === ''
-            ? t('strip.tierNone')
-            : t('providers.tierOption', {
-                tier: value,
-                multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
-              }),
+            ? defaultTier === ''
+              ? t('tier.followDefaultNone')
+              : t('tier.followDefault', { tier: defaultTier })
+            : tierOptionLabel(value),
       }));
 
-      /* A twin write can cut its own response while the Loader re-applies the plugin.
-         Re-read the truth instead of believing the cut; the sibling lookup decides. */
-      const reconcile = async () => {
-        const signal = lifetimeRef.current === null ? null : lifetimeRef.current.signal;
-        for (let attempt = 0; attempt < RECONCILE_DELAYS_MS.length; attempt += 1) {
-          await sleepUntil(RECONCILE_DELAYS_MS[attempt], signal);
-          if (!aliveRef.current) return null;
-          const origin = await feed.probe(feedState.origin, attempt < RECONCILE_DELAYS_MS.length - 1);
-          if (!aliveRef.current) return null;
-          if (origin === null) continue;
-          const data = await feed.readTargets(origin);
-          if (!aliveRef.current) return null;
-          if (data !== null) return { origin: origin, data: data };
-        }
-        return null;
-      };
-
-      const postTwin = async (tier) => {
-        if (feedState.origin === null) throw new Error(t('offline.noReason'));
+      /* One POST, no provider write: the Host records the choice for this Session and the
+         relay applies it to the request body on the way out. */
+      const postTier = async (tier) => {
+        const origin = feedState.origin;
+        if (origin === null) throw new Error(t('offline.noReason'));
         const controller = new AbortController();
         actionRef.current = controller;
         const timer = setTimeout(() => {
@@ -3257,7 +3145,7 @@ window.__ModuleLoader__.load({
           }
         }, MUTATION_TIMEOUT_MS);
         try {
-          const response = await fetch(feedState.origin + CONTROL_PREFIX + '/routes/twin', {
+          const response = await fetch(origin + CONTROL_PREFIX + '/tier', {
             method: 'POST',
             mode: 'cors',
             cache: 'no-store',
@@ -3266,7 +3154,7 @@ window.__ModuleLoader__.load({
               'content-type': 'application/json',
               'x-oorp-client': CLIENT_HEADER,
             },
-            body: JSON.stringify({ route: providerKey, tier: tier }),
+            body: JSON.stringify({ session: sessionId, tier: tier === '' ? null : tier }),
             signal: controller.signal,
           });
           const payload = await readJsonSafe(response);
@@ -3275,47 +3163,18 @@ window.__ModuleLoader__.load({
               controlErrorMessage(payload, t('error.http', { status: String(response.status) })),
             );
           }
-          const twin = twinRouteOf(payload);
-          if (twin === null) throw new Error(t('strip.stalled'));
-          return twin;
+          const next = normalizeTierState(payload);
+          if (next === null) throw new Error(t('strip.stalled'));
+          return next;
         } finally {
           clearTimeout(timer);
           if (actionRef.current === controller) actionRef.current = null;
         }
       };
 
-      /* Move the Session's own selection to the sibling route, tolerating the catalog
-         race `/routes/twin` leaves behind (see `selectionRetryable`). */
-      const selectSibling = async (provider) => {
-        const directory = resolveDirectory === undefined ? null : resolveDirectory(sessionId);
-        if (directory === null || directory === undefined || typeof directory.select !== 'function') {
-          return { ok: false, message: t('tier.unavailable') };
-        }
-        const request = modelSelectionRequest(selection, provider);
-        const signal = lifetimeRef.current === null ? null : lifetimeRef.current.signal;
-        for (let attempt = 0; attempt <= SELECT_RETRY_DELAYS_MS.length; attempt += 1) {
-          let result;
-          try {
-            result = await directory.select(request);
-          } catch (exception) {
-            /* A client-side refusal (an addressed subagent Session, no binding) is not a
-               race and must surface immediately. */
-            return { ok: false, message: errorMessage(t, exception) };
-          }
-          if (isPlainObject(result) && result.ok === true) return { ok: true, message: '' };
-          const message = remoteFailureMessage(result);
-          if (!selectionRetryable(directory, provider, remoteFailureCode(result), attempt)) {
-            return { ok: false, message: message };
-          }
-          await sleepUntil(SELECT_RETRY_DELAYS_MS[attempt], signal);
-          if (!aliveRef.current) return { ok: false, message: message };
-        }
-        return { ok: false, message: '' };
-      };
-
       const switchTier = async (tier) => {
         if (pendingTier !== null) return;
-        if (tier === currentTier) {
+        if (tier === chosenTier) {
           setOpen(false);
           setError('');
           return;
@@ -3323,49 +3182,22 @@ window.__ModuleLoader__.load({
         setPendingTier(tier);
         setError('');
 
-        let twin = null;
+        let next = null;
         let failure = '';
         try {
-          twin = await postTwin(tier);
+          next = await postTier(tier);
         } catch (exception) {
-          const found = await reconcile();
-          if (found !== null) feed.publish(found.origin, found.data);
-          const sibling = found === null ? '' : twinSiblingOf(found.data, targetId, tier);
-          if (sibling !== '') {
-            twin = { name: sibling, tier: tier === '' ? null : tier, baseURL: '', created: false };
-          } else {
-            failure = unknownOutcomeMessage(t, exception);
-          }
-        }
-
-        if (twin !== null) {
-          const outcome = await selectSibling(twin.name);
-          if (outcome.ok === true) {
-            movedRef.current = {
-              key: twin.name,
-              model: selection.model,
-              reasoningEffort: selection.reasoningEffort === undefined ? '' : selection.reasoningEffort,
-              source: {
-                key: twin.name,
-                displayName: name,
-                baseURL: stringValue(twin.baseURL),
-                modelCount: 0,
-                attachedTier: tier === '' ? null : tier,
-                targetId: targetId,
-              },
-            };
-            void feed.load();
-            if (!aliveRef.current) return;
-            setPendingTier(null);
-            setOpen(false);
-            return;
-          }
-          failure = outcome.message;
+          failure = unknownOutcomeMessage(t, exception);
         }
 
         if (!aliveRef.current) return;
         setPendingTier(null);
-        setError(t('tier.error', { message: failure === '' ? t('offline.noReason') : failure }));
+        if (next === null) {
+          setError(t('tier.error', { message: failure === '' ? t('offline.noReason') : failure }));
+          return;
+        }
+        setTierState(next);
+        setOpen(false);
       };
 
       const openMenu = () => {
@@ -3442,7 +3274,7 @@ window.__ModuleLoader__.load({
                   key: option.value === '' ? 'none' : option.value,
                   value: option.value,
                   label: option.label,
-                  selected: option.value === currentTier,
+                  selected: option.value === chosenTier,
                   disabled: busy,
                   onClick: () => {
                     void switchTier(option.value);

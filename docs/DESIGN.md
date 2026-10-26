@@ -27,26 +27,34 @@ code, which is why the relay idea is viable at all — but by hand it is a YAML 
 misleads: a `baseURL` that merely *looks* different gives no feedback about which tier is actually in
 effect, or whether the relay behind it is alive.
 
-### C. This plugin: relay + managed route (chosen)
+### C. This plugin: relay + tier at request time (chosen)
 
-A loopback relay owns the tier semantics; the plugin creates the route that points at it; its own
-Settings page shows what is happening.
+A loopback relay owns the tier semantics and applies it per request. The provider row is the one the
+operator already had; only its `baseURL` moves, onto a mount that pins nothing.
 
 ```
-route.baseURL = http://127.0.0.1:8791/flex/v1
-   → relay strips /flex/v1, appends /chat/completions to `upstream`
-   → writes service_tier: "flex"
+route.baseURL = http://127.0.0.1:8791/t/<targetId>/v1
+   → relay strips the mount prefix, appends /chat/completions to the recorded `upstream`
+   → reads the Session from x-session-id / prompt_cache_key, looks up that Session's chosen tier
+   → writes service_tier: "flex" (or leaves the body untouched when the Session chose none)
    → forwards Authorization untouched
 ```
 
+A tier mount (`/flex/v1`) still exists for anyone who wants a permanently pinned `baseURL`; the
+per-Session control is the composer chip.
+
 What this buys over B:
 
-- **The tier is data, not a guess.** It lives in the mount table, is validated, and is visible in the
-  status API and the settings page.
+- **The tier is data, not a guess.** It lives in the tier table, is validated, is visible in the
+  status API and the settings page, and one row serves all of them — no per-tier provider copies to
+  drift apart.
+- **Two conversations, two tiers.** The choice is Session state, so a `flex` conversation and a
+  `priority` one share the same provider row and the same model list.
 - **Telemetry.** Every request is attributed to a tier with token counts, so "what did flex actually
   save me" has an answer.
-- **Reversibility.** Routes are created by the plugin, marked by their `baseURL`, and removable from
-  the same page. A route the plugin did not create is never edited or deleted.
+- **Reversibility.** A moved route is marked by its `baseURL` (it points at the relay), the endpoint
+  it came from is recorded in the plugin's own table, and **Detach** puts it back. A route the plugin
+  did not move is never edited or deleted.
 - **Survives upgrades.** Nothing outside the profile's own config is touched; `bun install -g` cannot
   break it.
 

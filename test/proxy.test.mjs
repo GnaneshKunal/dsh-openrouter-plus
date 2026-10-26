@@ -3,7 +3,7 @@ import http from 'node:http'
 import { after, test } from 'node:test'
 
 import { createMetrics } from '../lib/metrics.js'
-import { createRelay, findUsage } from '../lib/proxy.js'
+import { createRelay, findUsage, sessionKeyOf } from '../lib/proxy.js'
 
 /** @type {Array<() => Promise<void>>} */
 const cleanups = []
@@ -326,8 +326,8 @@ test('the no-tier target mount writes no service_tier key at all', async () => {
     res.end('{}')
   })
 
-  // Even a target that pins a tier must stay untouched behind the plain mount:
-  // the mount, not the config, decides whether a tier is written.
+  // A leftover `tier` in the target table must not write anything behind the plain
+  // mount: the path decides, and a bare path names no tier.
   const { address, metrics } = await startRelay(gateway.origin, { '/v1': null }, {
     resolveTarget: () => ({ upstream: `${gateway.origin}/api/v1`, tier: 'flex' }),
   })
@@ -478,7 +478,7 @@ test('the legacy tier mount is unchanged and never consults the resolver', async
   assert.equal(metrics.snapshot().byTier.unset.requests, 1)
 })
 
-test('the resolver pins the tier and the mount segment is the fallback', async () => {
+test('the mount segment decides the tier, and the target table never does', async () => {
   /** @type {Array<Record<string, unknown>>} */
   const bodies = []
   const gateway = await startServer(async (req, res) => {
@@ -500,13 +500,16 @@ test('the resolver pins the tier and the mount segment is the fallback', async (
     body: JSON.stringify({ model: 'm' }),
   })
 
-  // A stale provider route (its baseURL names an older tier) must not override
-  // the tier the target is pinned to today.
+  // A legacy row still on a pinned path keeps the tier that path names, even when the
+  // target table disagrees: the URL is what the row actually points at.
   assert.equal((await send('/t/pinned/priority/v1/chat')).status, 200)
   assert.equal((await send('/t/open/priority/v1/chat')).status, 200)
+  // The bare mount writes nothing, whatever the target table still carries.
+  assert.equal((await send('/t/pinned/v1/chat')).status, 200)
 
-  assert.equal(bodies[0].service_tier, 'flex', 'the pinned target wins over the mount segment')
-  assert.equal(bodies[1].service_tier, 'priority', 'a target with no pinned tier uses the mount')
+  assert.equal(bodies[0].service_tier, 'priority', 'the mount segment wins over the target table')
+  assert.equal(bodies[1].service_tier, 'priority', 'and it is the only thing a bare target has')
+  assert.equal('service_tier' in bodies[2], false, 'a bare mount writes no tier at all')
 })
 
 test('an unusable target upstream is a clear 400, and an async resolver works', async () => {
@@ -586,4 +589,53 @@ test('streams a target mount through byte for byte', async () => {
   assert.equal(records[0].model, 'streamed-target')
   assert.equal(records[0].promptTokens, 5)
   assert.equal(records[0].completionTokens, 2)
+})
+
+test('sessionKeyOf() reads a Session header first, then prompt_cache_key', () => {
+  assert.equal(sessionKeyOf({ 'x-session-id': 'abc' }, {}), 'abc')
+  assert.equal(sessionKeyOf({ 'x-session-affinity': 'aff' }, {}), 'aff', 'affinity is the next signal')
+  assert.equal(sessionKeyOf({}, { prompt_cache_key: 'pck-1' }), 'pck-1', 'pi-ai sends the session as a prompt cache key')
+  assert.equal(sessionKeyOf({ 'x-session-id': '  ' }, { prompt_cache_key: 'pck-2' }), 'pck-2', 'a blank header falls through')
+  assert.equal(sessionKeyOf({ 'x-session-id': 'head' }, { prompt_cache_key: 'pck-3' }), 'head', 'a header wins over the body')
+  assert.equal(sessionKeyOf({}, {}), '', 'no identity is an empty key, never an invented one')
+  assert.equal(sessionKeyOf(undefined, null), '')
+  assert.equal(sessionKeyOf({ 'x-session-id': 'x'.repeat(400) }, {}).length, 128, 'the key is clamped')
+})
+
+test('a bare target mount asks the resolver per Session and writes that tier', async () => {
+  /** @type {Array<{ body: Record<string, unknown>, url: string }>} */
+  const seen = []
+  const gateway = await startServer(async (req, res) => {
+    seen.push({ body: JSON.parse((await readRequestBody(req)).toString('utf8')), url: req.url ?? '' })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  /** @type {string[]} */
+  const asked = []
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: () => ({ upstream: gateway.origin }),
+    resolveSessionTier: (session) => {
+      asked.push(session)
+      if (session === 'cheap') return 'flex'
+      if (session === 'fast') return 'priority'
+      return null
+    },
+  })
+
+  const send = (headers, body = { model: 'm' }) => fetch(`${address.origin}/t/one/v1/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  })
+
+  assert.equal((await send({ 'x-session-id': 'cheap' })).status, 200)
+  assert.equal((await send({}, { model: 'm', prompt_cache_key: 'fast' })).status, 200)
+  assert.equal((await send({ 'x-session-id': 'none' })).status, 200)
+
+  assert.deepEqual(asked, ['cheap', 'fast', 'none'], 'one lookup per request, keyed by the Session')
+  assert.equal(seen[0].body.service_tier, 'flex')
+  assert.equal(seen[1].body.service_tier, 'priority', 'pi-ai`s prompt_cache_key is enough on its own')
+  assert.equal('service_tier' in seen[2].body, false, 'a Session with no choice writes nothing')
+  assert.equal(seen[0].body.model, 'm', 'every other body field survives the rewrite')
 })

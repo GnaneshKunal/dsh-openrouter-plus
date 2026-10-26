@@ -188,7 +188,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.7.0')
+  assert.equal(health.version, '0.8.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -202,12 +202,12 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   assert.equal(foreign.headers.get('access-control-allow-origin'), null)
 
   // A preflight is answered for the GUI, and a POST without the guard header is refused.
-  const preflight = await fetch(`${origin}/__openrouter-plus/routes/create`, {
+  const preflight = await fetch(`${origin}/__openrouter-plus/routes/attach`, {
     method: 'OPTIONS',
     headers: { origin: 'http://127.0.0.1:3080' },
   })
   assert.equal(preflight.status, 204)
-  const unguarded = await fetch(`${origin}/__openrouter-plus/routes/create`, {
+  const unguarded = await fetch(`${origin}/__openrouter-plus/routes/attach`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: '{}',
@@ -233,14 +233,39 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   assert.equal(guardedRepair.status, 500, 'without configEditor a repair fails loudly')
   assert.match((await guardedRepair.json()).error.message, /configuration editor is not available/i)
 
-  // a guarded create with no configEditor fails loudly instead of silently
-  const create = await fetch(`${origin}/__openrouter-plus/routes/create`, {
+  // a guarded attach validates the row before it touches config: no such row is a 400,
+  // and the read it needs an editor for is what a repair reports as a 500 (above)
+  const attach = await fetch(`${origin}/__openrouter-plus/routes/attach`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-oorp-client': 'web' },
-    body: JSON.stringify({ source: 'openrouter', tier: 'flex' }),
+    body: JSON.stringify({ route: 'openrouter', upstream: 'https://openrouter.ai/api/v1' }),
   })
-  assert.equal(create.status, 500)
-  assert.ok((await create.json()).error.message.length > 0)
+  assert.equal(attach.status, 400)
+  assert.match((await attach.json()).error.message, /no provider route named "openrouter"/)
+
+  // The tier table answers with no configEditor at all: it is Session state, not config.
+  const tier = await (await fetch(`${origin}/__openrouter-plus/tier?session=abc`)).json()
+  assert.equal(tier.ok, true)
+  assert.equal(tier.session, 'abc')
+  assert.equal(tier.chosen, null, 'a fresh Session has chosen nothing')
+  assert.equal(tier.tier, tier.default, 'and therefore runs on the configured default')
+  assert.deepEqual(tier.tiers, ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast'])
+
+  // A POST records the choice for that Session only, and a blank tier clears it.
+  const chosen = await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc', tier: 'priority' })
+  assert.equal(chosen.status, 200)
+  const chosenBody = await chosen.json()
+  assert.equal(chosenBody.chosen, 'priority')
+  assert.equal(chosenBody.tier, 'priority')
+  const other = await (await fetch(`${origin}/__openrouter-plus/tier?session=def`)).json()
+  assert.equal(other.chosen, null, 'another Session keeps its own choice')
+  const cleared = await (await postJson(`${origin}/__openrouter-plus/tier`, { session: 'abc' })).json()
+  assert.equal(cleared.chosen, null)
+  assert.equal(cleared.tier, cleared.default)
+  const badTier = await postJson(`${origin}/__openrouter-plus/tier`, { tier: 'turbo' })
+  assert.equal(badTier.status, 400, 'an unknown tier is refused')
+  const noSession = await postJson(`${origin}/__openrouter-plus/tier`, { tier: 'priority' })
+  assert.equal(noSession.status, 400, 'the Session is required')
 
   await dispose()
 
@@ -362,6 +387,8 @@ test('registers a target, attaches a provider, and detaches it again', async () 
   assert.equal(editor.writes.length, 1, 'a repeat registration writes nothing')
 
   // 2. Attach a provider row: its base URL becomes the mount, nothing else changes.
+  //    A tier in the body is ignored — the tier is a per-Session wire field now, so the
+  //    row goes to the bare mount and one row serves every tier.
   const attached = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
     route: 'acme',
     upstream: 'https://api.acme.dev/v1',
@@ -369,9 +396,10 @@ test('registers a target, attaches a provider, and detaches it again', async () 
   })
   assert.equal(attached.status, 200)
   const attachResult = await attached.json()
-  const mount = `${origin}/t/${registration.target.id}/flex/v1`
+  const mount = `${origin}/t/${registration.target.id}/v1`
   assert.equal(attachResult.baseURL, mount)
   assert.equal(attachResult.changed, true)
+  assert.equal(attachResult.target.tier, null, 'attaching pins no tier')
   const providers = editor.rows[1].entry.options.config.providers
   assert.equal(providers.acme.baseURL, mount)
   assert.equal(providers.acme.api, 'openai-completions', 'the protocol is untouched')
@@ -381,12 +409,12 @@ test('registers a target, attaches a provider, and detaches it again', async () 
   const snapshot = await (await fetch(`${origin}/__openrouter-plus/targets`)).json()
   assert.equal(snapshot.custom.length, 1)
   assert.equal(snapshot.custom[0].route, 'acme')
-  assert.equal(snapshot.custom[0].tier, 'flex')
+  assert.equal(snapshot.custom[0].tier, null)
   assert.equal(snapshot.custom[0].baseURL, mount)
 
-  // 3b. Switching the tier of an attached row is one write on the same target,
-  // and a caller that echoes the mount back as `upstream` is understood: the
-  // registry holds the real endpoint, so it wins.
+  // 3b. Re-attaching is idempotent and still pins no tier: a caller that echoes the mount
+  //     back as `upstream` is understood (the registry holds the real endpoint).
+  const writesBefore = editor.writes.length
   const retiered = await postJson(`${origin}/__openrouter-plus/routes/attach`, {
     route: 'acme',
     upstream: mount,
@@ -395,12 +423,10 @@ test('registers a target, attaches a provider, and detaches it again', async () 
   assert.equal(retiered.status, 200)
   const retieredBody = await retiered.json()
   assert.equal(retieredBody.target.id, registration.target.id, 'the same endpoint keeps the same target')
-  assert.equal(retieredBody.target.tier, 'fast')
-  assert.equal(
-    editor.rows[1].entry.options.config.providers.acme.baseURL,
-    `${origin}/t/${registration.target.id}/fast/v1`,
-    'the row moved to the new tier mount in place',
-  )
+  assert.equal(retieredBody.target.tier, null)
+  assert.equal(retieredBody.baseURL, mount)
+  assert.equal(retieredBody.changed, false, 'the row already sits on the bare mount')
+  assert.equal(editor.writes.length, writesBefore, 'a no-op attach writes nothing')
   assert.equal(editor.rows[1].entry.options.config.providers.acme.api, 'openai-completions')
 
   // 4. Detach without an id: the target is derived from the mount the row sits on.
@@ -501,25 +527,11 @@ test('a typo cannot leave a target behind, and a foreign target cannot be restor
   await dispose()
 })
 
-test('the composer tier chip gets an idempotent sibling provider for another tier', async () => {
+test('switching a Session tier writes no config; only the default is persisted', async () => {
   const port = await freePort()
   const editor = createFakeEditor([
     ownRow({ host: '127.0.0.1', port }),
-    piAiRow({
-      acme: {
-        displayName: 'Acme Gateway',
-        api: 'openai-completions',
-        apiKeyEnv: 'ACME_API_KEY',
-        baseURL: 'https://api.acme.dev/v1',
-        models: [{ id: 'acme-large', name: 'Acme Large', reasoningEfforts: { low: 'low', high: 'high' } }],
-      },
-      plain: {
-        displayName: 'Plain',
-        api: 'openai-completions',
-        baseURL: 'https://api.plain.dev/v1',
-        models: [{ id: 'plain-large', name: 'Plain Large' }],
-      },
-    }),
+    piAiRow({ acme: { baseURL: 'https://api.acme.dev/v1' } }),
   ])
   const { ctx, dispose } = createFakeContext({ configEditor: editor })
   apply(ctx, { port, portFallback: false })
@@ -532,299 +544,33 @@ test('the composer tier chip gets an idempotent sibling provider for another tie
     }
   })
 
-  const registration = await (await postJson(`${origin}/__openrouter-plus/targets/register`, {
-    upstream: 'https://api.acme.dev/v1',
-  })).json()
-  const targetId = registration.target.id
+  const set = (body) => postJson(`${origin}/__openrouter-plus/tier`, body)
 
-  // Route the row onto a flex mount first: only a per-endpoint mount has a family.
-  const attached = await (await postJson(`${origin}/__openrouter-plus/routes/attach`, {
-    route: 'acme',
-    upstream: 'https://api.acme.dev/v1',
-    tier: 'flex',
-  })).json()
-  assert.equal(attached.baseURL, `${origin}/t/${targetId}/flex/v1`)
-  const writesAfterAttach = editor.writes.length
+  // A Session's choice is runtime state: writing the plugin row here would reload the
+  // plugin and restart the listener on every switch, mid-conversation.
+  assert.equal((await set({ session: 'a', tier: 'flex' })).status, 200)
+  assert.equal((await set({ session: 'b', tier: 'priority' })).status, 200)
+  assert.equal((await set({ session: 'a' })).status, 200)
+  assert.equal(editor.writes.length, 0, 'a tier switch must not write the config')
 
-  // 1. A twin for another tier is cloned from the routed row, models included.
-  const twinned = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: 'priority' })
-  assert.equal(twinned.status, 200)
-  const twin = await twinned.json()
-  assert.equal(twin.ok, true)
-  assert.equal(twin.created, true)
-  assert.equal(twin.name, 'acme-priority')
-  assert.equal(twin.tier, 'priority')
-  assert.equal(twin.source, 'acme')
-  assert.equal(twin.baseURL, `${origin}/t/${targetId}/priority/v1`)
-  const clone = editor.rows[1].entry.options.config.providers['acme-priority']
-  assert.equal(clone.baseURL, `${origin}/t/${targetId}/priority/v1`)
-  assert.equal(clone.api, 'openai-completions')
-  assert.equal(clone.apiKeyEnv, 'ACME_API_KEY')
-  assert.equal(clone.models[0].id, 'acme-large')
-  assert.deepEqual(clone.models[0].reasoningEfforts, { low: 'low', high: 'high' })
-  assert.equal(editor.writes.length, writesAfterAttach + 1)
+  // The profile-level default is a preference, so it does write — once.
+  const chosen = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'scale' })
+  assert.equal(chosen.status, 200)
+  assert.equal((await chosen.json()).default, 'scale')
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].next.defaultTier, 'scale')
+  assert.equal(editor.writes[0].next.sessionTiers, undefined, 'the memory table is never persisted')
 
-  // 2. Asking again reuses that sibling: same key, no second write. The chip
-  //    always posts here, so this is the common path once a tier exists.
-  const again = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: 'priority' })
-  assert.equal(again.status, 200)
-  const reused = await again.json()
-  assert.equal(reused.created, false)
-  assert.equal(reused.name, 'acme-priority')
-  assert.equal(editor.writes.length, writesAfterAttach + 1, 'an existing sibling writes nothing')
+  const refused = await postJson(`${origin}/__openrouter-plus/tier/default`, { tier: 'turbo' })
+  assert.equal(refused.status, 400)
+  assert.equal(editor.writes.length, 1, 'a refused default writes nothing')
 
-  // 3. The pass-through sibling is its own row on the tierless mount.
-  const pass = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: '' })).json()
-  assert.equal(pass.created, true)
-  assert.equal(pass.tier, null)
-  assert.equal(pass.baseURL, `${origin}/t/${targetId}/v1`)
-
-  // 4. Refusals are 400s and write nothing: a row outside the relay has no
-  //    family, an unknown tier is not a tier, and a typo is not a route.
-  const writesBeforeRefusals = editor.writes.length
-  for (const [body, pattern] of [
-    [{ route: 'plain', tier: 'flex' }, /not routed|target/i],
-    [{ route: 'acme', tier: 'turbo' }, /tier/i],
-    [{ route: 'nope', tier: 'flex' }, /no provider route named/i],
-  ]) {
-    const response = await postJson(`${origin}/__openrouter-plus/routes/twin`, body)
-    assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(body)}`)
-    const payload = await response.json()
-    assert.match(payload.error.message, pattern)
-  }
-  assert.equal(editor.writes.length, writesBeforeRefusals, 'refusals write nothing')
-
-  await dispose()
-})
-
-test('a chained tier switch names the sibling after the family root', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port }), piAiRow(familyProviders(origin))])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  // root -> priority: the first sibling is named after the root, as it always was.
-  const priority = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root', tier: 'priority' })).json()
-  assert.equal(priority.created, true)
-  assert.equal(priority.name, 'root-priority')
-  assert.equal(priority.baseURL, `${origin}/t/tid1/priority/v1`)
-
-  // priority -> ultrafast: named from the root, not from the sibling it came from.
-  const ultrafast = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root-priority', tier: 'ultrafast' })).json()
-  assert.equal(ultrafast.created, true)
-  assert.equal(ultrafast.name, 'root-ultrafast', 'the key does not chain with the incoming sibling')
-  assert.equal(ultrafast.source, 'root-priority', 'the clone still comes from the incoming sibling')
-  assert.equal(ultrafast.baseURL, `${origin}/t/tid1/ultrafast/v1`)
-
-  const providers = editor.rows[1].entry.options.config.providers
-  const ultrafastRow = providers['root-ultrafast']
-  assert.ok(ultrafastRow, 'the sibling is stored under the root-derived key')
-  assert.equal(providers['root-priority-ultrafast'], undefined, 'no chained key is created')
-  assert.equal(ultrafastRow.apiKeyEnv, 'OPENROUTER_API_KEY', 'the clone keeps the source credentials')
-  assert.deepEqual(ultrafastRow.models.map((model) => model.id), ['deepseek/deepseek-v4-flash-0731'])
-  assert.equal(ultrafastRow.displayName, 'openrouter-test (ultrafast) — OpenRouter Plus')
-  assert.equal(countOf(ultrafastRow.displayName, DISPLAY_SUFFIX), 1, 'the suffix appears exactly once')
-  assert.equal(countOf(ultrafastRow.displayName, '('), 1, 'one tier parenthetical, never a stack')
-
-  // ultrafast -> fast: one more hop still lands on a root-named sibling.
-  const fast = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root-ultrafast', tier: 'fast' })).json()
-  assert.equal(fast.created, true)
-  assert.equal(fast.name, 'root-fast')
-  const afterFast = editor.rows[1].entry.options.config.providers
-  assert.equal(afterFast['root-ultrafast-fast'], undefined)
-  assert.equal(afterFast['root-fast'].displayName, 'openrouter-test (fast) — OpenRouter Plus')
-  assert.equal(countOf(afterFast['root-fast'].displayName, DISPLAY_SUFFIX), 1)
-
-  await dispose()
-})
-
-test('an existing sibling at the requested tier is reused even with a chained key', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const chained = {
-    displayName: 'openrouter-test (priority) — OpenRouter Plus (ultrafast) — OpenRouter Plus',
-    api: 'openai-completions',
-    baseURL: `${origin}/t/tid1/ultrafast/v1`,
-    models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
-  }
-  const editor = createFakeEditor([
-    ownRow({ host: '127.0.0.1', port }),
-    piAiRow(familyProviders(origin, { 'root-priority-ultrafast': chained })),
-  ])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  const writesBefore = editor.writes.length
-  const reused = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'root', tier: 'ultrafast' })).json()
-  assert.equal(reused.created, false)
-  assert.equal(reused.name, 'root-priority-ultrafast', 'the row that already holds the tier keeps its key')
-  assert.equal(reused.baseURL, `${origin}/t/tid1/ultrafast/v1`)
-  assert.equal(reused.source, 'root')
-  assert.equal(editor.writes.length, writesBefore, 'reusing a sibling writes nothing')
-  const providers = editor.rows[1].entry.options.config.providers
-  assert.equal(providers['root-ultrafast'], undefined, 'no second row is added for the same tier')
-  assert.equal(providers['root-priority-ultrafast'].displayName, chained.displayName, 'the reused row is untouched')
-
-  await dispose()
-})
-
-test('an explicitly requested route name wins unchanged', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const editor = createFakeEditor([
-    ownRow({ host: '127.0.0.1', port }),
-    piAiRow(familyProviders(origin, {
-      'root-priority': {
-        displayName: 'openrouter-test (priority) — OpenRouter Plus',
-        api: 'openai-completions',
-        baseURL: `${origin}/t/tid1/priority/v1`,
-        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
-      },
-    })),
-  ])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  const named = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, {
-    route: 'root-priority',
-    tier: 'scale',
-    name: 'custom-scale',
-  })).json()
-  assert.equal(named.created, true)
-  assert.equal(named.name, 'custom-scale', 'the caller-chosen key is not rewritten')
-  assert.equal(named.source, 'root-priority')
-  assert.equal(named.baseURL, `${origin}/t/tid1/scale/v1`)
-  const providers = editor.rows[1].entry.options.config.providers
-  assert.equal(providers['root-scale'], undefined, 'a requested name suppresses the derived one')
-  // The display name still comes from the family root, with one tier marker only.
-  assert.equal(providers['custom-scale'].displayName, 'openrouter-test (scale) — OpenRouter Plus')
-  assert.equal(countOf(providers['custom-scale'].displayName, DISPLAY_SUFFIX), 1)
-
-  await dispose()
-})
-
-test('a source key that is not on a target mount still fails with the existing error', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port }), piAiRow(familyProviders(origin))])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  const writesBefore = editor.writes.length
-  const response = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'plain', tier: 'fast' })
-  assert.equal(response.status, 400)
-  assert.match((await response.json()).error.message, /is not routed through a per-endpoint target yet/)
-  assert.equal(editor.writes.length, writesBefore, 'a refused twin writes nothing')
-
-  await dispose()
-})
-
-test('a root display that already carries the suffix gets one suffix, not two', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const editor = createFakeEditor([
-    ownRow({ host: '127.0.0.1', port }),
-    piAiRow(familyProviders(origin, {
-      suffixed: {
-        displayName: 'Suffixed — OpenRouter Plus',
-        api: 'openai-completions',
-        baseURL: `${origin}/t/tid2/flex/v1`,
-        models: [{ id: 'suffixed-large', name: 'Suffixed Large' }],
-      },
-    })),
-  ])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  const twinned = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'suffixed', tier: 'priority' })).json()
-  assert.equal(twinned.created, true)
-  assert.equal(twinned.name, 'suffixed-priority')
-  const providers = editor.rows[1].entry.options.config.providers
-  assert.equal(providers['suffixed-priority'].displayName, 'Suffixed (priority) — OpenRouter Plus')
-  assert.equal(countOf(providers['suffixed-priority'].displayName, DISPLAY_SUFFIX), 1)
-
-  await dispose()
-})
-
-test('a sibling chained by the old naming still resolves through to the root', async () => {
-  const port = await freePort()
-  const origin = `http://127.0.0.1:${port}`
-  const editor = createFakeEditor([
-    ownRow({ host: '127.0.0.1', port }),
-    piAiRow(familyProviders(origin, {
-      'root-priority': {
-        displayName: 'openrouter-test (priority) — OpenRouter Plus',
-        api: 'openai-completions',
-        baseURL: `${origin}/t/tid1/priority/v1`,
-        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
-      },
-      // The exact shape the pre-fix code produced: one tier suffix per switch.
-      'root-priority-ultrafast': {
-        displayName: 'openrouter-test (priority) — OpenRouter Plus (ultrafast) — OpenRouter Plus',
-        api: 'openai-completions',
-        baseURL: `${origin}/t/tid1/ultrafast/v1`,
-        models: [{ id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek: DeepSeek V4 Flash 0731' }],
-      },
-    })),
-  ])
-  const { ctx, dispose } = createFakeContext({ configEditor: editor })
-  apply(ctx, { port, portFallback: false })
-  await waitFor(async () => {
-    try {
-      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
-    } catch {
-      return false
-    }
-  })
-
-  // Two suffixes are peeled, not one: a legacy chain must not grow a third.
-  const switched = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, {
-    route: 'root-priority-ultrafast',
-    tier: 'fast',
-  })).json()
-  assert.equal(switched.created, true)
-  assert.equal(switched.name, 'root-fast')
-  assert.equal(switched.source, 'root-priority-ultrafast', 'the clone still comes from the incoming sibling')
-  const providers = editor.rows[1].entry.options.config.providers
-  assert.equal(providers['root-priority-ultrafast-fast'], undefined)
-  assert.equal(providers['root-fast'].displayName, 'openrouter-test (fast) — OpenRouter Plus')
-  assert.equal(countOf(providers['root-fast'].displayName, DISPLAY_SUFFIX), 1)
+  // Clearing the default is a legitimate write: no tier is the pass-through answer.
+  const cleared = await postJson(`${origin}/__openrouter-plus/tier/default`, {})
+  assert.equal(cleared.status, 200)
+  assert.equal((await cleared.json()).default, null)
+  assert.equal(editor.writes.length, 2)
+  assert.equal(editor.writes[1].next.defaultTier, null)
 
   await dispose()
 })
