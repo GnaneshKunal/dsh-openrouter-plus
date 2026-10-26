@@ -33,6 +33,10 @@ upstream. Because it only uses schema fields the profile already has, it survive
 - **One-click provider routes** — the page creates a real `llm-pi-ai` route (a clone of an existing
   one, with `baseURL` pointed at a tier mount) so it appears in the model picker like any other
   provider, and removes it again. Routes the plugin did not create are never touched.
+- **A tier chip in the composer** — next to the model selector, a compact chip shows the service
+  tier the current provider is running and switches it in one click. The switch is **per session**:
+  it moves this conversation onto the sibling provider that carries the requested tier, so another
+  session can sit on a different one. Tiers slide in beside the model name, not instead of it.
 - **A switch on every provider row** — in Settings → Models, each `llm-pi-ai` provider gets a
   **Route through OpenRouter Plus** checkbox and a service-tier picker. Tick it and that provider's
   traffic flows through the relay to the endpoint you already gave it; untick it and the endpoint
@@ -178,6 +182,22 @@ entirely, and use **Add reasoning to N models** in the settings page (or
 Either way it only ever touches routes whose `baseURL` points at the relay, never overwrites a
 declared map, never resurrects an explicit `false`, and writes nothing when there is nothing to do.
 
+### From the composer (the tier chip)
+
+Once a provider row is routed, a compact chip appears in the composer next to the model selector
+showing its tier. Picking another tier there does **not** rewrite any config: a tier is a property
+of the mount, so the chip switches *this session* to the sibling provider that already carries that
+mount (`<route>-<tier>`, or `<route>-pass` for pass-through), and the first time you use a tier it
+creates that sibling once.
+
+That is why it is per session: two conversations can be on `flex` and `priority` at the same time,
+and neither of them re-writes the other's provider row. The selected provider's name is visible in
+the model label, so the tier is always readable without opening the chip.
+
+The chip only appears when the session's current provider is routed through a per-endpoint mount
+(`/t/<targetId>/…`). Elsewhere the Models-page switch is the control: it is the one that moves the
+provider itself, which is the right choice when you want the endpoint to *stay* on one tier.
+
 ## Control API
 
 Served on the same loopback listener, outside the proxy path space:
@@ -190,6 +210,7 @@ Served on the same loopback listener, outside the proxy path space:
 | `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
 | `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
+| `POST /__openrouter-plus/routes/twin` | `{ route, tier?, name? }` — the sibling provider that carries another tier of the same endpoint (`created: false` when it already exists) |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier? }` — record the endpoint and point that provider at the relay |
 | `POST /__openrouter-plus/routes/detach` | `{ route, id }` — put that provider back on its own endpoint |
 | `POST /__openrouter-plus/targets/register` | `{ upstream, tier?, id? }` — record an endpoint without touching a provider |

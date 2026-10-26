@@ -43,7 +43,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
-| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes }` |
+| `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, repointRoute, restoreRoute, twinRoute, listRoutes }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus" and the `settings.models.provider-card` row extension. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
@@ -61,6 +61,7 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
 | `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], reasoning: { fill, levels } }` |
 | `POST /__openrouter-plus/routes/create` | `{ source, tier, name?, displayName? }` | `{ ok: true, name, baseURL, source, tier, reasoning: { filled, unresolved } }` |
+| `POST /__openrouter-plus/routes/twin` | `{ route, tier?, name? }` | `{ ok: true, name, baseURL, tier, source, created, reasoning: { filled, unresolved } }` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream, tier?, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
@@ -257,6 +258,8 @@ export function createConfigBridge(options)
 // repairRoutes(): Promise<{ patched, unresolved, owned, changed }>
 // repointRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRepoint
 // restoreRoute({ route, baseURL }): Promise<{ name, from, to, changed }>   // planRestore
+// twinRoute({ route, tier?, name? }): Promise<{                      // planTwin
+//   name, baseURL, tier, source, created, reasoning: { filled, unresolved } }>
 // listRoutes(): Promise<Array<{ name, source, tier, baseURL, modelCount }>>
 ```
 
@@ -332,3 +335,17 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   so a plugin write while the card is open would make the card's next save fail with
   `settings/conflict`. Re-render hands it a fresh `provider` object each snapshot, so the strip syncs
   from props rather than caching identity.
+- **The composer chip.** A third seat, `conversation.input.right` (a free `list` slot — "compact
+  controls before the composer submit action", `replaceRisk: none`), registered as
+  `{ name: 'conversation.input.right', id: 'openrouter-plus-tier', order: 0 }`. It exists because
+  `ModelSelection` is `{ provider, model, reasoningEffort? }` and carries no tier, so a per-session
+  tier cannot ride the request the way effort does. Instead a tier **is** a mount, so the chip
+  switches the session's provider: `ctx.modelDirectories.directoryFor(sessionId).select({ provider:
+  '<route>-<tier>', model, reasoningEffort })`. Provisioning a sibling is one idempotent
+  `POST /routes/twin` (`created: false` and no write when it already exists), which is why a tier
+  known to the family costs zero config writes. It renders nothing unless the session's current
+  provider sits on a `/t/<targetId>/…` mount, never touches `settings.mutate`, and retries the
+  selection while the freshly created provider key is still missing from the client catalog.
+- Do not replace `conversation.input.model`: it is a `single` seat owned by
+  `ui-model-selection` (`replaceRisk: shadows-shipped-ui`), and occupying it means reimplementing the
+  two-level provider/model menu, effort levels, search and `/model` parity.

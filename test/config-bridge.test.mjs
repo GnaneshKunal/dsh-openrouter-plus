@@ -1353,3 +1353,182 @@ test('describeSources() reports the stored base URL verbatim, mounts included', 
   assert.equal(Object.hasOwn(legacy, 'targetId'), false)
   assert.equal(Object.hasOwn(upstream, 'targetId'), false)
 })
+
+// ---------------------------------------------------------------------------
+// twinRoute(): the idempotent per-tier sibling provider
+// ---------------------------------------------------------------------------
+
+/** A target-mounted source row: the pass-through mount of one relay target. */
+function twinWorld(providers = {}) {
+  return createFakeEditor({
+    config: {
+      providers: {
+        acme: acmeRoute({ baseURL: TARGET_A }),
+        'openrouter-custom': sourceRoute(),
+        ...providers,
+      },
+    },
+  })
+}
+
+test('twinRoute() creates the sibling of a target-mounted route for one tier', async () => {
+  const world = twinWorld()
+  const { bridge } = bridgeFor(world.editor)
+
+  const twin = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
+
+  assert.deepEqual(twin, {
+    name: 'acme-flex',
+    baseURL: TARGET_A_FLEX,
+    tier: 'flex',
+    source: 'acme',
+    created: true,
+    // Evidence-only filling: the fixture declares no reasoningEfforts anywhere.
+    reasoning: { filled: [], unresolved: ['acme-gw-large'] },
+  })
+  assert.equal(world.edits.length, 1)
+
+  const created = world.edits[0].next.providers['acme-flex']
+  assert.equal(created.baseURL, TARGET_A_FLEX)
+  assert.equal(created.displayName, 'acme gateway (flex) — OpenRouter Plus')
+  // Cloned verbatim, like every other relay route this module writes.
+  assert.equal(created.api, 'openai-responses')
+  assert.equal(created.apiKeyEnv, 'ACME_API_KEY')
+  const sourceModels = world.state.config.providers.acme.models
+  assert.deepEqual(created.models, sourceModels)
+  assert.notEqual(created.models, sourceModels, 'models is a deep copy, not a shared reference')
+  assert.notEqual(created.models[0], sourceModels[0])
+  // The source and the unrelated route are untouched.
+  assert.deepEqual(world.edits[0].next.providers.acme, acmeRoute({ baseURL: TARGET_A }))
+  assert.deepEqual(world.edits[0].next.providers['openrouter-custom'], sourceRoute())
+})
+
+test('twinRoute() is idempotent: the second identical call writes nothing', async () => {
+  const world = twinWorld()
+  const { bridge } = bridgeFor(world.editor)
+
+  const first = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.equal(first.created, true)
+  assert.equal(world.edits.length, 1)
+
+  const second = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  // Reuse computes nothing, so it reports an empty fill against the same row.
+  assert.deepEqual(second, { ...first, created: false, reasoning: { filled: [], unresolved: [] } })
+  assert.equal(world.edits.length, 1, 'the second POST must not call editor.edit at all')
+
+  // A sibling that already exists under a non-default key is reused by mount,
+  // not duplicated: the tier family is the target id, not the route name.
+  const custom = createFakeEditor({
+    config: {
+      providers: {
+        acme: acmeRoute({ baseURL: TARGET_A }),
+        'renamed-flex': acmeRoute({ baseURL: TARGET_A_FLEX }),
+      },
+    },
+  })
+  const reused = await bridgeFor(custom.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.deepEqual(reused, {
+    name: 'renamed-flex',
+    baseURL: TARGET_A_FLEX,
+    tier: 'flex',
+    source: 'acme',
+    created: false,
+    reasoning: { filled: [], unresolved: [] },
+  })
+  assert.equal(custom.edits.length, 0)
+})
+
+test('twinRoute() supports the tierless mount as one tier of the family', async () => {
+  const world = twinWorld({ acme: acmeRoute({ baseURL: TARGET_A_FLEX }) })
+  const { bridge } = bridgeFor(world.editor)
+
+  const twin = await bridge.twinRoute({ route: 'acme', tier: '' })
+  assert.deepEqual(twin, {
+    name: 'acme-pass',
+    baseURL: TARGET_A,
+    tier: null,
+    source: 'acme',
+    created: true,
+    reasoning: { filled: [], unresolved: ['acme-gw-large'] },
+  })
+  assert.equal(world.edits[0].next.providers['acme-pass'].baseURL, TARGET_A)
+  assert.equal(world.edits[0].next.providers['acme-pass'].displayName, 'acme gateway (pass-through) — OpenRouter Plus')
+
+  // Asking again for the tierless row finds it (undefined behaves like '').
+  const again = await bridgeFor(world.editor).bridge.twinRoute({ route: 'acme' })
+  assert.equal(again.name, 'acme-pass')
+  assert.equal(again.created, false)
+  assert.equal(world.edits.length, 1)
+})
+
+test('twinRoute() is family-scoped: another target or another tier is not reused', async () => {
+  const otherTarget = twinWorld({ 'other-flex': acmeRoute({ baseURL: TARGET_B_FLEX }) })
+  const { bridge } = bridgeFor(otherTarget.editor)
+  const twin = await bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.equal(twin.name, 'acme-flex', 'a sibling of a different target is not this family')
+  assert.equal(twin.created, true)
+  assert.equal(otherTarget.edits[0].next.providers['acme-flex'].baseURL, TARGET_A_FLEX)
+
+  const otherTier = twinWorld({ 'acme-priority': acmeRoute({ baseURL: TARGET_A_PRIORITY }) })
+  const tiered = await bridgeFor(otherTier.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.equal(tiered.name, 'acme-flex', 'a sibling of the same target at another tier is not reused')
+  assert.equal(tiered.created, true)
+
+  // The tier the source row pins itself is its own twin, so nothing is created.
+  const sourceAtFlex = twinWorld({ acme: acmeRoute({ baseURL: TARGET_A_FLEX }) })
+  const itself = await bridgeFor(sourceAtFlex.editor).bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.deepEqual(itself, {
+    name: 'acme',
+    baseURL: TARGET_A_FLEX,
+    tier: 'flex',
+    source: 'acme',
+    created: false,
+    reasoning: { filled: [], unresolved: [] },
+  })
+  assert.equal(sourceAtFlex.edits.length, 0)
+})
+
+test('twinRoute() refuses a route with no tier family, an unknown tier or a taken name', async () => {
+  const notAFamily = twinWorld({ legacy: acmeRoute({ baseURL: `${RELAY}/flex/v1` }), plain: acmeRoute() })
+  const { bridge } = bridgeFor(notAFamily.editor)
+  const noFamily = /is not routed through a per-endpoint target yet, so it has no tier family; route it from Settings → Models first\./
+  await assert.rejects(() => bridge.twinRoute({ route: 'legacy', tier: 'flex' }), noFamily)
+  await assert.rejects(() => bridge.twinRoute({ route: 'plain', tier: 'flex' }), noFamily)
+  await assert.rejects(() => bridge.twinRoute({ route: 'openrouter-custom', tier: 'flex' }), noFamily)
+  assert.equal(notAFamily.edits.length, 0, 'a refusal never writes')
+
+  const world = twinWorld({ 'acme-priority': acmeRoute({ baseURL: TARGET_A_PRIORITY }) })
+  const familyBridge = bridgeFor(world.editor).bridge
+  await assert.rejects(
+    () => familyBridge.twinRoute({ route: 'acme', tier: 'turbo' }),
+    /Service tier "turbo" is not enabled\. Choose one of: flex, priority\./,
+  )
+  await assert.rejects(
+    () => familyBridge.twinRoute({ route: 'acme', tier: 'flex', name: 'acme-priority' }),
+    /A provider route named "acme-priority" already exists\./,
+  )
+  await assert.rejects(
+    () => familyBridge.twinRoute({ route: 'ghost', tier: 'flex' }),
+    /No provider route named "ghost" is configured, so there is no tier family to clone\./,
+  )
+  await assert.rejects(
+    () => familyBridge.twinRoute({ tier: 'flex' }),
+    /Choose the provider route to derive a tier sibling from\./,
+  )
+  assert.equal(world.edits.length, 0, 'no refusal may reach the editor')
+})
+
+test('twinRoute() honours an explicit name and fills reasoning like createRoute()', async () => {
+  const world = twinWorld()
+  const filled = await bridgeFor(world.editor, { reasoningEfforts: EFFORTS }).bridge.twinRoute({ route: 'acme', tier: 'flex', name: 'acme-fast' })
+  assert.equal(filled.name, 'acme-fast')
+  assert.deepEqual(filled.reasoning, { filled: [{ id: 'acme-gw-large', from: 'default' }], unresolved: [] })
+  assert.equal(world.edits[0].next.providers['acme-fast'].baseURL, TARGET_A_FLEX)
+  assert.deepEqual(world.edits[0].next.providers['acme-fast'].models[0].reasoningEfforts, EFFORTS)
+
+  // reasoningEfforts: false is an opt-out, and the result names what stays bare.
+  const optedOut = twinWorld()
+  const bare = await bridgeFor(optedOut.editor, { reasoningEfforts: false }).bridge.twinRoute({ route: 'acme', tier: 'flex' })
+  assert.deepEqual(bare.reasoning, { filled: [], unresolved: ['acme-gw-large'] })
+  assert.equal(optedOut.edits[0].next.providers['acme-flex'].models[0].reasoningEfforts, undefined)
+})

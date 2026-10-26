@@ -10,6 +10,12 @@
  * one compact strip per provider row that routes that row through the relay (attach or
  * detach) without touching the settings card's own draft.
  *
+ * Finally it answers `conversation.input.right`: a compact tier chip beside the
+ * composer's model selector. A tier is pinned per mount, so changing it for one Session
+ * means moving that Session to the sibling provider route that pins it. The sibling is
+ * minted by the control API (`/routes/twin`) and the Session's own model selection is
+ * switched to it afterwards; the chip never writes provider configuration itself.
+ *
  * Contract: docs/ARCHITECTURE.md ("client.js"). Plain browser JavaScript: no JSX, no
  * build step, no imports beyond the host React module table.
  */
@@ -58,6 +64,15 @@ window.__ModuleLoader__.load({
      */
     const RECONCILE_DELAYS_MS = Object.freeze([350, 450, 550]);
     const MUTATION_TIMEOUT_MS = 6000;
+
+    /**
+     * Gaps before re-sending a Session model selection to a freshly minted tier sibling.
+     * `/routes/twin` returns before the composer's model catalog — and the Host's llm
+     * registry behind `selectModel` — has picked up the new provider route; a key either
+     * of them has not seen yet is a race, not a verdict. Three gaps keep the chip from
+     * stranding a click on a slow reload without pinning it open indefinitely.
+     */
+    const SELECT_RETRY_DELAYS_MS = Object.freeze([250, 500, 900]);
 
     /** Accepted tiers when the relay has not reported a mount list yet. */
     const TIER_FALLBACK = Object.freeze(['flex', 'scale', 'auto', 'priority', 'fast', 'ultrafast']);
@@ -200,6 +215,12 @@ window.__ModuleLoader__.load({
       'strip.tierHint': 'Tiers only apply to endpoints that accept an OpenAI-style service_tier (OpenRouter itself, and some compatible gateways).',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
 
+      'tier.aria': 'Service tier for {name}: {tier}',
+      'tier.switching': 'Switching tier\u2026',
+      'tier.error': 'Could not switch the tier: {message}',
+      'tier.hint': 'Moves this session to the sibling route that pins the tier. Other sessions keep their own.',
+      'tier.unavailable': 'This session has no model directory yet, so its route cannot be switched here.',
+
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
       'recent.column.tier': 'Tier',
@@ -326,6 +347,12 @@ window.__ModuleLoader__.load({
       'strip.detachAria': '将 {name} 从 OpenRouter Plus 解除',
       'strip.tierHint': '服务等级只对接受 OpenAI service_tier 的端点生效（如 OpenRouter 本身及部分兼容网关）。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
+
+      'tier.aria': '{name} 的服务等级：{tier}',
+      'tier.switching': '正在切换等级\u2026',
+      'tier.error': '无法切换服务等级：{message}',
+      'tier.hint': '仅把当前会话切换到固定该等级的兄弟路由；其他会话不受影响。',
+      'tier.unavailable': '该会话还没有可用的模型目录，无法在这里切换路由。',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -488,6 +515,16 @@ window.__ModuleLoader__.load({
       return t('offline.noReason');
     }
 
+    /**
+     * User text for a write whose outcome is unknown. A cut response is not a timeout: the
+     * relay may well have applied the write, so the message says so and leaves the next
+     * probe to decide — the same posture as the provider-row strip.
+     */
+    function unknownOutcomeMessage(t, error) {
+      if (error && error.name === 'AbortError') return t('strip.stalled');
+      return errorMessage(t, error);
+    }
+
     function payloadErrorMessage(payload) {
       if (isPlainObject(payload) && isPlainObject(payload.error)) {
         const message = stringValue(payload.error.message).trim();
@@ -580,6 +617,103 @@ window.__ModuleLoader__.load({
         }
       }
       return null;
+    }
+
+    /**
+     * The provider route that already pins `tier` for the same relay target, or ''. A
+     * twin write is idempotent, so a cut response is read back through `/targets`
+     * instead of guessed: the sibling is either there or the click failed.
+     */
+    function twinSiblingOf(data, targetId, tier) {
+      if (!isPlainObject(data) || !Array.isArray(data.sources) || targetId === '') return '';
+      const wanted = tier === '' ? null : tier;
+      for (const entry of data.sources) {
+        if (!isPlainObject(entry)) continue;
+        if (stringValue(entry.targetId).trim() !== targetId) continue;
+        const attached = stringValue(entry.attachedTier).trim();
+        if ((attached === '' ? null : attached) !== wanted) continue;
+        const key = stringValue(entry.key).trim();
+        if (key !== '') return key;
+      }
+      return '';
+    }
+
+    /** `/routes/twin` success body, or null when the relay answered something else. */
+    function twinRouteOf(payload) {
+      if (!isPlainObject(payload) || payload.ok === false) return null;
+      const name = stringValue(payload.name).trim();
+      if (name === '') return null;
+      const tier = stringValue(payload.tier).trim();
+      return {
+        name: name,
+        tier: tier === '' ? null : tier,
+        source: stringValue(payload.source).trim(),
+        baseURL: stringValue(payload.baseURL).trim(),
+        created: payload.created === true,
+      };
+    }
+
+    /** A control-route failure message, from either envelope this plugin has shipped. */
+    function controlErrorMessage(payload, fallback) {
+      const nested = payloadErrorMessage(payload);
+      if (nested !== '') return nested;
+      if (isPlainObject(payload)) {
+        const flat = stringValue(payload.error).trim();
+        if (flat !== '') return flat;
+      }
+      return fallback;
+    }
+
+    /**
+     * The model-selection request the chip submits: same model, sibling provider, and the
+     * Session's effort only when it has one. An absent effort must stay absent — sending
+     * `reasoningEffort: undefined` would ask the Host to clear a level the user chose.
+     */
+    function modelSelectionRequest(selection, provider) {
+      const model = isPlainObject(selection) ? stringValue(selection.model).trim() : '';
+      const effort = isPlainObject(selection) ? stringValue(selection.reasoningEffort).trim() : '';
+      return effort === ''
+        ? { provider: provider, model: model }
+        : { provider: provider, model: model, reasoningEffort: effort };
+    }
+
+    /** Failure text a `RemoteResult` carries, or '' when it reports none. */
+    function remoteFailureMessage(result) {
+      if (!isPlainObject(result) || !isPlainObject(result.error)) return '';
+      const message = stringValue(result.error.message).trim();
+      if (message !== '') return message;
+      return stringValue(result.error.code).trim();
+    }
+
+    /** Failure code a `RemoteResult` carries, or '' when it reports none. */
+    function remoteFailureCode(result) {
+      if (!isPlainObject(result) || !isPlainObject(result.error)) return '';
+      return stringValue(result.error.code).trim();
+    }
+
+    /** Whether the shared model catalog has heard of `provider` yet. */
+    function catalogHasProvider(directory, provider) {
+      if (directory === null || directory === undefined) return false;
+      const store = directory.store;
+      if (store === null || store === undefined || typeof store.getSnapshot !== 'function') return false;
+      const snapshot = store.getSnapshot();
+      const groups = isPlainObject(snapshot) && Array.isArray(snapshot.groups) ? snapshot.groups : [];
+      for (const group of groups) {
+        if (isPlainObject(group) && stringValue(group.id).trim() === provider) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Whether a failed selection is worth retrying. Two faces of the same race: the
+     * provider key is not in the catalog the composer renders from, or the Host's llm
+     * registry has not resolved it yet and answers `session/model-unavailable`. Anything
+     * else — a client-side refusal, a writer hold, a permission error — is a verdict.
+     */
+    function selectionRetryable(directory, provider, code, attempt) {
+      if (attempt >= SELECT_RETRY_DELAYS_MS.length) return false;
+      if (!catalogHasProvider(directory, provider)) return true;
+      return code === 'session/model-unavailable';
     }
 
     /* ------------------------------------------------------------------ normalizers */
@@ -734,6 +868,10 @@ window.__ModuleLoader__.load({
             baseURL: stringValue(entry.baseURL).trim(),
             modelCount: countNumber(entry.modelCount),
             attachedTier: attachedTier === '' ? null : attachedTier,
+            /* The per-endpoint target this row mounts, when the relay mounted one. It is
+               the family key shared by every tier sibling, and the composer chip refuses
+               to retier a row without it (a plain upstream link has no tier family). */
+            targetId: stringValue(entry.targetId).trim(),
           });
         }
       }
@@ -1144,6 +1282,88 @@ window.__ModuleLoader__.load({
     };
 
     const STRIP_HINT_STYLE = { margin: 0, flexBasis: '100%', color: COLORS.secondary, font: FONTS.tiny };
+
+    /* Composer chip: 24px tall to sit on the composer's 28px control row without
+       pushing it, and it never grows past the space the row has for it. */
+    function chipStyle(state) {
+      const disabled = state.disabled === true;
+      return {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '4px',
+        minWidth: 0,
+        maxWidth: 'min(190px, 40vw)',
+        height: '24px',
+        margin: 0,
+        padding: '0 6px',
+        boxSizing: 'border-box',
+        border: '1px solid ' + COLORS.border,
+        borderRadius: 'var(--dsw-radius-sm, 6px)',
+        background:
+          state.open || state.hovered
+            ? 'var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06))'
+            : 'transparent',
+        color: COLORS.secondary,
+        font: FONTS.tiny,
+        lineHeight: '18px',
+        whiteSpace: 'nowrap',
+        cursor: disabled ? 'progress' : 'pointer',
+        opacity: disabled ? 0.7 : 1,
+        outline: state.focused ? '2px solid ' + COLORS.brand : 'none',
+        outlineOffset: '2px',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+      };
+    }
+
+    const CHIP_TEXT_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    };
+
+    const CHIP_CARET_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
+
+    const CHIP_HINT_STYLE = {
+      margin: '2px 4px 0',
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+      whiteSpace: 'normal',
+    };
+
+    function chipOptionStyle(state) {
+      const disabled = state.disabled === true;
+      const selected = state.selected === true;
+      return {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px',
+        margin: 0,
+        padding: '3px 8px',
+        minHeight: '24px',
+        boxSizing: 'border-box',
+        border: '1px solid transparent',
+        borderRadius: 'var(--dsw-radius-sm, 6px)',
+        background:
+          state.hovered && !disabled
+            ? 'var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06))'
+            : selected
+              ? COLORS.fill
+              : 'transparent',
+        color: COLORS.primary,
+        font: selected ? FONTS.smallStrong : FONTS.small,
+        lineHeight: '18px',
+        textAlign: 'left',
+        whiteSpace: 'nowrap',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
+        outline: 'none',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+      };
+    }
 
     function dotStyle(connection) {
       const color =
@@ -2361,6 +2581,10 @@ window.__ModuleLoader__.load({
         snapshot() {
           return state;
         },
+        /** Force a fresh probe + `/targets` read; used after a write lands. */
+        load() {
+          return load();
+        },
         publish(origin, data) {
           broadcast({ status: 'ready', origin: origin, data: data });
         },
@@ -2725,6 +2949,438 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* -------------------------------------------------------------- composer chip */
+
+    /** Hard stop for the composer chip: a throw must leave the composer itself intact. */
+    class ChipBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { failed: false };
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      componentDidCatch(error, info) {
+        try {
+          if (typeof console !== 'undefined' && typeof console.error === 'function') {
+            console.error('[dsh-openrouter-plus] composer tier chip render failed', error, info);
+          }
+        } catch (ignored) {
+          /* logging must never throw out of an error boundary */
+        }
+      }
+
+      render() {
+        return this.state.failed === true ? null : this.props.children;
+      }
+    }
+
+    /** One tier row inside the chip's menu. */
+    function ChipOption(props) {
+      const [hovered, setHovered] = React.useState(false);
+      const selected = props.selected === true;
+      const disabled = props.disabled === true;
+      return h(
+        'button',
+        {
+          type: 'button',
+          role: 'option',
+          'aria-selected': selected,
+          'data-tier': props.value,
+          disabled: disabled,
+          onMouseEnter: () => setHovered(true),
+          onMouseLeave: () => setHovered(false),
+          onClick: disabled ? undefined : props.onClick,
+          style: chipOptionStyle({ hovered: hovered, selected: selected, disabled: disabled }),
+        },
+        h('span', null, props.label),
+        selected
+          ? h(
+              'span',
+              { 'aria-hidden': 'true', style: { flex: '0 0 auto', color: COLORS.secondary } },
+              '\u2713',
+            )
+          : null,
+      );
+    }
+
+    /**
+     * The composer's tier chip. It re-tiers the *Session*, not the provider row: the relay
+     * pins one tier per mount, so the only way to change it for one conversation is to
+     * move that conversation to the sibling route that pins the tier. The sibling is
+     * minted on demand by the relay (`/routes/twin`); this chip never writes provider
+     * configuration, never touches the settings draft, and renders nothing unless the
+     * Session already runs on a row mounted from one of our targets.
+     */
+    function TierChip(props) {
+      const t = props.t;
+      const feed = props.feed;
+      const sessionId = props.sessionId;
+      const resolveDirectory = props.resolveDirectory;
+      const useProjection = props.useProjection;
+
+      const projection = typeof useProjection === 'function' ? useProjection('modelSelection') : undefined;
+      const selection = isPlainObject(projection)
+        ? isPlainObject(projection.next)
+          ? projection.next
+          : projection.lastUsed
+        : null;
+      const providerKey = isPlainObject(selection) ? stringValue(selection.provider).trim() : '';
+      const modelKey = isPlainObject(selection) ? stringValue(selection.model).trim() : '';
+
+      const [feedState, setFeedState] = React.useState(() => feed.snapshot());
+      const [open, setOpen] = React.useState(false);
+      const [hovered, setHovered] = React.useState(false);
+      const [focused, setFocused] = React.useState(false);
+      const [pendingTier, setPendingTier] = React.useState(null);
+      const [error, setError] = React.useState('');
+      const [anchor, setAnchor] = React.useState(null);
+
+      const chipRef = React.useRef(null);
+      const menuRef = React.useRef(null);
+      const aliveRef = React.useRef(true);
+      const lifetimeRef = React.useRef(null);
+      const actionRef = React.useRef(null);
+      /* The row a successful switch just moved to, until `/targets` reports it. Without
+         it the badge would blink out between the projection update and the next load. */
+      const movedRef = React.useRef(null);
+
+      React.useEffect(() => {
+        aliveRef.current = true;
+        const lifetime = new AbortController();
+        lifetimeRef.current = lifetime;
+        return () => {
+          aliveRef.current = false;
+          try {
+            lifetime.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+          lifetimeRef.current = null;
+          if (actionRef.current !== null) {
+            try {
+              actionRef.current.abort();
+            } catch (error) {
+              /* already settled */
+            }
+            actionRef.current = null;
+          }
+        };
+      }, []);
+
+      React.useEffect(() => {
+        return feed.subscribe(() => setFeedState(feed.snapshot()));
+      }, [feed]);
+
+      /* A different provider is a different tier family: drop the open menu, the pending
+         effort and the failure, and re-measure on the next open. */
+      React.useEffect(() => {
+        setOpen(false);
+        setPendingTier(null);
+        setError('');
+        setAnchor(null);
+      }, [providerKey]);
+
+      /* Anchor the popover above the trigger, in viewport coordinates: the composer bar
+         clips vertical overflow, so an absolutely positioned menu would be cut off. */
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const node = chipRef.current;
+        if (node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function') {
+          const rect = node.getBoundingClientRect();
+          const height = typeof window === 'undefined' ? 0 : Number(window.innerHeight) || 0;
+          setAnchor({
+            left: Math.max(8, Math.round(rect.left)),
+            bottom: Math.max(8, Math.round(height - rect.top + 6)),
+          });
+        }
+        return undefined;
+      }, [open]);
+
+      /* Close on an outside press or Escape, like the composer's own model menu. */
+      React.useEffect(() => {
+        if (!open) return undefined;
+        if (typeof document === 'undefined') return undefined;
+        const onPress = (event) => {
+          if (chipRef.current !== null && chipRef.current.contains(event.target)) return;
+          if (menuRef.current !== null && menuRef.current.contains(event.target)) return;
+          setOpen(false);
+        };
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            setOpen(false);
+            setError('');
+          }
+        };
+        document.addEventListener('mousedown', onPress);
+        document.addEventListener('keydown', onKey);
+        return () => {
+          document.removeEventListener('mousedown', onPress);
+          document.removeEventListener('keydown', onKey);
+        };
+      }, [open]);
+
+      /* What this Session currently runs on. Nothing renders unless the feed is loaded,
+         the Session has a selection, that selection's provider row exists, and the row is
+         mounted from one of our targets (see `normalizeTargets`). */
+      const data = feedState.data;
+      if (data === null || providerKey === '' || modelKey === '') return null;
+
+      const live = providerSourceOf(data, providerKey);
+      const moved =
+        movedRef.current !== null && movedRef.current.key === providerKey ? movedRef.current.source : null;
+      const source = live !== null ? live : moved;
+      if (source === null) return null;
+
+      const targetId = stringValue(source.targetId).trim();
+      /* A plain upstream link (or a legacy `<origin>/<tier>/v1` leg) mounts nothing of
+         ours, so there is no tier family to move within. */
+      if (targetId === '') return null;
+
+      const currentTier = stringValue(source.attachedTier).trim();
+      const name = stringValue(source.displayName).trim() || providerKey;
+      const busy = pendingTier !== null;
+      const badge = busy ? t('tier.switching') : currentTier === '' ? t('strip.tierNone') : currentTier;
+      const tierText = currentTier === '' ? t('strip.tierNone') : currentTier;
+      const options = ATTACH_TIERS.map((value) => ({
+        value: value,
+        label:
+          value === ''
+            ? t('strip.tierNone')
+            : t('providers.tierOption', {
+                tier: value,
+                multiplier: multiplierLabel(t, tierMultiplierFor(value, null)),
+              }),
+      }));
+
+      /* A twin write can cut its own response while the Loader re-applies the plugin.
+         Re-read the truth instead of believing the cut; the sibling lookup decides. */
+      const reconcile = async () => {
+        const signal = lifetimeRef.current === null ? null : lifetimeRef.current.signal;
+        for (let attempt = 0; attempt < RECONCILE_DELAYS_MS.length; attempt += 1) {
+          await sleepUntil(RECONCILE_DELAYS_MS[attempt], signal);
+          if (!aliveRef.current) return null;
+          const origin = await feed.probe(feedState.origin, attempt < RECONCILE_DELAYS_MS.length - 1);
+          if (!aliveRef.current) return null;
+          if (origin === null) continue;
+          const data = await feed.readTargets(origin);
+          if (!aliveRef.current) return null;
+          if (data !== null) return { origin: origin, data: data };
+        }
+        return null;
+      };
+
+      const postTwin = async (tier) => {
+        if (feedState.origin === null) throw new Error(t('offline.noReason'));
+        const controller = new AbortController();
+        actionRef.current = controller;
+        const timer = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already settled */
+          }
+        }, MUTATION_TIMEOUT_MS);
+        try {
+          const response = await fetch(feedState.origin + CONTROL_PREFIX + '/routes/twin', {
+            method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: {
+              accept: 'application/json',
+              'content-type': 'application/json',
+              'x-oorp-client': CLIENT_HEADER,
+            },
+            body: JSON.stringify({ route: providerKey, tier: tier }),
+            signal: controller.signal,
+          });
+          const payload = await readJsonSafe(response);
+          if (!response.ok) {
+            throw new Error(
+              controlErrorMessage(payload, t('error.http', { status: String(response.status) })),
+            );
+          }
+          const twin = twinRouteOf(payload);
+          if (twin === null) throw new Error(t('strip.stalled'));
+          return twin;
+        } finally {
+          clearTimeout(timer);
+          if (actionRef.current === controller) actionRef.current = null;
+        }
+      };
+
+      /* Move the Session's own selection to the sibling route, tolerating the catalog
+         race `/routes/twin` leaves behind (see `selectionRetryable`). */
+      const selectSibling = async (provider) => {
+        const directory = resolveDirectory === undefined ? null : resolveDirectory(sessionId);
+        if (directory === null || directory === undefined || typeof directory.select !== 'function') {
+          return { ok: false, message: t('tier.unavailable') };
+        }
+        const request = modelSelectionRequest(selection, provider);
+        const signal = lifetimeRef.current === null ? null : lifetimeRef.current.signal;
+        for (let attempt = 0; attempt <= SELECT_RETRY_DELAYS_MS.length; attempt += 1) {
+          let result;
+          try {
+            result = await directory.select(request);
+          } catch (exception) {
+            /* A client-side refusal (an addressed subagent Session, no binding) is not a
+               race and must surface immediately. */
+            return { ok: false, message: errorMessage(t, exception) };
+          }
+          if (isPlainObject(result) && result.ok === true) return { ok: true, message: '' };
+          const message = remoteFailureMessage(result);
+          if (!selectionRetryable(directory, provider, remoteFailureCode(result), attempt)) {
+            return { ok: false, message: message };
+          }
+          await sleepUntil(SELECT_RETRY_DELAYS_MS[attempt], signal);
+          if (!aliveRef.current) return { ok: false, message: message };
+        }
+        return { ok: false, message: '' };
+      };
+
+      const switchTier = async (tier) => {
+        if (pendingTier !== null) return;
+        if (tier === currentTier) {
+          setOpen(false);
+          setError('');
+          return;
+        }
+        setPendingTier(tier);
+        setError('');
+
+        let twin = null;
+        let failure = '';
+        try {
+          twin = await postTwin(tier);
+        } catch (exception) {
+          const found = await reconcile();
+          if (found !== null) feed.publish(found.origin, found.data);
+          const sibling = found === null ? '' : twinSiblingOf(found.data, targetId, tier);
+          if (sibling !== '') {
+            twin = { name: sibling, tier: tier === '' ? null : tier, baseURL: '', created: false };
+          } else {
+            failure = unknownOutcomeMessage(t, exception);
+          }
+        }
+
+        if (twin !== null) {
+          const outcome = await selectSibling(twin.name);
+          if (outcome.ok === true) {
+            movedRef.current = {
+              key: twin.name,
+              source: {
+                key: twin.name,
+                displayName: name,
+                baseURL: stringValue(twin.baseURL),
+                modelCount: 0,
+                attachedTier: tier === '' ? null : tier,
+                targetId: targetId,
+              },
+            };
+            void feed.load();
+            if (!aliveRef.current) return;
+            setPendingTier(null);
+            setOpen(false);
+            return;
+          }
+          failure = outcome.message;
+        }
+
+        if (!aliveRef.current) return;
+        setPendingTier(null);
+        setError(t('tier.error', { message: failure === '' ? t('offline.noReason') : failure }));
+      };
+
+      const openMenu = () => {
+        if (busy) return;
+        if (open) {
+          setOpen(false);
+          setError('');
+          return;
+        }
+        setError('');
+        setOpen(true);
+      };
+
+      const menuStyle = Object.assign(
+        {
+          position: 'fixed',
+          zIndex: 1100,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '2px',
+          minWidth: 'min(220px, 100vw - 24px)',
+          maxHeight: 'min(320px, 100vh - 96px)',
+          overflowY: 'auto',
+          padding: '4px',
+          border: '1px solid ' + COLORS.border,
+          borderRadius: 'var(--dsw-radius-md, 8px)',
+          background: COLORS.layerTwo,
+          boxShadow: 'var(--dsw-elevation-prominent, 0 8px 24px rgba(0, 0, 0, 0.18))',
+        },
+        anchor === null
+          ? { left: '8px', bottom: '96px' }
+          : { left: String(anchor.left) + 'px', bottom: String(anchor.bottom) + 'px' },
+      );
+
+      const errorLine =
+        error === '' ? null : h('p', { role: 'alert', style: Object.assign({}, ALERT_STYLE, { margin: '4px 4px 0' }) }, error);
+
+      return h(
+        'div',
+        { style: { position: 'relative', display: 'inline-flex', minWidth: 0 } },
+        h(
+          'button',
+          {
+            type: 'button',
+            ref: chipRef,
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open,
+            'aria-busy': busy ? 'true' : undefined,
+            'aria-label': t('tier.aria', { name: name, tier: busy ? t('tier.switching') : tierText }),
+            title: t('strip.tierAria', { name: name }),
+            disabled: busy,
+            onMouseDown: (event) => event.preventDefault(),
+            onMouseEnter: () => setHovered(true),
+            onMouseLeave: () => setHovered(false),
+            onFocus: () => setFocused(true),
+            onBlur: () => setFocused(false),
+            onClick: openMenu,
+            style: chipStyle({ open: open, hovered: hovered, focused: focused, disabled: busy }),
+          },
+          h('span', { style: CHIP_TEXT_STYLE }, badge),
+          h('span', { 'aria-hidden': 'true', style: CHIP_CARET_STYLE }, open ? '\u25b4' : '\u25be'),
+        ),
+        open
+          ? h(
+              'div',
+              {
+                role: 'listbox',
+                ref: menuRef,
+                'aria-label': t('strip.tierAria', { name: name }),
+                style: menuStyle,
+              },
+              options.map((option) =>
+                h(ChipOption, {
+                  key: option.value === '' ? 'none' : option.value,
+                  value: option.value,
+                  label: option.label,
+                  selected: option.value === currentTier,
+                  disabled: busy,
+                  onClick: () => {
+                    void switchTier(option.value);
+                  },
+                }),
+              ),
+              h('p', { style: CHIP_HINT_STYLE }, t('tier.hint')),
+              errorLine,
+            )
+          : null,
+      );
+    }
+
     /* -------------------------------------------------------------------- plugin */
 
     return {
@@ -2778,6 +3434,47 @@ window.__ModuleLoader__.load({
             ProviderRouteExtension,
           ),
         );
+
+        /*
+         * The composer's right-hand control list, beside the model selector. `list` seats
+         * are keyed by their occupant, so the registration carries an `id` of ours and no
+         * owner key. `modelDirectories` belongs to the model-selection client plugin, so
+         * the chip is registered inside `ctx.inject`: without that UI the plugin still
+         * loads, and the chip simply never appears.
+         */
+        ctx.inject(['slots', 'modelDirectories'], (scope) => {
+          const models = scope.modelDirectories;
+
+          function ComposerTierExtension(ownerProps) {
+            return h(
+              ChipBoundary,
+              null,
+              h(
+                TierChip,
+                Object.assign({}, ownerProps, {
+                  t: t,
+                  feed: targetsFeed,
+                  resolveDirectory: (targetSession) => {
+                    try {
+                      return models.directoryFor(targetSession);
+                    } catch (error) {
+                      /* An addressed subagent Session (or an unmounted one) has no
+                         directory; the chip renders and the click explains itself. */
+                      return null;
+                    }
+                  },
+                }),
+              ),
+            );
+          }
+
+          scope.slots.inject('conversation.input.right', () =>
+            scope.slots.register(
+              { name: 'conversation.input.right', id: 'openrouter-plus-tier' },
+              ComposerTierExtension,
+            ),
+          );
+        });
       },
     };
   },

@@ -36,7 +36,7 @@ const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 /** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.5.0'
+const VERSION = '0.6.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -713,6 +713,24 @@ export function apply(ctx, rawConfig) {
       )
       log('info', 'created provider route', created)
       sendJson(res, 200, { ok: true, ...created })
+    }),
+
+    // A tier is a property of the mount, so "switch this session's tier"
+    // becomes "switch this session to the sibling provider that carries that
+    // mount". Idempotent on purpose: the composer chip always posts here, and an
+    // existing sibling is returned with `created: false` and no config write.
+    [`${CONTROL_PREFIX}/routes/twin`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const twinned = await providerWrite(() =>
+        bridge.twinRoute({
+          route: typeof body.route === 'string' ? body.route : '',
+          tier: typeof body.tier === 'string' ? body.tier : '',
+          name: typeof body.name === 'string' ? body.name : undefined,
+        }),
+      )
+      log('info', twinned.created ? 'created tier sibling route' : 'reused tier sibling route', twinned)
+      sendJson(res, 200, { ok: true, ...twinned })
     }),
 
     [`${CONTROL_PREFIX}/routes/remove`]: controlRoute(async (req, res) => {

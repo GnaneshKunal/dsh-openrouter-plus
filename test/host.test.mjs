@@ -153,7 +153,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.5.0')
+  assert.equal(health.version, '0.6.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -462,6 +462,102 @@ test('a typo cannot leave a target behind, and a foreign target cannot be restor
     attached.baseURL,
     'the row keeps the mount it had',
   )
+
+  await dispose()
+})
+
+test('the composer tier chip gets an idempotent sibling provider for another tier', async () => {
+  const port = await freePort()
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow({
+      acme: {
+        displayName: 'Acme Gateway',
+        api: 'openai-completions',
+        apiKeyEnv: 'ACME_API_KEY',
+        baseURL: 'https://api.acme.dev/v1',
+        models: [{ id: 'acme-large', name: 'Acme Large', reasoningEfforts: { low: 'low', high: 'high' } }],
+      },
+      plain: {
+        displayName: 'Plain',
+        api: 'openai-completions',
+        baseURL: 'https://api.plain.dev/v1',
+        models: [{ id: 'plain-large', name: 'Plain Large' }],
+      },
+    }),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const registration = await (await postJson(`${origin}/__openrouter-plus/targets/register`, {
+    upstream: 'https://api.acme.dev/v1',
+  })).json()
+  const targetId = registration.target.id
+
+  // Route the row onto a flex mount first: only a per-endpoint mount has a family.
+  const attached = await (await postJson(`${origin}/__openrouter-plus/routes/attach`, {
+    route: 'acme',
+    upstream: 'https://api.acme.dev/v1',
+    tier: 'flex',
+  })).json()
+  assert.equal(attached.baseURL, `${origin}/t/${targetId}/flex/v1`)
+  const writesAfterAttach = editor.writes.length
+
+  // 1. A twin for another tier is cloned from the routed row, models included.
+  const twinned = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: 'priority' })
+  assert.equal(twinned.status, 200)
+  const twin = await twinned.json()
+  assert.equal(twin.ok, true)
+  assert.equal(twin.created, true)
+  assert.equal(twin.name, 'acme-priority')
+  assert.equal(twin.tier, 'priority')
+  assert.equal(twin.source, 'acme')
+  assert.equal(twin.baseURL, `${origin}/t/${targetId}/priority/v1`)
+  const clone = editor.rows[1].entry.options.config.providers['acme-priority']
+  assert.equal(clone.baseURL, `${origin}/t/${targetId}/priority/v1`)
+  assert.equal(clone.api, 'openai-completions')
+  assert.equal(clone.apiKeyEnv, 'ACME_API_KEY')
+  assert.equal(clone.models[0].id, 'acme-large')
+  assert.deepEqual(clone.models[0].reasoningEfforts, { low: 'low', high: 'high' })
+  assert.equal(editor.writes.length, writesAfterAttach + 1)
+
+  // 2. Asking again reuses that sibling: same key, no second write. The chip
+  //    always posts here, so this is the common path once a tier exists.
+  const again = await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: 'priority' })
+  assert.equal(again.status, 200)
+  const reused = await again.json()
+  assert.equal(reused.created, false)
+  assert.equal(reused.name, 'acme-priority')
+  assert.equal(editor.writes.length, writesAfterAttach + 1, 'an existing sibling writes nothing')
+
+  // 3. The pass-through sibling is its own row on the tierless mount.
+  const pass = await (await postJson(`${origin}/__openrouter-plus/routes/twin`, { route: 'acme', tier: '' })).json()
+  assert.equal(pass.created, true)
+  assert.equal(pass.tier, null)
+  assert.equal(pass.baseURL, `${origin}/t/${targetId}/v1`)
+
+  // 4. Refusals are 400s and write nothing: a row outside the relay has no
+  //    family, an unknown tier is not a tier, and a typo is not a route.
+  const writesBeforeRefusals = editor.writes.length
+  for (const [body, pattern] of [
+    [{ route: 'plain', tier: 'flex' }, /not routed|target/i],
+    [{ route: 'acme', tier: 'turbo' }, /tier/i],
+    [{ route: 'nope', tier: 'flex' }, /no provider route named/i],
+  ]) {
+    const response = await postJson(`${origin}/__openrouter-plus/routes/twin`, body)
+    assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(body)}`)
+    const payload = await response.json()
+    assert.match(payload.error.message, pattern)
+  }
+  assert.equal(editor.writes.length, writesBeforeRefusals, 'refusals write nothing')
 
   await dispose()
 })
