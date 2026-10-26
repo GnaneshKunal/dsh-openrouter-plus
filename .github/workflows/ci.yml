@@ -24,3 +24,14 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm pack --dry-run
+      # /status reports VERSION from index.js, while the tarball carries package.json; a skew
+      # between them is invisible until someone compares the two by hand.
+      - name: Version agrees with the runtime constant
+        run: |
+          package=$(node -p "require('./package.json').version")
+          constant=$(node -p "require('node:fs').readFileSync('index.js','utf8').match(/const VERSION = '([^']+)'/)[1]")
+          if [ "$package" != "$constant" ]; then
+            echo "::error::package.json $package != index.js VERSION $constant"
+            exit 1
+          fi
+          echo "version $package" 

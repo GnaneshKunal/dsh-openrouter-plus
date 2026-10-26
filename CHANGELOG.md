@@ -5,6 +5,10 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [Unreleased]
+
+Nothing yet.
+
 ## [0.1.0] — 2026-10-26
 
 First release: a loopback relay that applies an OpenRouter **routing preset** to a request at

@@ -67,5 +67,19 @@ jobs:
           if (at < 0) { console.error('CHANGELOG.md has no ' + tag + ' section'); process.exit(1); }
           const rest = changelog.slice(at);
           const end = rest.indexOf('\n## [', 1);
-          fs.writeFileSync('notes.md', (end < 0 ? rest : rest.slice(0, end)).trim() + '\n');"
+          const section = (end < 0 ? rest : rest.slice(0, end)).trim();
+          const upgrade = [
+            '',
+            '## Upgrade',
+            '',
+            '```bash',
+            'dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus#' + process.env.GITHUB_REF_NAME,
+            '```',
+            '',
+            'Restart `dsh web` so the relay loads the new host half, then refresh the page — the',
+            'settings page and the composer chip are part of the browser bundle and only re-evaluate',
+            'on a document reload.',
+            ''
+          ].join('\n');
+          fs.writeFileSync('notes.md', section + '\n' + upgrade);"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
