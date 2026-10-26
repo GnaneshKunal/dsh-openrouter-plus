@@ -3,7 +3,7 @@
  *
  * Registers the `settings.section` page that appears as its own entry in Settings
  * navigation ("OpenRouter Plus"). The page reads the loopback relay's control API and
- * shows the tier mounts (with copyable base URLs), the weighted cost signal,
+ * shows one pinned base URL per preset (with a copy button), the weighted cost signal,
  * provider-route creation, and the most recent relayed requests.
  *
  * It also answers the `settings.models.provider-card` seat for the `llm-pi-ai` family:
@@ -100,17 +100,6 @@ window.__ModuleLoader__.load({
     const RECONCILE_DELAYS_MS = Object.freeze([350, 450, 550]);
     const MUTATION_TIMEOUT_MS = 6000;
 
-    /** Documented pricing multipliers, used only when metrics have not seen a tier yet. */
-    const TIER_MULTIPLIER_FALLBACK = Object.freeze({
-      flex: 0.5,
-      scale: 1,
-      auto: 1,
-      default: 1,
-      priority: 2,
-      fast: 2,
-      ultrafast: 4,
-    });
-
     const EXPECTED_ORIGIN = DEFAULT_ORIGINS[0];
 
     /**
@@ -126,7 +115,7 @@ window.__ModuleLoader__.load({
       'nav': 'OpenRouter Plus',
       'card.title': 'OpenRouter Plus',
       'card.regionAria': 'OpenRouter Plus relay',
-      'page.intro': 'A loopback relay that pins OpenRouter service tiers. Point a provider route at one of its mounts to send every request with a chosen tier.',
+      'page.intro': 'A loopback relay for OpenRouter. The composer chip picks a routing preset for one Session; a pinned base URL below sets it for a whole route.',
 
       'common.unknown': 'unknown',
       'common.notAvailable': '—',
@@ -153,11 +142,10 @@ window.__ModuleLoader__.load({
       'error.badRepair': 'The relay returned an unexpected repair result.',
       'error.render': 'The OpenRouter Plus page failed to render; the rest of Settings still works.',
 
-      'mounts.caption': 'Tier mounts',
-      'mounts.hint': "Paste a mount's base URL into a provider route to pin that service tier.",
+      'mounts.caption': 'Pinned base URLs',
+      'mounts.hint': 'The composer chip is the normal control. A route pinned to one of these keeps its preset for every Session on it, and the pin survives a restart.',
       'mounts.column.mount': 'Mount',
-      'mounts.column.tier': 'Tier',
-      'mounts.column.multiplier': 'Multiplier',
+      'mounts.column.preset': 'Preset',
       'mounts.column.requests': 'Requests',
       'mounts.column.tokens': 'Tokens',
       'mounts.column.copy': 'Copy base URL',
@@ -165,7 +153,6 @@ window.__ModuleLoader__.load({
       'mounts.copied': 'Copied',
       'mounts.copyFailed': 'Copy failed',
       'mounts.copyAria': 'Copy base URL for {path}',
-      'mounts.passthrough': 'pass-through',
       'mounts.empty': 'The relay reported no mount routes.',
 
       'savings.caption': 'Spend impact',
@@ -266,7 +253,7 @@ window.__ModuleLoader__.load({
       'nav': 'OpenRouter Plus',
       'card.title': 'OpenRouter Plus',
       'card.regionAria': 'OpenRouter Plus 中继',
-      'page.intro': '固定 OpenRouter 服务等级的本机中继。把提供商路由指向它的挂载点，每个请求就会带上你选择的等级。',
+      'page.intro': '面向 OpenRouter 的本机中继。输入框的预设芯片为单个会话选择路由预设；下方的固定基址则作用于整条路由。',
 
       'common.unknown': '未知',
       'common.notAvailable': '—',
@@ -293,11 +280,10 @@ window.__ModuleLoader__.load({
       'error.badRepair': '中继返回了无法识别的修复结果。',
       'error.render': 'OpenRouter Plus 页面渲染失败；设置的其余部分不受影响。',
 
-      'mounts.caption': '等级挂载点',
-      'mounts.hint': '把挂载点的基址粘贴到提供商路由，即可固定该服务等级。',
+      'mounts.caption': '固定基址',
+      'mounts.hint': '输入框中的预设芯片是常用方式。把路由固定到下列基址后，该路由上的每个会话都会使用同一预设，且重启后依然有效。',
       'mounts.column.mount': '挂载点',
-      'mounts.column.tier': '等级',
-      'mounts.column.multiplier': '倍率',
+      'mounts.column.preset': '预设',
       'mounts.column.requests': '请求数',
       'mounts.column.tokens': 'Token 数',
       'mounts.column.copy': '复制基址',
@@ -305,7 +291,6 @@ window.__ModuleLoader__.load({
       'mounts.copied': '已复制',
       'mounts.copyFailed': '复制失败',
       'mounts.copyAria': '复制 {path} 的基址',
-      'mounts.passthrough': '直通',
       'mounts.empty': '中继未报告任何挂载路由。',
 
       'savings.caption': '费用影响',
@@ -725,14 +710,9 @@ window.__ModuleLoader__.load({
         } else if (isPlainObject(byTier[tier])) {
           stats = byTier[tier];
         }
-        let multiplier = null;
-        if (tier === null) multiplier = 1;
-        else if (stats !== null && stats.multiplier !== null) multiplier = stats.multiplier;
-        else if (hasOwn(TIER_MULTIPLIER_FALLBACK, tier)) multiplier = TIER_MULTIPLIER_FALLBACK[tier];
         mounts.push({
           path,
           tier,
-          multiplier,
           requests: stats === null ? 0 : stats.requests,
           promptTokens: stats === null ? 0 : stats.promptTokens,
           completionTokens: stats === null ? 0 : stats.completionTokens,
@@ -762,6 +742,28 @@ window.__ModuleLoader__.load({
 
       mounts.sort(compareMounts);
       return mounts;
+    }
+
+    /**
+     * One row per routing outcome, on the mount that pins it. The relay keeps serving the
+     * older names — `/auto/v1` asks for the same thing as `/v1`, `/fast/v1` predates
+     * `priority`, and `/scale/v1` names a tier no endpoint honours — but listing an alias
+     * beside its canonical sibling offers one pin three times over.
+     */
+    function pinnedMounts(mounts) {
+      const canonical = [
+        ['none', null],
+        ['standard', 'default'],
+        ['flex', 'flex'],
+        ['priority', 'priority'],
+        ['ultra', 'ultrafast'],
+      ];
+      const rows = [];
+      for (const entry of canonical) {
+        const mount = mounts.find((candidate) => candidate.tier === entry[1]);
+        if (mount !== undefined) rows.push({ preset: entry[0], mount: mount });
+      }
+      return rows;
     }
 
     /**
@@ -2098,20 +2100,22 @@ window.__ModuleLoader__.load({
         );
 
       const renderMounts = () => {
+        const pinned = pinnedMounts(mounts);
         const rows =
-          mounts.length === 0
+          pinned.length === 0
             ? [
                 h(
                   'tr',
                   { key: 'empty' },
                   h(
                     'td',
-                    { colSpan: 6, style: Object.assign({}, TD_STYLE, { color: COLORS.secondary }) },
+                    { colSpan: 5, style: Object.assign({}, TD_STYLE, { color: COLORS.secondary }) },
                     t('mounts.empty'),
                   ),
                 ),
               ]
-            : mounts.map((mount) => {
+            : pinned.map((entry) => {
+                const mount = entry.mount;
                 const baseURL = joinURL(relayOrigin, mount.path);
                 const copying = copyState !== null && copyState.path === mount.path;
                 const copied = copying && copyState.ok === true;
@@ -2127,9 +2131,8 @@ window.__ModuleLoader__.load({
                   h(
                     'td',
                     { style: TD_STYLE },
-                    h('span', { style: BADGE_STYLE }, mount.tier === null ? t('mounts.passthrough') : mount.tier),
+                    h('span', { style: BADGE_STYLE }, t('preset.' + entry.preset)),
                   ),
-                  h('td', { style: TD_RIGHT_STYLE }, multiplierLabel(t, mount.multiplier)),
                   h('td', { style: TD_RIGHT_STYLE }, formatCount(mount.requests)),
                   h(
                     'td',
@@ -2172,8 +2175,7 @@ window.__ModuleLoader__.load({
                 'tr',
                 null,
                 h('th', { scope: 'col', style: TH_STYLE }, t('mounts.column.mount')),
-                h('th', { scope: 'col', style: TH_STYLE }, t('mounts.column.tier')),
-                h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('mounts.column.multiplier')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('mounts.column.preset')),
                 h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('mounts.column.requests')),
                 h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('mounts.column.tokens')),
                 h(
@@ -2935,7 +2937,7 @@ window.__ModuleLoader__.load({
             'span',
             { role: 'status', 'aria-live': 'polite', style: STRIP_STATUS_STYLE },
             h('span', null, t('strip.routed')),
-            h('span', { style: BADGE_STYLE }, routed.tier === null ? t('mounts.passthrough') : routed.tier),
+            h('span', { style: BADGE_STYLE }, t('preset.' + (presetFromLegacyTier(routed.tier) ?? 'none'))),
           ),
           errorLine,
         );
@@ -3401,6 +3403,8 @@ window.__ModuleLoader__.load({
       __test: {
         normalizePresetTable,
         normalizePresetState,
+        normalizeMounts,
+        pinnedMounts,
         presetFromLegacyTier,
       },
       apply(ctx) {

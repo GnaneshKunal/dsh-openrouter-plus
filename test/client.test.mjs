@@ -35,7 +35,13 @@ const module = definition.factory((id) => {
   assert.equal(id, 'react')
   return reactStub
 })
-const { normalizePresetTable, normalizePresetState, presetFromLegacyTier } = module.__test
+const {
+  normalizeMounts,
+  normalizePresetTable,
+  normalizePresetState,
+  pinnedMounts,
+  presetFromLegacyTier,
+} = module.__test
 
 test('a preset id or a 0.8.0 tier name both name a preset', () => {
   assert.equal(presetFromLegacyTier('cheapest'), 'cheapest')
@@ -106,4 +112,49 @@ test('the chip reads both answer shapes', () => {
   for (const junk of [null, undefined, 'x', { ok: false }, { ok: true }]) {
     assert.equal(normalizePresetState(junk), null)
   }
+})
+
+test('one pinned row per outcome, aliases folded away', () => {
+  // The shape `/status` reports: a path → tier-name map, including the older names the
+  // relay still serves.
+  const mounts = normalizeMounts(
+    {
+      '/ultrafast/v1': 'ultrafast',
+      '/priority/v1': 'priority',
+      '/default/v1': 'default',
+      '/scale/v1': 'scale',
+      '/flex/v1': 'flex',
+      '/auto/v1': 'auto',
+      '/fast/v1': 'fast',
+      '/v1': null,
+    },
+    {},
+  )
+  const rows = pinnedMounts(mounts).map((row) => [row.preset, row.mount.path])
+  assert.deepEqual(rows, [
+    ['none', '/v1'],
+    ['standard', '/default/v1'],
+    ['flex', '/flex/v1'],
+    ['priority', '/priority/v1'],
+    ['ultra', '/ultrafast/v1'],
+  ])
+
+  // A relay that mounts only some tiers yields only those rows, in preset order.
+  const partial = normalizeMounts({ '/flex/v1': 'flex', '/v1': null }, {})
+  assert.deepEqual(
+    pinnedMounts(partial).map((row) => row.preset),
+    ['none', 'flex'],
+  )
+
+  // Each row carries the traffic counters of its mount, and nothing else.
+  const counted = normalizeMounts({ '/flex/v1': 'flex' }, {
+    flex: { multiplier: 0.5, requests: 3, promptTokens: 10, completionTokens: 5 },
+  })
+  assert.deepEqual(pinnedMounts(counted)[0].mount, {
+    path: '/flex/v1',
+    tier: 'flex',
+    requests: 3,
+    promptTokens: 10,
+    completionTokens: 5,
+  })
 })

@@ -32,13 +32,15 @@ switching never mints a provider, a route or a model list.
 - **One provider row, any preset.** A routed provider keeps its key, protocol and models and gains
   one thing: a composable **preset** that the relay applies to each request. No per-preset provider
   copies, no sibling route per preset, no model list duplicated nine times.
-- **Tier mounts** — `/flex/v1`, `/priority/v1`, `/fast/v1`, `/ultrafast/v1`, `/scale/v1`,
-  `/auto/v1`, `/default/v1`, plus a `/v1` passthrough that sends no tier at all. Each mount is a
-  `baseURL` you can paste into any OpenAI-compatible provider route when you want a *permanently*
-  pinned service tier instead of a per-session preset.
-- **Its own settings page** (Settings → OpenRouter Plus) showing relay state, every mount with a
-  copy button, live request/token counters per tier, the weighted cost multiplier, and recent
-  requests.
+- **Pinned base URLs** for what a chip cannot cover — `/v1` (no pin), `/default/v1` (Standard),
+  `/flex/v1` (Flex), `/priority/v1` (Priority), `/ultrafast/v1` (Ultra). Paste one into an
+  OpenAI-compatible provider route and that preset applies to *every* Session on the route,
+  subagents included, and survives a restart. The relay still serves the older names
+  (`/auto/v1`, `/fast/v1`, `/scale/v1`); the settings page lists one mount per preset so it never
+  offers the same choice twice.
+- **Its own settings page** (Settings → OpenRouter Plus) showing relay state, one pinned base URL
+  per preset with a copy button, live request/token counters per tier, the weighted cost
+  multiplier, and recent requests.
 - **A preset chip in the composer** — next to the model selector, a compact chip shows the preset
   this Session will actually apply and switches it in one click. The switch is **per session**: it
   changes what the next request from *this* conversation carries, so two conversations can sit on
@@ -297,7 +299,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `port` | `8791` | preferred port |
 | `portFallback` | `true` | fall forward to the next free port (the page probes 8791–8794) |
 | `upstream` | `https://openrouter.ai/api/v1` | where requests are forwarded, no trailing slash |
-| `routes` | tier mounts | mount path → tier, for pinned URLs (`/flex/v1`); `null` tier is a pure passthrough. The per-session design needs only `/v1` |
+| `routes` | tier mounts | mount path → tier, for pinned URLs (`/flex/v1`); `null` tier is a pure passthrough. Accepted names are `default`, `flex`, `priority`, `ultrafast`, and the aliases `auto`/`scale` (both mean *no pin*) and `fast` (= `priority`). The per-session design needs only `/v1` |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
 | `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |

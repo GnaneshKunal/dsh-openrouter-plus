@@ -346,7 +346,9 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   page out of its boundary. `__test` on the module object exports those readers for
   `test/client.test.mjs`; the loader ignores it.
 - The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
-  on unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
+  on unmount), renders connection state, one pinned base URL per preset (`pinnedMounts()`, which
+  folds `/auto/v1`, `/fast/v1` and `/scale/v1` onto the mount that means the same thing) with copy
+  buttons, live counters, and a
   "routes on this relay" block that reads `/targets`, sets the profile **Service tier for new
   sessions** (`POST /tier/default`) together with a short table of what each preset sends, and posts
   `/routes/remove` — all with the `x-oorp-client: web` header. The per-Session control is the
