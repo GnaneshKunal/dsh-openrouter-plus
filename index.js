@@ -35,7 +35,7 @@ const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 /** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024

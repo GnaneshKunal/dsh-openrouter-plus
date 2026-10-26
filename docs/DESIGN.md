@@ -29,8 +29,8 @@ effect, or whether the relay behind it is alive.
 
 ### C. This plugin: relay + managed route (chosen)
 
-A loopback relay owns the tier semantics; the plugin creates the route that points at it; the Models
-page shows what is happening.
+A loopback relay owns the tier semantics; the plugin creates the route that points at it; its own
+Settings page shows what is happening.
 
 ```
 route.baseURL = http://127.0.0.1:8791/flex/v1
@@ -42,11 +42,11 @@ route.baseURL = http://127.0.0.1:8791/flex/v1
 What this buys over B:
 
 - **The tier is data, not a guess.** It lives in the mount table, is validated, and is visible in the
-  status API and the card.
+  status API and the settings page.
 - **Telemetry.** Every request is attributed to a tier with token counts, so "what did flex actually
   save me" has an answer.
 - **Reversibility.** Routes are created by the plugin, marked by their `baseURL`, and removable from
-  the same card. A route the plugin did not create is never edited or deleted.
+  the same page. A route the plugin did not create is never edited or deleted.
 - **Survives upgrades.** Nothing outside the profile's own config is touched; `bun install -g` cannot
   break it.
 

@@ -1,10 +1,10 @@
 /**
  * dsh-openrouter-plus — browser half.
  *
- * Registers the `settings.models.footer` card that lives below the provider rows of
- * Settings → Models. The card reads the loopback relay's control API and shows the tier
- * mounts (with copyable base URLs), the weighted cost signal, provider-route creation,
- * and the most recent relayed requests.
+ * Registers the `settings.section` page that appears as its own entry in Settings
+ * navigation ("OpenRouter Plus"). The page reads the loopback relay's control API and
+ * shows the tier mounts (with copyable base URLs), the weighted cost signal,
+ * provider-route creation, and the most recent relayed requests.
  *
  * Contract: docs/ARCHITECTURE.md ("client.js"). Plain browser JavaScript: no JSX, no
  * build step, no imports beyond the host React module table.
@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Last origin that actually answered. Module scope by design (the factory stays
-     * side-effect free): it only saves a reconnect probe when the card remounts.
+     * side-effect free): it only saves a reconnect probe when the page remounts.
      */
     let rememberedOrigin = null;
 
@@ -61,8 +61,10 @@ window.__ModuleLoader__.load({
 
     /** English dictionary (key-set source of truth). */
     const en = {
+      'nav': 'OpenRouter Plus',
       'card.title': 'OpenRouter Plus',
       'card.regionAria': 'OpenRouter Plus relay',
+      'page.intro': 'A loopback relay that pins OpenRouter service tiers. Point a provider route at one of its mounts to send every request with a chosen tier.',
 
       'common.unknown': 'unknown',
       'common.notAvailable': '—',
@@ -91,7 +93,7 @@ window.__ModuleLoader__.load({
       'error.badStatus': 'The relay returned an unexpected status payload.',
       'error.badTargets': 'The relay returned an unexpected provider-routes payload.',
       'error.badRepair': 'The relay returned an unexpected repair result.',
-      'error.render': 'The OpenRouter Plus card failed to render; the rest of the Models page still works.',
+      'error.render': 'The OpenRouter Plus page failed to render; the rest of Settings still works.',
 
       'mounts.caption': 'Tier mounts',
       'mounts.hint': "Paste a mount's base URL into a provider route to pin that service tier.",
@@ -124,7 +126,7 @@ window.__ModuleLoader__.load({
 
       'providers.caption': 'Provider routes',
       'providers.explain':
-        'A created route appears in the model picker as its own provider; removing it here only deletes routes this card created.',
+        'A created route appears in the model picker as its own provider; removing it here only deletes routes this page created.',
       'providers.loading': 'Loading provider routes…',
       'providers.retry': 'Reload',
       'providers.unavailable': 'Route editing is unavailable: {reason}',
@@ -132,7 +134,7 @@ window.__ModuleLoader__.load({
       'providers.sourcesCaption': 'Sources',
       'providers.createdCaption': 'Created routes',
       'providers.emptySources': 'No provider sources are configured.',
-      'providers.createdEmpty': 'No route has been created from this card yet.',
+      'providers.createdEmpty': 'No route has been created from this page yet.',
       'providers.sourceModels': '{api} · {count} models',
       'providers.sourceKey': 'key env: {env}',
       'providers.tierOption': '{tier} · {multiplier}',
@@ -177,8 +179,10 @@ window.__ModuleLoader__.load({
 
     /** Simplified Chinese dictionary, complete against the English key set. */
     const zh = {
+      'nav': 'OpenRouter Plus',
       'card.title': 'OpenRouter Plus',
       'card.regionAria': 'OpenRouter Plus 中继',
+      'page.intro': '固定 OpenRouter 服务等级的本机中继。把提供商路由指向它的挂载点，每个请求就会带上你选择的等级。',
 
       'common.unknown': '未知',
       'common.notAvailable': '—',
@@ -207,7 +211,7 @@ window.__ModuleLoader__.load({
       'error.badStatus': '中继返回了无法识别的状态数据。',
       'error.badTargets': '中继返回了无法识别的提供商路由数据。',
       'error.badRepair': '中继返回了无法识别的修复结果。',
-      'error.render': 'OpenRouter Plus 卡片渲染失败；模型页面的其余部分不受影响。',
+      'error.render': 'OpenRouter Plus 页面渲染失败；设置的其余部分不受影响。',
 
       'mounts.caption': '等级挂载点',
       'mounts.hint': '把挂载点的基址粘贴到提供商路由，即可固定该服务等级。',
@@ -236,7 +240,7 @@ window.__ModuleLoader__.load({
       'savings.note': '倍率为相对 token 价格。中继不知道各模型的实际价格，因此不显示金额。',
 
       'providers.caption': '提供商路由',
-      'providers.explain': '创建的路由会作为独立提供商出现在模型选择器中；在此移除只会删除本卡片创建的路由。',
+      'providers.explain': '创建的路由会作为独立提供商出现在模型选择器中；在此移除只会删除本页面创建的路由。',
       'providers.loading': '正在加载提供商路由…',
       'providers.retry': '重新加载',
       'providers.unavailable': '无法编辑路由：{reason}',
@@ -244,7 +248,7 @@ window.__ModuleLoader__.load({
       'providers.sourcesCaption': '可用来源',
       'providers.createdCaption': '已创建的路由',
       'providers.emptySources': '尚未配置任何提供商来源。',
-      'providers.createdEmpty': '尚未从此卡片创建任何路由。',
+      'providers.createdEmpty': '尚未通过此页面创建路由。',
       'providers.sourceModels': '{api} · {count} 个模型',
       'providers.sourceKey': '密钥环境变量：{env}',
       'providers.tierOption': '{tier} · {multiplier}',
@@ -530,7 +534,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Validate the `/status` payload. Returns null for an unexpected shape, which makes
-     * the card render its error/offline state instead of throwing inside the slot.
+     * the page render its error/offline state instead of throwing inside the slot.
      */
     function normalizeStatusPayload(payload) {
       if (!isPlainObject(payload)) return null;
@@ -666,7 +670,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ clipboard */
 
     /* The GUI runs in a secure context (loopback is treated as trustworthy), so the async
-       Clipboard API is available. Deliberately no textarea/execCommand fallback: this card
+       Clipboard API is available. Deliberately no textarea/execCommand fallback: this page
        must not add or move nodes outside its own subtree. When the write is unavailable or
        refused, the caller renders a "could not copy" state instead of failing silently. */
     function writeClipboard(text) {
@@ -689,7 +693,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------------ styles */
 
-    /* Theme tokens only, each with a plain CSS fallback so the card still reads well if
+    /* Theme tokens only, each with a plain CSS fallback so the page still reads well if
        a token is renamed upstream. Inline styles only: no global CSS, no class names. */
 
     const COLORS = {
@@ -698,7 +702,6 @@ window.__ModuleLoader__.load({
       tertiary: 'var(--dsw-alias-label-tertiary, GrayText)',
       border: 'var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.12))',
       borderStrong: 'var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.2))',
-      layer: 'var(--dsw-alias-bg-layer-1, Canvas)',
       layerTwo: 'var(--dsw-alias-bg-layer-2, ButtonFace)',
       success: 'var(--dsw-alias-state-success-primary, #2f9e44)',
       error: 'var(--dsw-alias-state-error-primary, #c92a2a)',
@@ -710,7 +713,6 @@ window.__ModuleLoader__.load({
     const FONTS = {
       body: 'var(--dsw-font-xs-13, 400 13px/1.5 system-ui, sans-serif)',
       strong: 'var(--dsw-font-xs-strong-13, 600 13px/1.5 system-ui, sans-serif)',
-      title: 'var(--dsw-font-s-strong-14, 600 14px/1.45 system-ui, sans-serif)',
       small: 'var(--dsw-font-xxs-12, 400 12px/1.5 system-ui, sans-serif)',
       smallStrong: 'var(--dsw-font-xxs-strong-12, 600 12px/1.5 system-ui, sans-serif)',
       tiny: 'var(--dsw-font-xxxs-11, 400 11px/1.45 system-ui, sans-serif)',
@@ -745,16 +747,17 @@ window.__ModuleLoader__.load({
       overflowWrap: 'anywhere',
     };
 
-    const CARD_STYLE = {
+    /*
+     * Page layout follows the shipped settings pages: one 720px column, 12px gaps, the
+     * panel supplies the background (a card border here would draw a box inside a box).
+     */
+    const PAGE_STYLE = {
       display: 'flex',
       flexDirection: 'column',
+      gap: '12px',
       minWidth: 0,
-      marginTop: '12px',
-      padding: '12px',
+      maxWidth: '720px',
       boxSizing: 'border-box',
-      border: '1px solid ' + COLORS.border,
-      borderRadius: 'var(--dsw-radius-lg, 12px)',
-      background: COLORS.layer,
       color: COLORS.primary,
       font: FONTS.body,
       textAlign: 'left',
@@ -776,7 +779,11 @@ window.__ModuleLoader__.load({
       minWidth: 0,
     };
 
-    const TITLE_STYLE = { margin: 0, font: FONTS.title, color: COLORS.primary };
+    /* Matches the section titles the settings shell renders: 16/24, medium. */
+    const TITLE_STYLE = { fontSize: 16, fontWeight: 500, lineHeight: '24px', margin: 0, color: COLORS.primary };
+
+    /* The one-line description under the title, same size and tone as a shipped section intro. */
+    const INTRO_STYLE = { margin: 0, fontSize: 14, lineHeight: '22px', color: COLORS.tertiary };
 
     const STATUS_TEXT_STYLE = { font: FONTS.small, color: COLORS.secondary };
 
@@ -1019,10 +1026,10 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ components */
 
     /**
-     * Error boundary around the whole card. The host also guards slot entries, but this
-     * boundary keeps any render failure inside the card and shows a localized note.
+     * Error boundary around the whole page. The host also guards slot entries, but this
+     * boundary keeps any render failure inside the page and shows a localized note.
      */
-    class CardBoundary extends React.Component {
+    class PageBoundary extends React.Component {
       constructor(props) {
         super(props);
         this.state = { failed: false };
@@ -1035,7 +1042,7 @@ window.__ModuleLoader__.load({
       componentDidCatch(error, info) {
         try {
           if (typeof console !== 'undefined' && typeof console.error === 'function') {
-            console.error('[dsh-openrouter-plus] settings card render failed', error, info);
+            console.error('[dsh-openrouter-plus] settings page render failed', error, info);
           }
         } catch (ignored) {
           /* logging must never throw out of an error boundary */
@@ -1047,8 +1054,8 @@ window.__ModuleLoader__.load({
         const t = this.props.t;
         return h(
           'section',
-          { 'aria-label': t('card.regionAria'), style: CARD_STYLE },
-          h('h3', { style: TITLE_STYLE }, t('card.title')),
+          { 'aria-label': t('card.regionAria'), style: PAGE_STYLE },
+          h('h2', { style: TITLE_STYLE }, t('card.title')),
           h('p', { role: 'alert', style: ALERT_STYLE }, t('error.render')),
         );
       }
@@ -1099,10 +1106,10 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The card body. Everything stateful lives here so the slot wrapper stays trivial and
-     * unmounting the slot tears down every timer, fetch and listener this card owns.
+     * The page body. Everything stateful lives here so the slot wrapper stays trivial and
+     * unmounting the slot tears down every timer, fetch and listener this page owns.
      */
-    function CardBody(props) {
+    function PageBody(props) {
       const t = props.t;
 
       const [origin, setOrigin] = React.useState(() =>
@@ -1159,7 +1166,7 @@ window.__ModuleLoader__.load({
       /*
        * Status polling: one request, then a chained setTimeout (never setInterval) so a
        * slow relay cannot queue overlapping probes. A failed status fetch probes the
-       * documented fallback ports via /health; when a different port answers, the card
+       * documented fallback ports via /health; when a different port answers, the page
        * switches origin and this effect re-runs immediately at the new origin.
        */
       React.useEffect(() => {
@@ -1400,7 +1407,7 @@ window.__ModuleLoader__.load({
       };
 
       /*
-       * Ask the relay to fill effort levels onto every route this card owns.
+       * Ask the relay to fill effort levels onto every route this page owns.
        * It is a config write, so it shares the create/remove guards: one action
        * at a time, aborted on unmount, and the same error line. A refresh (not
        * the response) drives the rows, and `changed: false` is calm — nothing
@@ -1555,7 +1562,7 @@ window.__ModuleLoader__.load({
           'div',
           { style: HEADER_ROW_STYLE },
           h('span', { style: dotStyle(connection), 'aria-hidden': 'true' }),
-          h('h3', { style: TITLE_STYLE }, t('card.title')),
+          h('h2', { style: TITLE_STYLE }, t('card.title')),
           h('span', { role: 'status', 'aria-live': 'polite', style: STATUS_TEXT_STYLE }, t(connectionKey)),
           snapshot !== null && snapshot.version !== ''
             ? h(
@@ -2012,8 +2019,9 @@ window.__ModuleLoader__.load({
 
       return h(
         'section',
-        { 'aria-label': t('card.regionAria'), style: CARD_STYLE },
+        { 'aria-label': t('card.regionAria'), style: PAGE_STYLE },
         header,
+        h('p', { style: INTRO_STYLE }, t('page.intro')),
         connection === 'offline' ? renderOffline() : null,
         connection === 'online' && snapshot !== null ? renderMounts() : null,
         connection === 'online' && snapshot !== null ? renderSavings() : null,
@@ -2035,14 +2043,21 @@ window.__ModuleLoader__.load({
 
         const t = ctx.locale.bind(NS);
 
-        function OpenRouterPlusCard() {
-          return h(CardBoundary, { t: t }, h(CardBody, { t: t }));
+        function OpenRouterPlusPage() {
+          return h(PageBoundary, { t: t }, h(PageBody, { t: t }));
         }
 
-        ctx.slots.inject('settings.models.footer', () =>
+        /*
+        * Its own Settings page rather than a card inside Models: the relay is operator
+        * furniture (status, mounts, routes, traffic), and it polls the loopback listener
+        * while open. `order: 12` lands it directly after Models, where a reader looking
+        * for provider routing starts. The label is a thunk so a locale switch retitles
+        * the nav row without re-registering.
+        */
+        ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.models.footer', id: 'dsh-openrouter-plus', order: 100 },
-            OpenRouterPlusCard,
+            { name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') },
+            OpenRouterPlusPage,
           ),
         );
       },

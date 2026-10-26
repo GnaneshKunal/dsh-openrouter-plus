@@ -107,7 +107,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.2.0')
+  assert.equal(health.version, '0.3.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only

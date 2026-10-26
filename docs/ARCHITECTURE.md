@@ -2,8 +2,8 @@
 
 A DeepSeek Harness plugin that adds **OpenRouter service-tier routing** without patching any
 shipped package: it runs a loopback relay that pins `service_tier` in OpenAI-compatible request
-bodies, exposes a live status API, and adds a **Models-page card** that can create a real
-provider route in the profile pointing at the relay.
+bodies, exposes a live status API, and adds an **OpenRouter Plus settings page** that can create
+a real provider route in the profile pointing at the relay.
 
 Background: `deepseek-harness` discussion #9787 asks for a `serviceTier` field on
 `@deepseek-ai/dsh-llm-pi-ai` provider profiles. That field lives in a package a third-party
@@ -16,7 +16,7 @@ composer/model picker
       ▼
 dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.ai/api/v1
                         │ injects {"service_tier":"flex"} into the JSON body
-                        └ /__openrouter-plus/status ──► Models-page card (client.js)
+                        └ /__openrouter-plus/status ──► OpenRouter Plus page (client.js)
 ```
 
 ## Runtime facts this design relies on
@@ -27,8 +27,9 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
   need not name an installed provider. A route is `{ api, apiKeyEnv, baseURL, models[], headers?,
   displayName? }` and inherits nothing when its key is unknown — so a created route must carry the
   full `models` list.
-- The Models page exposes two extension slots: `settings.models.footer` (list, renders after the
-  provider rows) and `settings.models.provider-card` (keyed per provider). We use the footer.
+- Settings navigation is a list slot (`settings.section`): one registration = one page, with a
+  localized `label` thunk and an `order` seat. We take a page of our own at `order: 12` (right after
+  Models), so the relay surface is not appended to a page owned by another feature.
 - `ctx.configEditor` (Host) exposes `entries()`, `configuration()` and
   `edit(entry, (current, inherited) => nextRawConfig)`; edits go through the normal Loader path, so
   a new route appears in the Models page / model picker once reconciliation completes.
@@ -42,7 +43,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, listRoutes }` |
-| `client.js` | models-card | `window.__ModuleLoader__.load(...)`; registers the `settings.models.footer` card. |
+| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus". |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
 Plain ESM JavaScript, **no build step, no third-party runtime dependencies** (Node ≥ 20 built-ins
@@ -213,9 +214,9 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - `const React = require('react')` — never install a second React.
 - `inject: ['slots', 'locale']`; register a locale namespace (`dsh-openrouter-plus`) with `en` and
   `zh` dictionaries through `ctx.locale.register(ns, { en, zh })` and bind it.
-- `ctx.slots.inject('settings.models.footer', () => ctx.slots.register({ name: 'settings.models.footer', id: 'dsh-openrouter-plus', order: 100 }, OpenRouterPlusCard))`.
-- The card polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer on
-  unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
+- `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, OpenRouterPlusPage))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
+- The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
+  on unmount), renders connection state, the tier mount table with copy buttons, live counters, and a
   "provider routes" block that reads `/targets` and posts to `/routes/create` / `/routes/remove`
   with the `x-oorp-client: web` header.
 - Styling: inherit the host theme (`var(--dsw-alias-*)` tokens, `var(--dsw-font-*)`). No global CSS

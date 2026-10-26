@@ -19,7 +19,7 @@ upstream. Because it only uses schema fields the profile already has, it survive
       ▼
   dsh-llm-pi-ai ──►  dsh-openrouter-plus relay  ──►  https://openrouter.ai/api/v1
                           │ injects {"service_tier":"flex"}
-                          └── /__openrouter-plus/status ──► Models-page card
+                          └── /__openrouter-plus/status ──► OpenRouter Plus settings page
 ```
 
 ## What you get
@@ -27,10 +27,10 @@ upstream. Because it only uses schema fields the profile already has, it survive
 - **Tier mounts** — `/flex/v1`, `/priority/v1`, `/fast/v1`, `/ultrafast/v1`, `/scale/v1`,
   `/auto/v1`, `/default/v1`, plus a `/v1` passthrough that sends no tier at all. Each mount is a
   `baseURL` you can paste into any OpenAI-compatible provider route.
-- **A Models-page card** (Settings → Models → below the provider rows) showing relay state, every
-  mount with a copy button, live request/token counters per tier, the weighted cost multiplier, and
-  recent requests.
-- **One-click provider routes** — the card creates a real `llm-pi-ai` route (a clone of an existing
+- **Its own settings page** (Settings → OpenRouter Plus) showing relay state, every mount with a
+  copy button, live request/token counters per tier, the weighted cost multiplier, and recent
+  requests.
+- **One-click provider routes** — the page creates a real `llm-pi-ai` route (a clone of an existing
   one, with `baseURL` pointed at a tier mount) so it appears in the model picker like any other
   provider, and removes it again. Routes the plugin did not create are never touched.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
@@ -44,19 +44,19 @@ dsh plugin add ./dsh-openrouter-plus     # or, from a session:
 #   plugin_manager { action: install_bundle, target: "./dsh-openrouter-plus" }
 ```
 
-Then open **Settings → Models**. The card appears at the bottom of the provider list. If the relay
-is up, it shows the origin (`http://127.0.0.1:8791`) and its mounts.
+The plugin adds one entry to Settings navigation: **OpenRouter Plus**, directly after *Models*. If
+the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mounts.
 
 ## Use it
 
-### Through the Models card (recommended)
+### Through the settings page (recommended)
 
 1. Pick a source route (for example `openrouter-custom`) and a tier (`flex`).
-2. Press **Create route**. The card writes a new provider route named `<source>-<tier>` whose
+2. Press **Create route**. The page writes a new provider route named `<source>-<tier>` whose
    `baseURL` is `http://127.0.0.1:8791/<tier>/v1` and whose models are cloned from the source.
 3. Choose one of that route's models in the model picker. Every request it makes now carries
    `service_tier: "<tier>"`.
-4. **Remove** the route from the same card when you are done. Its deletion is safe and leaves your
+4. **Remove** the route from the same page when you are done. Its deletion is safe and leaves your
    original route untouched.
 
 ### By hand
@@ -99,7 +99,7 @@ The plugin fills that gap when it creates a route, from the best evidence availa
 
 Set `reasoningEfforts: false` to switch filling off, or omit it to fill only from evidence 1–2.
 Routes it already created — or ones you hand-edited — are fixed by **Add reasoning to N models** in
-the card, which is also available as `POST /__openrouter-plus/routes/repair`. It only ever touches
+the settings page, which is also available as `POST /__openrouter-plus/routes/repair`. It only ever touches
 routes whose `baseURL` points at the relay, never overwrites a declared map, and writes nothing when
 there is nothing to do.
 
@@ -131,7 +131,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `enabled` | `true` | `false` keeps the plugin installed but binds nothing |
 | `host` | `127.0.0.1` | bind address — loopback only, deliberately |
 | `port` | `8791` | preferred port |
-| `portFallback` | `true` | fall forward to the next free port (the card probes 8791–8794) |
+| `portFallback` | `true` | fall forward to the next free port (the page probes 8791–8794) |
 | `upstream` | `https://openrouter.ai/api/v1` | where requests are forwarded, no trailing slash |
 | `routes` | tier mounts | mount path → tier; `null` tier is a pure passthrough |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
@@ -150,10 +150,10 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | Symptom | Cause and fix |
 | --- | --- |
 | Card says *relay offline* | The port range is busy, or the row is `enabled: false`. Check the Host log for `[openrouter-plus]`; set a fixed `port`. |
-| A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route in Settings → Models. |
+| A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
 | Requests work but no tier is applied | The route's mount has a `null` tier (`/v1`), or the request is not `POST` with a JSON body. |
 | `flex` still bills full price | The provider decides the served tier; a pinned tier only *requests* it. Confirm with `usage` / the OpenRouter dashboard. |
-| No effort selector for a relay route's model | The model has no `reasoningEfforts`. Press **Add reasoning to N models** in the card, or add the field in Models settings — see "Reasoning effort on a relay route". |
+| No effort selector for a relay route's model | The model has no `reasoningEfforts`. Press **Add reasoning to N models** on the OpenRouter Plus page, or add the field in Models settings — see "Reasoning effort on a relay route". |
 
 ## Uninstall
 
