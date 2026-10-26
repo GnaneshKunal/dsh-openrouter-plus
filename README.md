@@ -1,5 +1,8 @@
 # dsh-openrouter-plus
 
+[![npm](https://img.shields.io/npm/v/dsh-openrouter-plus.svg)](https://www.npmjs.com/package/dsh-openrouter-plus)
+[![license](https://img.shields.io/npm/l/dsh-openrouter-plus.svg)](LICENSE)
+
 **Service-tier routing for OpenRouter — as a DeepSeek Harness plugin, with no patched packages.**
 
 OpenRouter lets you steer where a request is served from: `flex` endpoints bill half price on a
@@ -66,8 +69,8 @@ one you actually boot (`web` for `dsh web`, `default` for a bare `dsh`). Without
 with `required option '--profile <name>' not specified`.
 
 ```bash
-dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus          # latest main
-dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus#v0.1.0   # a tag, once tagged
+dsh plugin --profile web add dsh-openrouter-plus                              # from npm
+dsh plugin --profile web add github:GnaneshKunal/dsh-openrouter-plus#v0.1.0   # or a pinned tag
 ```
 
 From a clone, which is what development uses:
@@ -99,8 +102,8 @@ The job refuses a tag that disagrees with `package.json`, runs the suite, publis
 opens the GitHub Release with the matching `CHANGELOG.md` section as its notes. It fails rather
 than skipping when npm already has that version: a release is a new version, never a re-upload.
 
-npm needs the package to exist before it can trust a publisher, so the first version goes up by
-hand, once, from a logged-in machine:
+npm needs the package to exist before it can trust a publisher, so `0.1.0` went up by hand, once,
+from a logged-in machine:
 
 ```bash
 npm login
@@ -109,7 +112,7 @@ npm trust github dsh-openrouter-plus --file release.yml \
   --repo GnaneshKunal/dsh-openrouter-plus --env release --allow-publish
 ```
 
-After that the tag does everything: the workflow run's OIDC identity is accepted, npm attaches a
+Every version after it is a tag, and nothing else. The tag does everything: the workflow run's OIDC identity is accepted, npm attaches a
 provenance attestation linking the tarball to the commit and run that built it, and no
 `NPM_TOKEN` exists in the repository. `npm trust list dsh-openrouter-plus` shows the grant.
 
