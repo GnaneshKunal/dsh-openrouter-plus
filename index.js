@@ -15,6 +15,7 @@ import { createMetrics } from './lib/metrics.js'
 import { createRelay } from './lib/proxy.js'
 import { createConfigBridge } from './lib/config-bridge.js'
 import { normalizeReasoningEfforts } from './lib/reasoning.js'
+import { createAutoRepair } from './lib/auto-repair.js'
 
 /** Must match the string client.js probes and the docs advertise. */
 const CONTROL_PREFIX = '/__openrouter-plus'
@@ -35,7 +36,7 @@ const DEFAULT_UPSTREAM = 'https://openrouter.ai/api/v1'
 /** Tier names the OpenAI-compatible protocols accept, per discussion #9787. */
 const KNOWN_TIERS = ['auto', 'default', 'flex', 'scale', 'priority', 'fast', 'ultrafast']
 
-const VERSION = '0.3.0'
+const VERSION = '0.4.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -47,6 +48,7 @@ const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/
  * @returns {{
  *   enabled: boolean, host: string, port: number, portFallback: boolean,
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
+ *   autoRepairReasoning: boolean,
  * }}
  */
 export function normalizeConfig(raw) {
@@ -67,6 +69,10 @@ export function normalizeConfig(raw) {
     // `false` never fills, absent/`null` fills only from evidence found in the
     // profile, a map is the blanket fallback for models with no evidence.
     reasoningEfforts: normalizeReasoningEfforts(config.reasoningEfforts),
+    // Re-fill after any profile edit: the Models page's model picker rebuilds a
+    // picked row from its catalog and drops `reasoningEfforts` on the way, which
+    // is exactly how a working effort selector disappears.
+    autoRepairReasoning: config.autoRepairReasoning !== false,
   }
 }
 
@@ -311,6 +317,21 @@ export function apply(ctx, rawConfig) {
     reasoningEfforts: config.reasoningEfforts,
   })
 
+  // The effort selector disappears the moment a model is re-picked in Settings →
+  // Models, and that edit happens on another page; so the capability is restored
+  // without being asked. Every pass is idempotent — with nothing missing it writes
+  // nothing — which is what makes it safe to run on every config settle.
+  const autoRepair = createAutoRepair({
+    repair: async () => {
+      // No editor, no writes: a Host without one would otherwise log the same
+      // failure on every config settle.
+      if (!bridge.available()) return { patched: [] }
+      return outsideHmrTransaction(ctx, () => bridge.repairRoutes())
+    },
+    onPatched: (repaired) => log('info', 'restored reasoning capability on provider routes', repaired.patched),
+    onError: (error) => log('warn', 'automatic reasoning repair failed', error),
+  })
+
   const control = {
     [`${CONTROL_PREFIX}/health`]: controlRoute((req, res) => {
       if (!requireMethod(req, res, 'GET')) return
@@ -429,6 +450,23 @@ export function apply(ctx, rawConfig) {
         return { host: config.host, port: config.port, origin: originOf(config.host, config.port) }
       })
 
+    // Three settle signals, one debounced pass: a profile write reloads the
+    // patches, the settings snapshot moves when a config revision lands, and
+    // adding or removing a route changes the adapter topology. Repair is
+    // idempotent, so overlapping reasons cost nothing.
+    /** @type {Array<(() => void) | undefined>} */
+    const unwatch = []
+    if (config.autoRepairReasoning) {
+      unwatch.push(
+        ctx.on('settings/document-updated', () => autoRepair.schedule()),
+        ctx.on('app-boot/config-reload', () => autoRepair.schedule()),
+        ctx.on('llm/adapters-updated', () => autoRepair.schedule()),
+      )
+      // A profile that already lost its capability is fixed at startup rather
+      // than waiting for the owner's next edit.
+      void started.then(() => autoRepair.flush()).catch(() => {})
+    }
+
     // Warn about routes that only work while this plugin runs, so the owner sees
     // it before disabling the plugin breaks their default model.
     void started
@@ -448,6 +486,8 @@ export function apply(ctx, rawConfig) {
 
     return () => {
       disposed = true
+      for (const off of unwatch) off?.()
+      autoRepair.dispose()
       void relay.stop().catch((error) => log('warn', 'relay stop failed', error))
     }
   })

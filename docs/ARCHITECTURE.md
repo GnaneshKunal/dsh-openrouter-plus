@@ -42,6 +42,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/proxy.js` | relay-core | `createRelay(options) -> { start, stop, address, routes }` |
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
+| `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, createRoute, removeRoute, repairRoutes, listRoutes }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus". |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
@@ -204,7 +205,20 @@ Rules:
   effort levels." `planCreate` therefore runs `lib/reasoning.js` over the clone, and `planRepair`
   runs it over every owned route; both keep a declared map byte-identical, prefer a sibling
   variant's declaration over the configured fallback, and report the rest as `unresolved` instead of
-  guessing. Filling is opt-out (`reasoningEfforts: false`).
+  guessing. Filling is opt-out (`reasoningEfforts: false`), and an opted-out model is never filled:
+  `lib/reasoning.js` tests `false` before it tests for a usable map, so the deliberate "no levels"
+  answer survives both `planCreate` and `planRepair`.
+- **The capability is re-applied after edits, not just at creation.** One shipped editor destroys it:
+  `adopt()` in `@deepseek-ai/dsh-client-ui-settings-models` rebuilds a model picked from the catalog
+  as `{ id, name, contextWindow, maxTokens, input }`, so re-selecting models on a relay route strips
+  `reasoningEfforts` — and with it the composer's effort selector — while looking like an ordinary
+  edit. `lib/auto-repair.js` schedules an idempotent `planRepair` pass on every config settle:
+  `settings/document-updated` (a config revision landed), `app-boot/config-reload` (profile patches
+  were reconciled — the path a Models write takes) and `llm/adapters-updated` (route topology moved),
+  debounced so a burst writes once, serialised so two passes never overlap, with one queued pass for
+  a change that lands mid-pass. Nothing is written when nothing is missing, which is also why the
+  repair's own write cannot start a loop: the second pass finds no gaps and stops. Disabled with
+  `autoRepairReasoning: false`; the manual `POST /routes/repair` stays for "do it now".
 
 ## `client.js`
 

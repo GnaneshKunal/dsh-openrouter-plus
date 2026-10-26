@@ -7,6 +7,7 @@ import {
   isUsableReasoningEfforts as isReasoningEfforts,
   modelsMissingReasoning,
   normalizeReasoningEfforts,
+  optedOutOfReasoning,
   resolveReasoningFor,
   splitModelId,
   fillReasoning,
@@ -187,4 +188,38 @@ test('modelsMissingReasoning lists exactly the models the composer cannot offer 
 
 test('the five levels pi-ai accepts are the ones this module writes', () => {
   assert.deepEqual(REASONING_LEVELS, ['off', 'low', 'medium', 'high', 'max'])
+})
+
+
+// ---------------------------------------------------------------------------
+// an explicit opt-out is not a gap
+// ---------------------------------------------------------------------------
+
+test('reasoningEfforts: false is an opt-out, not a missing capability', () => {
+  const route = {
+    models: [
+      { id: 'qwen/qwen-image-3-pro', reasoningEfforts: false },
+      { id: 'deepseek/deepseek-v4-flash-0731' },
+    ],
+  }
+  assert.equal(optedOutOfReasoning(route.models[0]), true)
+  assert.equal(optedOutOfReasoning(route.models[1]), false)
+  // Only the undeclared model counts as missing.
+  assert.deepEqual(modelsMissingReasoning(route), ['deepseek/deepseek-v4-flash-0731'])
+})
+
+test('fillReasoning never rewrites an explicit opt-out', () => {
+  const route = {
+    models: [
+      { id: 'qwen/qwen-image-3-pro', reasoningEfforts: false },
+      { id: 'x-ai/grok-imagine-image-2.0', reasoningEfforts: false },
+      { id: 'deepseek/deepseek-v4-flash-0731' },
+    ],
+  }
+  const fallback = { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }
+  const filled = fillReasoning(route, { evidence: collectReasoningEvidence({}), fallback })
+  assert.deepEqual(filled.filled, [{ id: 'deepseek/deepseek-v4-flash-0731', from: 'default' }])
+  assert.deepEqual(filled.unresolved, [])
+  // The opt-out rows survive byte-identical.
+  assert.deepEqual(filled.route.models.slice(0, 2), route.models.slice(0, 2))
 })

@@ -98,10 +98,20 @@ The plugin fills that gap when it creates a route, from the best evidence availa
 3. the configured `reasoningEfforts` map, as a fallback for everything else.
 
 Set `reasoningEfforts: false` to switch filling off, or omit it to fill only from evidence 1–2.
-Routes it already created — or ones you hand-edited — are fixed by **Add reasoning to N models** in
-the settings page, which is also available as `POST /__openrouter-plus/routes/repair`. It only ever touches
-routes whose `baseURL` points at the relay, never overwrites a declared map, and writes nothing when
-there is nothing to do.
+A model that declares `reasoningEfforts: false` is itself opted out: the fill leaves it alone.
+
+**The fill also re-applies itself.** Re-picking a model in Settings → Models rebuilds that row from
+the catalog — `id`, `name`, context window, max tokens — and drops `reasoningEfforts` along with
+every other hand-declared field. That is the shape of this bug: the effort selector works, you touch
+the model list afterwards, and it is gone. The cause is upstream rather than here (`adopt()` in
+`@deepseek-ai/dsh-client-ui-settings-models` copies a fixed field list), so the plugin watches the
+profile instead: a debounced pass runs on every config settle and restores the capability a moment
+after the edit lands. Set `autoRepairReasoning: false` to keep the plugin out of your config
+entirely, and use **Add reasoning to N models** in the settings page (or
+`POST /__openrouter-plus/routes/repair`) when you want the fill on demand.
+
+Either way it only ever touches routes whose `baseURL` points at the relay, never overwrites a
+declared map, never resurrects an explicit `false`, and writes nothing when there is nothing to do.
 
 ## Control API
 
@@ -136,6 +146,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `routes` | tier mounts | mount path → tier; `null` tier is a pure passthrough |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
 | `reasoningEfforts` | `false`-able map | levels written onto created routes' models; `false` disables, omit for evidence-only |
+| `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
 
 ## Security model
 
@@ -153,7 +164,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
 | Requests work but no tier is applied | The route's mount has a `null` tier (`/v1`), or the request is not `POST` with a JSON body. |
 | `flex` still bills full price | The provider decides the served tier; a pinned tier only *requests* it. Confirm with `usage` / the OpenRouter dashboard. |
-| No effort selector for a relay route's model | The model has no `reasoningEfforts`. Press **Add reasoning to N models** on the OpenRouter Plus page, or add the field in Models settings — see "Reasoning effort on a relay route". |
+| No effort selector for a relay route's model | The model has no `reasoningEfforts` — usually because the model list was edited in Settings → Models afterwards. It is restored automatically; if `autoRepairReasoning` is off, press **Add reasoning to N models** on the OpenRouter Plus page. See "Reasoning effort on a relay route". |
 
 ## Uninstall
 

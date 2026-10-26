@@ -56,5 +56,14 @@
           high: high
           max: max
 
+        # Re-apply that fill whenever the profile changes. The Models page's model
+        # picker rebuilds a picked model row from its catalog — id, name, context
+        # window, max tokens — so re-selecting a model there silently drops the
+        # `reasoningEfforts` above and the effort selector disappears. With this on,
+        # the capability is restored a moment after the edit lands. The pass is
+        # idempotent: with nothing missing it writes nothing, so it cannot fight a
+        # deliberate `reasoningEfforts: false` or a hand-written map.
+        autoRepairReasoning: true
+
         # 0 disables the upstream timeout, which is what long SSE completions need.
         upstreamTimeoutMs: 0
