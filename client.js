@@ -201,7 +201,7 @@ window.__ModuleLoader__.load({
       'strip.tierAria': 'Service tier for {name}',
       'strip.applying': 'Routing\u2026',
       'strip.detaching': 'Restoring\u2026',
-      'strip.tierHint': 'Tiers only apply to endpoints that accept an OpenAI-style service_tier (OpenRouter itself, and some compatible gateways).',
+      'strip.tierHint': 'Presets only apply to endpoints that accept OpenAI-style routing fields (OpenRouter itself, and some compatible gateways).',
       'strip.routedHint': 'Requests from this provider go through the relay. The service tier is chosen per session from the composer chip.',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
 
@@ -337,7 +337,7 @@ window.__ModuleLoader__.load({
       'strip.tierAria': '{name} 的服务等级',
       'strip.applying': '正在转发\u2026',
       'strip.detaching': '正在恢复\u2026',
-      'strip.tierHint': '服务等级只对接受 OpenAI service_tier 的端点生效（如 OpenRouter 本身及部分兼容网关）。',
+      'strip.tierHint': '预设只对接受 OpenAI 风格路由字段的端点生效（如 OpenRouter 本身及部分兼容网关）。',
       'strip.routedHint': '该提供商已通过中继转发。服务等级在输入框的等级按钮里按会话选择。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
 
@@ -2978,9 +2978,9 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The composer's tier chip. It re-tiers the *Session*, not the provider row: the relay
-     * writes `service_tier` into the request body on the way out, so switching is a runtime
-     * choice like `reasoningEffort` and never mints a provider route per tier. This chip
+     * The composer's preset chip. It changes the *Session*, not the provider row: the relay
+     * applies the preset to the request body on the way out, so switching is a runtime choice
+     * like `reasoningEffort` and never mints a provider route per preset. This chip
      * talks to the Host's `/tier` API and nothing else; it writes no provider
      * configuration, never touches the settings draft, and renders nothing unless the
      * Session runs on a row mounted from one of our targets.
