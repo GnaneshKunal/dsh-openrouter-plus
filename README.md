@@ -99,6 +99,12 @@ The composer chip, which switches the preset for one Session without touching an
 
 ![Composer chip showing a per-session preset next to the model selector](docs/images/composer-chip.jpg)
 
+The provider row also carries **Sync live models…**: it lists what that row's endpoint publishes
+right now, ticked where the route already has the model, so you can add a model or untick one
+without touching anything else. Hand-written entries are never rewritten.
+
+![The live model picker on a provider row: a filter box, one checkbox per model, and the add/remove count](docs/images/sync-live-models.jpg)
+
 ## Install
 
 `--profile` is not optional — `dsh plugin` manages the plugins of one named profile, so pass the

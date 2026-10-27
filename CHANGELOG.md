@@ -7,7 +7,9 @@ the config keys can still change.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- README: a screenshot of the live-model picker, which the 0.2.0 notes shipped without.
 
 ## [0.2.0] — 2026-10-27
 
