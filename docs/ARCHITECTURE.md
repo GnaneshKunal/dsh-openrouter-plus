@@ -20,9 +20,14 @@ composer/model picker
       │  baseURL = http://127.0.0.1:8791/t/<id>/v1
       ▼
 dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.ai/api/v1
-                        │ applies that session's preset to the JSON body
-                        │   service_tier / provider.sort / model suffix
-                        └ /__openrouter-plus/status ──► OpenRouter Plus page (client.js)
+      │                 │ applies that session's preset to the body
+      │                 │   service_tier / provider.sort / model variant
+      │                 └ (loopback only — nothing in a browser ever dials it)
+      │
+      └── the page talks in-band, on the GUI's own origin:
+          browser ──► dsh web server :3080 /__openrouter-plus/status
+                              │ ctx.webServer.register + ctx.connection fence
+                              └─ same handlers, same process
 ```
 
 ## Runtime facts this design relies on
@@ -58,9 +63,14 @@ Plain ESM JavaScript, **no build step, no third-party runtime dependencies** (No
 only: `node:http`, `node:stream`, `node:url`, `node:util`, `node:crypto`). Every file must pass
 `node --check`.
 
-## Control endpoints (served by the relay listener, loopback only)
+## Control endpoints (served on the GUI origin, plus a loopback copy)
 
 All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
+
+One handler table, two mounts: `ctx.webServer` at `kind: 'prefix'` (the page's path, behind
+`ctx.connection.requestRejection`) and the relay listener (loopback, unauthenticated, for `curl` and
+for a composition with no web server). The table is keyed by full path, so mounting it twice is a
+dispatch call, not a second implementation.
 
 | Method + path | Body | Response |
 | --- | --- | --- |
@@ -348,15 +358,23 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   `tier.tiers` — a missing key degrades a picker to the built-in preset list instead of throwing the
   page out of its boundary. `__test` on the module object exports those readers for
   `test/client.test.mjs`; the loader ignores it.
-- The page polls `${origin}/__openrouter-plus/status` every 3 s (and once on mount; clear the timer
-  on unmount), renders connection state, one pinned base URL per preset (`pinnedMounts()`, which
+- The page polls `/__openrouter-plus/status` **on its own origin** every 3 s (and once on mount;
+  clear the timer on unmount), renders connection state, one pinned base URL per preset
+  (`pinnedMounts()`, which
   folds `/auto/v1`, `/fast/v1` and `/scale/v1` onto the mount that means the same thing) with copy
   buttons, live counters, and a
   "routes on this relay" block that reads `/targets`, sets the profile **Service tier for new
   sessions** (`POST /tier/default`) together with a short table of what each preset sends, and posts
   `/routes/remove` — all with the `x-oorp-client: web` header. The per-Session control is the
-  composer chip, not this page. The split is deliberate: the picker carries labels only, and the
-  explanations live where they can be read once.
+  composer chip, not this page. The split is deliberate: the picker is a preset switch, the page
+  explains what each pin does.
+- **Why the API is not on the relay.** The relay listens on loopback because it is an upstream
+  proxy that forwards the caller's key, and only the Host dials it. The page is a different client:
+  it runs wherever the user opened the GUI, so it addresses `/__openrouter-plus/*` relatively and
+  the Host mounts those routes on `ctx.webServer` (`kind: 'prefix'`), behind
+  `ctx.connection.requestRejection`. Same origin in, no CORS, no port to guess, and a phone on the
+  tailnet reaches it the same way the desktop does. A composition without a web server never mounts
+  the route, and the relay's copy remains for `curl`.
 - Styling: inherit the host theme (`var(--dsw-alias-*)` tokens, `var(--dsw-font-*)`). No global CSS
   file, no `document.body` mutation, no reading other plugins' DOM.
 - Every user-visible string goes through the locale namespace.

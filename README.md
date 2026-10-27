@@ -345,12 +345,19 @@ provider itself.
 
 ## Control API
 
-Served on the same loopback listener, outside the proxy path space:
+Served on the **DSH web server's own origin**, under `/__openrouter-plus`, outside the relay's
+proxy path space. That is deliberate: the settings page, the Models-row switch and the composer chip
+all talk to it, and a page must be able to reach the API it was served from. Mounting it next to the
+GUI means no second port, no CORS, and no difference between a desktop tab and a phone on the
+tailnet — anywhere the GUI loads, the control API answers.
+
+The relay listener keeps the same endpoints on loopback. It is the `curl`/script path and the
+fallback for a composition with no web GUI; the browser half never uses it.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
-| `GET /__openrouter-plus/status` | address, upstream, mounts, metrics |
+| `GET /__openrouter-plus/status` | address, `bound`/`port`, upstream, mounts, metrics |
 | `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
@@ -376,9 +383,17 @@ Everything in `/tier` is deliberately write-free: a config write would re-apply 
 restart the listener, which is not something a mid-conversation click should risk. Only
 `/tier/default` writes, because it is a preference rather than one Session's state.
 
-`POST` requires `x-oorp-client: web`. CORS is reflected only for loopback GUI origins.
+On the web origin the API is behind the GUI's own fence (`ctx.connection.requestRejection`): the
+Host/Origin trust check plus the `dsh-auth-*` session cookie, so a page served from another origin
+cannot read the telemetry or drive a write. A request with a loopback `Host` and no `Origin` is a
+local process — `curl`, a script — and is allowed through as before, which is also why the command
+below works without a cookie. `POST` additionally requires `x-oorp-client: web`, and the loopback
+copy of the API reflects CORS only for loopback GUI origins.
 
 ```bash
+# Control API on the GUI origin (same answer, no extra port):
+curl -s http://127.0.0.1:3080/__openrouter-plus/status | jq .metrics.byTier
+# The relay's loopback copy still answers too:
 curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 ```
 
@@ -404,6 +419,11 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 
 - **Loopback only.** The relay forwards the caller's `Authorization` verbatim and stores no key.
   Do not bind a routable interface.
+- **The control API rides the GUI's origin and fence.** It is mounted on the DSH web server, so it
+  is reachable exactly where the GUI is and nowhere else, and every browser request passes the same
+  Host/Origin check and session cookie the GUI's own API uses. Only a loopback request with no
+  `Origin` — a local process — is exempt, and that is the privilege it already had on the relay
+  listener.
 - **Read-only telemetry.** The status API exposes counts and token sums, never prompts or keys.
 - **Reversible by construction.** The plugin only ever adds a provider route whose `baseURL` points
   at its own origin, and only removes routes that pass that same test. The switch is the same idea
@@ -414,7 +434,9 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Card says *relay offline* | The port range is busy, or the row is `enabled: false`. Check the Host log for `[openrouter-plus]`; set a fixed `port`. |
+| Card says *OpenRouter Plus is not answering* | The Host row is not loaded, or the request was refused by the GUI's fence. Check the Host log for `[openrouter-plus]`; reload the page after a Host update. |
+| The relay is down but the page still answers | That is the split working: the control API reports `bound: false` plus the bind error from `/status`, instead of looking like a dead plugin. Check the port range or `enabled: false`; set a fixed `port`. |
+| Settings → OpenRouter Plus works on the desktop but not on another machine or a phone | Should not happen any more: the page calls its own origin. If it does, the Host is too old to mount the API on the web server — update it, or reach the loopback copy on the relay port. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
 | Requests work but nothing is steered | The Session is on **No pin** (or the profile default is), the mount is a bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
 | The chip shows a preset, but another Session still bills full price | Every preset is per Session by design. Set it in that Session's composer, or set a profile **Service tier for new sessions**. |

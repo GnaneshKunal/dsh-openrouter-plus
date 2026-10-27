@@ -8,8 +8,13 @@
  * `service_tier`, `provider.sort`, or the `:floor` model suffix. See
  * docs/ARCHITECTURE.md and deepseek-harness discussion #9787.
  *
- * Nothing is mounted on the DSH web server, so the GUI's auth fence and this
- * plugin cannot interfere with each other.
+ * Two listeners, two jobs. The relay is a loopback HTTP origin because pi-ai
+ * dials it from this process and it forwards the caller's Authorization verbatim;
+ * it is never reachable from a browser on another machine, by design. The control
+ * API is different: it has to be reachable from wherever the page is, so the Host
+ * mounts it on the DSH web server's own origin (see `controlOnWeb`) and the relay
+ * keeps a copy only for `curl` and for compositions with no web GUI. That split is
+ * what makes Settings → OpenRouter Plus work behind Tailscale.
  */
 import { createMetrics } from './lib/metrics.js'
 import { createRelay } from './lib/proxy.js'
@@ -97,12 +102,15 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.2.0'
+const VERSION = '0.2.1'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
 
 const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/
+
+/** A Host header naming this machine; only the local-process exemption reads it. */
+const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
 
 /**
  * @param {Record<string, unknown>} [raw] the Loader row config
@@ -495,6 +503,46 @@ function requireMethod(req, res, method) {
   if (req.method === method) return true
   sendJson(res, 405, { error: { message: `use ${method}` } })
   return false
+}
+
+/**
+ * Whether the request arrived over loopback, judged from its Host header.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {boolean}
+ */
+function isLoopbackRequest(req) {
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return false
+  const close = host.startsWith('[') ? host.indexOf(']') + 1 : host.indexOf(':')
+  const name = close > 0 ? host.slice(0, close) : host
+  return LOOPBACK_HOST.test(name)
+}
+
+/**
+ * The fence in front of the control API when it is mounted on the web server.
+ *
+ * Anything carrying an `Origin` is a browser page and must pass the same admission
+ * the DSH GUI's own API uses, so a foreign page cannot read this relay's telemetry
+ * or drive a config write. A request with a loopback Host and no `Origin` is a local
+ * process (`curl`, a script, the troubleshooting row in the README); that is the
+ * privilege it already had on the relay listener, so it is allowed through
+ * unauthenticated. Browsers always send `Origin` on a cross-origin request, and the
+ * fence refuses a mismatched one before this exemption is ever consulted.
+ *
+ * @param {unknown} connection the `ctx.connection` service, when one is mounted
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {number|null} the status to answer with, or null to proceed
+ */
+function controlRejection(connection, req) {
+  const service = /** @type {{ requestRejection?: (request: import('node:http').IncomingMessage) => unknown }|undefined} */ (
+    connection
+  )
+  if (service === undefined || service === null || typeof service.requestRejection !== 'function') return null
+  const rejection = service.requestRejection(req)
+  if (typeof rejection !== 'number') return null
+  if (rejection === 401 && req.headers.origin === undefined && isLoopbackRequest(req)) return null
+  return rejection
 }
 
 /**
@@ -960,11 +1008,21 @@ export function apply(ctx, rawConfig) {
 
     [`${CONTROL_PREFIX}/status`]: controlRoute((req, res) => {
       if (!requireMethod(req, res, 'GET')) return
+      const bound = relay.address()
+      const address = bound ?? {
+        host: config.host,
+        port: config.port,
+        origin: originOf(config.host, config.port),
+      }
       sendJson(res, 200, {
         ok: state.error === undefined,
         version: VERSION,
         controlPrefix: CONTROL_PREFIX,
-        address: relay.address() ?? { host: config.host, port: config.port, origin: originOf(config.host, config.port) },
+        address,
+        // Whether the relay actually owns a socket, which is the one fact a browser
+        // can not infer: this answer can arrive while the relay failed to bind.
+        bound: bound !== undefined,
+        port: address.port,
         upstream: config.upstream,
         routes: config.routes,
         tiers: [...new Set(Object.values(config.routes).filter((tier) => tier !== null))],
@@ -1371,6 +1429,85 @@ export function apply(ctx, rawConfig) {
         target: { id, upstream: target.upstream, tier: target.tier },
       })
     }),
+  }
+
+  /**
+   * Dispatch one control request by exact pathname.
+   *
+   * The table is keyed by the full path, so the same table serves both listeners:
+   * the web server's prefix route and the relay's debug copy.
+   *
+   * @param {import('node:http').IncomingMessage} req
+   * @param {import('node:http').ServerResponse} res
+   */
+  const serveControl = (req, res) => {
+    let pathname
+    try {
+      pathname = new URL(req.url ?? '/', 'http://control.invalid').pathname
+    } catch {
+      pathname = ''
+    }
+    const handler = control[pathname]
+    if (handler === undefined) {
+      sendJson(res, 404, { error: { message: `unknown control endpoint ${pathname}` } })
+      return undefined
+    }
+    return handler(req, res)
+  }
+
+  /**
+   * The web-server face of the control API: same handlers, on the page's own
+   * origin, behind the GUI's own Host/Origin fence.
+   *
+   * @param {import('node:http').IncomingMessage} req
+   * @param {import('node:http').ServerResponse} res
+   */
+  const controlOnWeb = (req, res) => {
+    const rejection = controlRejection(controlConnection(), req)
+    if (rejection !== null) {
+      sendJson(res, rejection, {
+        error: {
+          message:
+            rejection === 401
+              ? 'this page is not authenticated for the control API'
+              : 'refused by the Host origin fence',
+        },
+      })
+      return
+    }
+    void serveControl(req, res)
+  }
+
+  /**
+   * The live `connection` service, read per request: the route outlives a Host
+   * reload, so the fence must follow the service rather than capture it.
+   *
+   * @returns {unknown}
+   */
+  function controlConnection() {
+    return typeof ctx.get === 'function' ? ctx.get('connection') : undefined
+  }
+
+  /*
+   * Mount the control API on the web server's own origin. The page calling it is
+   * then same-origin with the API, so there is no second port to reach, no CORS and
+   * no "can this device reach 127.0.0.1" question: behind Tailscale, on another
+   * machine, anywhere the GUI itself is reachable, the control API is too.
+   *
+   * `inject` rather than a plain read: a composition without a web server (a
+   * headless Host, the TUI) simply never runs this, and the relay keeps the same
+   * endpoints for `curl`. `effect` owns the registration so a live patch reload
+   * unregisters before the next mount — registering the same prefix twice throws.
+   */
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (webCtx) => {
+      const webServer = webCtx.webServer ?? (typeof webCtx.get === 'function' ? webCtx.get('webServer') : undefined)
+      if (webServer === undefined || webServer === null || typeof webServer.register !== 'function') return
+      ctx.effect(() =>
+        webServer.register({ kind: 'prefix', path: CONTROL_PREFIX, handler: controlOnWeb }),
+      )
+      log('info', `control API mounted on the web server at ${CONTROL_PREFIX}`)
+    })
   }
 
   /** @type {ReturnType<typeof createRelay>} */

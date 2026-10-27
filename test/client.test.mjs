@@ -158,3 +158,22 @@ test('one pinned row per outcome, aliases folded away', () => {
     completionTokens: 5,
   })
 })
+
+test('the control API is addressed on this page origin, never a port', () => {
+  const { controlBase, controlUrl } = module.__test
+  assert.equal(controlBase, '', 'the base is this document origin, not an absolute URL')
+  assert.equal(controlUrl('/health'), '/__openrouter-plus/health')
+  assert.equal(controlUrl('/tier?session=abc'), '/__openrouter-plus/tier?session=abc')
+  assert.equal(controlUrl(''), '/__openrouter-plus')
+})
+
+test('the browser half names no loopback address or relay port', async () => {
+  /* The failure this pins: a page served from another machine cannot resolve
+     `127.0.0.1` to the Host, so any absolute loopback URL in the bundle is a bug
+     that only shows up on a phone. */
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.equal(/127\.0\.0\.1/.test(source), false, 'no loopback literal')
+  assert.equal(/\b879[1-4]\b/.test(source), false, 'no relay port')
+  assert.equal(/localhost/.test(source), false, 'no localhost literal')
+})

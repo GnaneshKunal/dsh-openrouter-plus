@@ -33,19 +33,29 @@ window.__ModuleLoader__.load({
     const CONTROL_PREFIX = '/__openrouter-plus';
     const CLIENT_HEADER = 'web';
 
-    /** The relay prefers 8791 and falls forward to the next free port. */
-    const DEFAULT_ORIGINS = Object.freeze([
-      'http://127.0.0.1:8791',
-      'http://127.0.0.1:8792',
-      'http://127.0.0.1:8793',
-      'http://127.0.0.1:8794',
-    ]);
+    /**
+     * The control API, addressed relative to this document's own origin.
+     *
+     * The Host mounts it on the DSH web server (`ctx.webServer`), so the page and
+     * the API always share an origin: no loopback port to reach, no CORS, and no
+     * difference between a desktop tab and a phone on the tailnet. An absolute
+     * loopback URL could only ever be right on the machine that runs the relay,
+     * which is exactly the bug this base removes.
+     */
+    const CONTROL_BASE = '';
     const POLL_INTERVAL_MS = 3000;
     const STATUS_TIMEOUT_MS = 2500;
     const PROBE_TIMEOUT_MS = 900;
     const COPY_FEEDBACK_MS = 1600;
     const NOTICE_MS = 5000;
     const RECENT_LIMIT = 5;
+
+    /** One URL for every control call: the prefix, resolved against this page. */
+    function controlUrl(pathText) {
+      const suffix = String(pathText ?? '');
+      if (suffix === '') return CONTROL_PREFIX;
+      return suffix.charAt(0) === '/' ? CONTROL_PREFIX + suffix : CONTROL_PREFIX + '/' + suffix;
+    }
 
     /**
      * The adapter family whose Models rows this plugin extends. The Models page
@@ -100,14 +110,6 @@ window.__ModuleLoader__.load({
     const RECONCILE_DELAYS_MS = Object.freeze([350, 450, 550]);
     const MUTATION_TIMEOUT_MS = 6000;
 
-    const EXPECTED_ORIGIN = DEFAULT_ORIGINS[0];
-
-    /**
-     * Last origin that actually answered. Module scope by design (the factory stays
-     * side-effect free): it only saves a reconnect probe when the page remounts.
-     */
-    let rememberedOrigin = null;
-
     /* ------------------------------------------------------------------ dictionaries */
 
     /** English dictionary (key-set source of truth). */
@@ -128,13 +130,18 @@ window.__ModuleLoader__.load({
       'header.relay': 'Relay',
       'header.upstream': 'Upstream',
 
-      'offline.title': 'Relay offline',
+      /* The status pill beside the dot. These three keys were missing, so the pill
+         rendered its own key name (`status.offline`) instead of a word. */
+      'status.online': 'online',
+      'status.offline': 'not answering',
+      'status.checking': 'checking…',
+
+      'offline.title': 'OpenRouter Plus is not answering',
       'offline.reason': 'Reason: {message}',
-      'offline.expected': 'Expected origin {origin}; fallback ports {ports}.',
-      'offline.timeout': 'The relay did not answer within {seconds} s.',
+      'offline.timeout': 'The control API did not answer within {seconds} s.',
       'offline.noReason': 'no response',
       'offline.retry': 'Retry',
-      'offline.hint': 'Start DSH with the dsh-openrouter-plus plugin enabled, then retry.',
+      'offline.hint': 'The Host row is not loaded, or the request was refused. Check the Host log for [openrouter-plus].',
 
       'error.http': 'HTTP {status}',
       'error.badStatus': 'The relay returned an unexpected status payload.',
@@ -284,13 +291,16 @@ window.__ModuleLoader__.load({
       'header.relay': '中继',
       'header.upstream': '上游',
 
-      'offline.title': '中继离线',
+      'status.online': '在线',
+      'status.offline': '未响应',
+      'status.checking': '检查中…',
+
+      'offline.title': 'OpenRouter Plus 未响应',
       'offline.reason': '原因：{message}',
-      'offline.expected': '预期地址 {origin}；备用端口 {ports}。',
-      'offline.timeout': '中继在 {seconds} 秒内未响应。',
+      'offline.timeout': '控制接口在 {seconds} 秒内未响应。',
       'offline.noReason': '无响应',
       'offline.retry': '重试',
-      'offline.hint': '请确认 DSH 已启用 dsh-openrouter-plus 插件后重试。',
+      'offline.hint': 'Host 行未加载，或请求被拒绝。请查看 Host 日志中的 [openrouter-plus]。',
 
       'error.http': 'HTTP {status}',
       'error.badStatus': '中继返回了无法识别的状态数据。',
@@ -473,20 +483,6 @@ window.__ModuleLoader__.load({
         return text;
       }
     }
-
-    function portOfOrigin(value) {
-      try {
-        const parsed = new URL(value);
-        if (parsed.port !== '') return parsed.port;
-        return parsed.protocol === 'https:' ? '443' : '80';
-      } catch (error) {
-        return '';
-      }
-    }
-
-    const FALLBACK_PORTS = DEFAULT_ORIGINS.map(portOfOrigin)
-      .filter((port) => port !== '')
-      .join(', ');
 
     function joinURL(originText, pathText) {
       const base = stringValue(originText).replace(/\/+$/, '');
@@ -1636,9 +1632,8 @@ window.__ModuleLoader__.load({
     function PageBody(props) {
       const t = props.t;
 
-      const [origin, setOrigin] = React.useState(() =>
-        rememberedOrigin !== null ? rememberedOrigin : DEFAULT_ORIGINS[0],
-      );
+      /* One base, because the control API is mounted on this page's own origin. */
+      const origin = CONTROL_BASE;
       const [connection, setConnection] = React.useState('checking');
       const [snapshot, setSnapshot] = React.useState(null);
       const [statusError, setStatusError] = React.useState('');
@@ -1744,8 +1739,8 @@ window.__ModuleLoader__.load({
           }, delay);
         };
 
-        const loadStatus = async (target) => {
-          const response = await request(target + CONTROL_PREFIX + '/status', STATUS_TIMEOUT_MS, {
+        const loadStatus = async () => {
+          const response = await request(origin + controlUrl('/status'), STATUS_TIMEOUT_MS, {
             method: 'GET',
             mode: 'cors',
             cache: 'no-store',
@@ -1764,50 +1759,21 @@ window.__ModuleLoader__.load({
           return normalized;
         };
 
-        const probeOrigin = async () => {
-          for (const candidate of DEFAULT_ORIGINS) {
-            if (cancelled) return null;
-            try {
-              const response = await request(candidate + CONTROL_PREFIX + '/health', PROBE_TIMEOUT_MS, {
-                method: 'GET',
-                mode: 'cors',
-                cache: 'no-store',
-                headers: { accept: 'application/json' },
-              });
-              if (!response.ok) continue;
-              const payload = await readJson(response);
-              if (isPlainObject(payload) && payload.ok !== false) return candidate;
-            } catch (error) {
-              if (cancelled) return null;
-            }
-          }
-          return null;
-        };
-
         const tick = async () => {
           if (cancelled) return;
           try {
-            const normalized = await loadStatus(origin);
+            const normalized = await loadStatus();
             if (cancelled) return;
-            rememberedOrigin = origin;
             setSnapshot(normalized);
             setStatusError('');
             setConnection('online');
           } catch (error) {
             if (cancelled) return;
-            const reason = errorMessage(t, error);
-            const alternate = await probeOrigin();
-            if (cancelled) return;
-            if (alternate !== null && alternate !== origin) {
-              rememberedOrigin = alternate;
-              setSnapshot(null);
-              setStatusError('');
-              setConnection('checking');
-              setOrigin(alternate);
-              return;
-            }
+            /* There is no second address to try: the API shares this page's origin, so
+               a failure is the Host's — and when the Host answers with its own reason
+               (`ok: false` plus `error`) that reason is what the banner shows. */
             setSnapshot(null);
-            setStatusError(reason);
+            setStatusError(errorMessage(t, error));
             setConnection('offline');
           }
           schedule(POLL_INTERVAL_MS);
@@ -1821,7 +1787,7 @@ window.__ModuleLoader__.load({
           pollTimer = null;
           abortAll();
         };
-      }, [origin, refreshKey, t]);
+      }, [refreshKey, t]);
 
       /* Provider routes load once the relay is online and refresh after every mutation. */
       React.useEffect(() => {
@@ -2134,7 +2100,11 @@ window.__ModuleLoader__.load({
 
       /* ---------------------------------------------------------------- derived values */
 
-      const relayOrigin = snapshot !== null && snapshot.origin !== '' ? snapshot.origin : origin;
+      /* The relay's own address is the Host's business: it is where pi-ai sends
+         requests, not where this page sends them. Unknown only if the payload
+         predates the field. */
+      const relayOrigin =
+        snapshot !== null && snapshot.origin !== '' ? snapshot.origin : t('common.unknown');
       const upstreamHost = snapshot !== null ? hostOf(snapshot.upstream) : '';
       const mounts = snapshot !== null ? snapshot.mounts : [];
       const metrics = snapshot !== null ? snapshot.metrics : null;
@@ -2215,7 +2185,6 @@ window.__ModuleLoader__.load({
           statusError !== ''
             ? h('p', { style: HINT_STYLE }, t('offline.reason', { message: statusError }))
             : null,
-          h('p', { style: HINT_STYLE }, t('offline.expected', { origin: EXPECTED_ORIGIN, ports: FALLBACK_PORTS })),
           h('p', { style: HINT_STYLE }, t('offline.hint')),
           h('div', null, h(ActionButton, { label: t('offline.retry'), onClick: retryConnection })),
         );
@@ -2696,31 +2665,26 @@ window.__ModuleLoader__.load({
         }
       };
 
-      /** First documented origin that answers `/health`; `quick` keeps a retry cheap. */
-      const probe = async (preferred, quick) => {
-        const candidates = [];
-        if (typeof preferred === 'string' && preferred !== '') candidates.push(preferred);
-        const rest = quick === true ? DEFAULT_ORIGINS.slice(0, 1) : DEFAULT_ORIGINS;
-        for (const origin of rest) {
-          if (candidates.indexOf(origin) < 0) candidates.push(origin);
+      /**
+       * `/health` on the one control API this page can address. There is nothing to
+       * search: it is either on this origin or the Host row is not mounted.
+       */
+      const probe = async () => {
+        try {
+          const response = await request(controlUrl('/health'), PROBE_TIMEOUT_MS);
+          if (!response.ok) return null;
+          const payload = await readJsonSafe(response);
+          return isPlainObject(payload) && payload.ok !== false ? CONTROL_BASE : null;
+        } catch (error) {
+          return null;
         }
-        for (const origin of candidates) {
-          try {
-            const response = await request(origin + CONTROL_PREFIX + '/health', PROBE_TIMEOUT_MS);
-            if (!response.ok) continue;
-            const payload = await readJsonSafe(response);
-            if (isPlainObject(payload) && payload.ok !== false) return origin;
-          } catch (error) {
-            /* try the next documented port */
-          }
-        }
-        return null;
       };
 
       /** `/targets` when the relay is usable for this extension, else null. */
-      const readTargets = async (origin) => {
+      const readTargets = async (base) => {
         try {
-          const response = await request(origin + CONTROL_PREFIX + '/targets', STATUS_TIMEOUT_MS);
+          const prefix = typeof base === 'string' && base !== '' ? base : CONTROL_BASE;
+          const response = await request(prefix + controlUrl('/targets'), STATUS_TIMEOUT_MS);
           if (!response.ok) return null;
           const data = normalizeTargets(await readJsonSafe(response));
           if (data === null || data.available !== true) return null;
@@ -2735,7 +2699,7 @@ window.__ModuleLoader__.load({
         inflight = (async () => {
           broadcast({ status: state.data === null ? 'loading' : 'ready', origin: state.origin, data: state.data });
           try {
-            const origin = await probe(state.origin, false);
+            const origin = await probe();
             if (origin === null) {
               broadcast({ status: 'unavailable', origin: null, data: null });
               return null;
@@ -3828,6 +3792,8 @@ window.__ModuleLoader__.load({
         normalizeMounts,
         pinnedMounts,
         presetFromLegacyTier,
+        controlUrl,
+        controlBase: CONTROL_BASE,
       },
       apply(ctx) {
         /* Dictionary registration is owned by the plugin context and disposed with it. */

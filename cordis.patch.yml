@@ -1,8 +1,14 @@
 # dsh-openrouter-plus bundle patch.
 #
-# Inserts one Host row: the loopback service-tier relay. The relay owns its own
-# listener (nothing is mounted on the DSH web server), so it needs no other row
-# and cannot interfere with the GUI's auth fence.
+# Inserts one Host row: the loopback service-tier relay plus its control API.
+# The relay owns its own loopback listener, because pi-ai dials it from this
+# process and it forwards the caller's key. The control API the settings page
+# reads is NOT on that listener: it is mounted on the DSH web server
+# (`ctx.webServer`, prefix `/__openrouter-plus`), so the page calls its own
+# origin — which is what makes it work behind Tailscale. That mount runs through
+# `ctx.connection.requestRejection`, i.e. the GUI's own auth fence, and is
+# absent in a composition with no web server; the relay then keeps the same
+# endpoints for `curl`.
 #
 # Everything here is hot-reloadable (`patchReload: live` in the profile):
 # changing `port`, `upstream` or `routes` restarts the listener in place.

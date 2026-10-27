@@ -5,11 +5,87 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
-## [Unreleased]
+## [0.2.1] — 2026-10-27
+
+**The settings page, the Models-row switch and the composer chip now work anywhere the GUI loads** —
+a phone over Tailscale, a laptop on the LAN, a second browser — with no port to expose and no
+Tailscale change. Until now they worked only on the machine running DSH.
+
+### What was wrong
+
+Every control call the browser half made was an absolute `http://127.0.0.1:8791/...`, with a probe
+across 8791–8794 in case the relay had fallen forward to a free port. That address is resolved by the
+machine *rendering the page*, not by the machine running the relay. Off-desktop it therefore pointed
+at the phone's own loopback: nothing listening, immediate `ECONNREFUSED`, and the page rendered
+*relay offline*.
+
+The banner was also a lie in the other direction. Inference kept working the whole time — pi-ai dials
+the relay from the Host process, so the request path never involved the browser — which meant
+"the relay is dead" and "your browser is on another machine" produced identical screens. Only the
+telemetry and every mutation button were dark.
+
+The mistake was architectural, not a missing flag: one loopback socket was serving two audiences with
+opposite reachability requirements. The relay *must* stay on loopback (it forwards the caller's
+`Authorization` verbatim and holds no key of its own, so a routable bind would be an open proxy on the
+tailnet). The control API has to be reachable from wherever the page is. Nothing about the second
+requirement wants a socket at all.
+
+### Fixed
+
+- **The control API is mounted on the DSH web server** — `ctx.webServer`, `kind: 'prefix'`, path
+  `/__openrouter-plus` — and every browser call is now origin-relative. Same origin as the page means
+  no second port, no CORS, no port-fallback probing, and no difference between a desktop tab and a
+  phone on the tailnet. Checked against the real `@deepseek-ai/cordis` and
+  `@deepseek-ai/dsh-host-webserver` over real sockets, not a stub.
+- **It sits behind the GUI's own fence.** The mount calls `ctx.connection.requestRejection(req)`, so
+  a control request passes exactly the Host/Origin trust check and `dsh-auth-*` session cookie the
+  GUI's own API uses. A request with a loopback `Host` and no `Origin` — `curl`, a script — is
+  allowed through unauthenticated: the privilege it already had on the relay listener, and what keeps
+  the documented `curl` row working. A browser cannot omit `Origin` on a cross-origin request, so the
+  exemption is unreachable from a foreign page.
+- **`/status` reports the relay's own truth.** New `bound` and `port` fields beside `address`:
+  "the relay failed to bind" now arrives with its bind error instead of looking like a dead plugin,
+  and the "page cannot reach it" case no longer exists.
+- **A live patch reload can no longer leak the relay listener.** `relay.stop()` now awaits an
+  in-flight `start()`, so disposing while the bind is still resolving closes the socket rather than
+  leaving a stray listener behind. Found by the new mount tests, not reported.
+- **The status pill rendered its own key name.** `status.online` / `status.offline` /
+  `status.checking` were never in the dictionaries, so the pill read `status.offline` next to the dot.
+  Added in both languages: *online*, *not answering*, *checking…*.
 
 ### Changed
 
-- README: a screenshot of the live-model picker, which the 0.2.0 notes shipped without.
+- The browser half carries no loopback literal, no relay port and no origin guessing. A source-level
+  test pins that, because it is exactly the invariant the old bundle broke.
+- The offline card says *"OpenRouter Plus is not answering"* with the Host's own reason. The
+  *"Expected origin … fallback ports 8791–8794"* hint described the old topology and is gone.
+- The relay listener keeps the same control endpoints on loopback: the `curl`/script path, and the
+  fallback for a profile composition with no web server. The browser never uses it.
+- README, architecture notes and the bundle patch comment now describe the split — relay = data
+  plane, web origin = control plane — instead of promising that nothing is mounted on the web server.
+- README gains a screenshot of the live-model picker, which the 0.2.0 notes shipped without.
+
+### Notes
+
+- Needs a Host that mounts `ctx.webServer` and `ctx.connection` (any `dsh web` profile). Where the
+  composition has no web server the mount never happens, and the relay copy answers as before.
+- **The routing path is untouched.** Provider rows still carry `baseURL = http://127.0.0.1:8791/…`
+  because pi-ai dials it from the Host; no config key moved, and pinned mount URLs are unchanged.
+- Upgrading needs a `dsh web` **restart**, not just a page reload — the Host half is applied when the
+  process starts. Reloading before that restart shows *OpenRouter Plus is not answering — HTTP 404*,
+  which is the half-updated state, not a regression.
+
+### Testing
+
+- 127 tests pass (117 existing, plus 8 mount/fence tests in `test/control-web.test.mjs` and 2 client
+  invariants). `npm run check` is clean.
+- The mount tests cover: registration shape, same-origin read with a session cookie, the
+  cookie-less `curl` path, a foreign `Origin`, a cross-site `sec-fetch-site`, a trusted
+  non-loopback authority without a cookie, an unknown path (404, no proxy attempt), the write guard,
+  and re-registration after unload (the duplicate-path throw).
+- An end-to-end smoke against real cordis and the real web server answers: `200` for the page and
+  for `curl`, `403` for a foreign origin and for a cross-site request, `404` for an unknown path, and
+  the relay's loopback copy still `200`.
 
 ## [0.2.0] — 2026-10-27
 
