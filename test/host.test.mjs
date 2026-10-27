@@ -188,7 +188,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.1.1')
+  assert.equal(health.version, '0.2.0')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -605,4 +605,186 @@ test('switching a Session tier writes no config; only the default is persisted',
   assert.equal(editor.writes[2].next.defaultPreset, 'none')
 
   await dispose()
+})
+
+test('lists live models and adds only the ones the caller picks', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+
+  /* A stand-in OpenRouter: a live listing carrying two models the bundled pi-ai
+     snapshot does not describe, plus one batch endpoint that must never be offered. */
+  const upstream = http.createServer((req, res) => {
+    if (req.url !== '/v1/models') {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end('{"error":"not found"}')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      data: [
+        {
+          id: 'moonshotai/kimi-k3.1-pro',
+          name: 'MoonshotAI: Kimi K3.1 Pro',
+          context_length: 1048576,
+          architecture: { input_modalities: ['text', 'image', 'video'] },
+          top_provider: { context_length: 1048576, max_completion_tokens: 943718 },
+        },
+        {
+          id: 'openai/gpt-6.1-terra',
+          name: 'OpenAI: GPT 6.1 Terra',
+          context_length: 400000,
+          top_provider: { max_completion_tokens: 128000 },
+        },
+        { id: 'openai/gpt-6.1-terra:batch', name: 'OpenAI: GPT 6.1 Terra (batch)' },
+      ],
+    }))
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const declared = { id: 'deepseek/deepseek-v4-flash-0731', name: 'Kept exactly as written' }
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port, reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' } }),
+    piAiRow({
+      openrouter: {
+        api: 'openai-completions',
+        baseURL: `http://127.0.0.1:${upstreamPort}/v1`,
+        models: [declared],
+      },
+    }),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  // Cleanup is registered before anything can throw: a leaked listener keeps the
+  // test runner's event loop alive and turns one failed assertion into a timeout.
+  t.after(async () => {
+    await new Promise((resolve) => upstream.close(() => resolve(undefined)))
+    await dispose()
+  })
+  /* A new model has no capability by inheritance, so the profile's fallback map is
+     what gives it an effort selector; without one it stays unresolved (and that is
+     the correct behaviour, which `reasoningEfforts: false` also exercises). */
+  apply(ctx, {
+    port,
+    portFallback: false,
+    reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' },
+  })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  /* The picker's read: the whole live catalogue, marked with what the route has. */
+  const catalogue = await (await fetch(`${origin}/__openrouter-plus/models?route=openrouter`)).json()
+  assert.equal(catalogue.ok, true)
+  assert.equal(catalogue.source, 'route', 'an unrouted row answers with its own baseURL')
+  assert.equal(catalogue.live.count, 2, 'the batch endpoint is not a chat model')
+  assert.equal(catalogue.live.skipped, 1)
+  assert.deepEqual(
+    catalogue.models.map((model) => [model.id, model.inRoute]),
+    [['moonshotai/kimi-k3.1-pro', false], ['openai/gpt-6.1-terra', false]],
+  )
+  assert.equal(editor.writes.length, 0, 'reading the catalogue writes nothing')
+
+  /* An unknown route is a client error, not a 500. */
+  assert.equal((await fetch(`${origin}/__openrouter-plus/models?route=openrouter-x`)).status, 400)
+  /* The guard header is required on the write. */
+  assert.equal((await fetch(`${origin}/__openrouter-plus/models/add`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ route: 'openrouter', models: ['openai/gpt-6.1-terra'] }),
+  })).status, 403)
+  /* An empty selection is refused rather than treated as "everything". */
+  const empty = await postJson(`${origin}/__openrouter-plus/models/add`, {
+    route: 'openrouter',
+    models: [],
+  })
+  const emptyBody = await empty.json()
+  assert.equal(empty.status, 400, JSON.stringify(emptyBody))
+
+  /* Pick exactly one, and leave the other alone. */
+  const added = await postJson(`${origin}/__openrouter-plus/models/add`, {
+    route: 'openrouter',
+    models: ['openai/gpt-6.1-terra'],
+  })
+  assert.equal(added.status, 200)
+  const result = await added.json()
+  assert.equal(result.ok, true)
+  assert.equal(result.upstream, `http://127.0.0.1:${upstreamPort}/v1`)
+  assert.deepEqual(result.added, ['openai/gpt-6.1-terra'])
+  assert.equal(result.total, 2)
+
+  const row = editor.rows.find((candidate) => candidate.entry?.options?.id === 'llm-pi-ai')
+  const models = row.entry.options.config.providers.openrouter.models
+  assert.equal(models.length, 2)
+  /* The hand-written entry is byte-identical and still first: additions append. */
+  assert.deepEqual(models[0], declared)
+  assert.deepEqual(models.map((model) => model.id), ['deepseek/deepseek-v4-flash-0731', 'openai/gpt-6.1-terra'])
+  /* The route gains the protocol its new model needs: `llm-pi-ai` reads the route's
+     `api`, never the entry's, and `openrouter`'s catalog spans two protocols so no
+     shared value can be inherited. Without this the write is rejected. */
+  assert.equal(row.entry.options.config.providers.openrouter.api, 'openai-completions')
+  /* A new model also gets an effort selector, or it materialises as reasoning: false. */
+  const grown = models.find((model) => model.id === 'openai/gpt-6.1-terra')
+  assert.deepEqual(Object.keys(grown.reasoningEfforts || {}), ['off', 'low', 'medium', 'high', 'max'])
+  /* The unselected live model was not added, and no batch endpoint ever is. */
+  assert.equal(models.some((model) => model.id === 'moonshotai/kimi-k3.1-pro'), false)
+  assert.equal(models.some((model) => model.id.endsWith(':batch')), false)
+
+  /* Adding the same id again is a no-op, not a duplicate. */
+  const again = await (await postJson(`${origin}/__openrouter-plus/models/add`, {
+    route: 'openrouter',
+    models: ['openai/gpt-6.1-terra'],
+  })).json()
+  assert.deepEqual(again.added, [])
+  assert.deepEqual(again.already, ['openai/gpt-6.1-terra'])
+  assert.equal(editor.rows.find((c) => c.entry?.options?.id === 'llm-pi-ai')
+    .entry.options.config.providers.openrouter.models.length, 2)
+})
+
+
+test('an add steps out of the HMR transaction before writing', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ data: [{ id: 'a/one', name: 'A One', context_length: 1024 }] }))
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port }),
+    piAiRow({ openrouter: { baseURL: `http://127.0.0.1:${upstreamPort}/v1`, models: [] } }),
+  ])
+  /* A Loader that refuses a nested transaction: `configEditor.edit` serialises through
+     HMR, and a listener that inherited the activation async context looks nested. */
+  let exits = 0
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  const realGet = ctx.get
+  ctx.get = (name) => (name === 'hmr'
+    ? { executing: { exit: (op) => { exits += 1; return op() } } }
+    : editor !== undefined && name === 'configEditor' ? editor : realGet(name))
+
+  t.after(async () => {
+    await new Promise((resolve) => upstream.close(() => resolve(undefined)))
+    await dispose()
+  })
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const response = await postJson(`${origin}/__openrouter-plus/models/add`, {
+    route: 'openrouter',
+    models: ['a/one'],
+  })
+  assert.equal(response.status, 200)
+  assert.ok(exits > 0, 'the write left the loader transaction before editing config')
 })

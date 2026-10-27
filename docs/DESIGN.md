@@ -81,6 +81,58 @@ keep healthy. Both are visible, which is the point.
   `401`; an LLM route carrying an OpenRouter key is exactly that. A separate loopback listener keeps
   the two realms apart.
 
+## Model discovery: why the picker, and not the button
+
+The second ask has the same shape as the first. `dsh-llm-pi-ai`'s `discoverModels` answers a
+catalog-backed route from `@earendil-works/pi-ai`'s bundled snapshot:
+
+```js
+if (request.provider !== void 0) {
+  const installed = catalogModels(request.provider);
+  if (installed.size > 0) return [...installed.values()]   // ← returns, baseURL unread
+}
+```
+
+It checks the provider *name* before `baseURL`, so pointing `openrouter` at the relay does not make
+discovery live — which is exactly why the custom-provider workaround works: `openrouter-custom` is
+unknown to the catalog, so it falls through to the network.
+
+Rejected alternatives:
+
+- **A. Patch `discoverModels`.** Owned by `@deepseek-ai/dsh-llm-pi-ai`; out of reach, and the whole
+  premise of this plugin is that nothing shipped is patched.
+- **B. Replace the discovery registry entry.** `ctx.llm.discoveries` is a plain `Map`, but
+  `registerModelDiscovery` refuses the `llm-pi-ai` namespace (`DUPLICATE_DISCOVERY`) and llm-pi-ai
+  re-registers through its fiber on config change. Overriding a private field would work until the
+  day it silently stopped.
+- **C. Declare the route's `models` (chosen).** A route that declares `models` serves exactly that
+  list, ahead of the installed catalog (`resolveRouteModels`: `configured.length > 0 ? configured :
+  defaults`). Writing it is a first-class `ctx.configEditor` edit, so it needs no internal seam.
+
+### Why a picker rather than a bulk sync
+
+A bulk "adopt everything" would dump ~392 ids into the provider, including variants nobody asked
+for, and would tempt the merge to rewrite entries it should not touch. The user curating the list is
+the point: the endpoint supplies the catalogue, the user supplies the judgement.
+
+So the write takes an explicit selection:
+
+- an id already declared is reported as `already`, never duplicated;
+- an id the endpoint does not list is `unknown`, never invented;
+- existing entries keep their order and their bytes — additions append;
+- only the models just added get a capability fill.
+
+### Two details only a live run surfaced
+
+1. **The route needs an `api`.** `llm-pi-ai` resolves it as
+   `request.api ?? catalog base.api ?? shared catalog api` — an entry's own `api` is ignored.
+   `openrouter`'s catalog spans `openai-completions` and `anthropic-messages`, so the shared value is
+   undefined and adding any unknown model is rejected outright. The planner therefore sets the
+   route's `api` when it has none, which is also correct for a relay mount.
+2. **The write must leave the HMR transaction.** `configEditor.edit` serialises through the Loader,
+   and a listener created during activation inherits that async context — the same reason every other
+   route mutation here is wrapped in `outsideHmrTransaction`.
+
 ## Invariants worth protecting
 
 1. **Never invent a routing decision the caller did not choose.** The pass-through preset sends no

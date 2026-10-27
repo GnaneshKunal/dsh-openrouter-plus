@@ -49,6 +49,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
+| `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus" and the `settings.models.provider-card` row extension. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
@@ -68,6 +69,8 @@ All JSON. Path prefix is a constant `CONTROL_PREFIX = '/__openrouter-plus'`.
 | `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, reasoning: { fill, levels } }` | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
+| `GET /__openrouter-plus/models?route=&upstream=` | — | the live catalogue for one route, each model marked `inRoute` |
+| `POST /__openrouter-plus/models/add` | `{ route, upstream?, models: string[] }` | `{ added, already, unknown, total, filled, changed }` |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream, id? }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
 | `POST /__openrouter-plus/routes/detach` | `{ route, id }` | `{ ok: true, route, baseURL, changed, target: { id, upstream, tier } }` |
 | `POST /__openrouter-plus/targets/register` | `{ upstream, id? }` | `{ ok: true, created, target: { id, upstream, tier }, mount, baseURL }` |

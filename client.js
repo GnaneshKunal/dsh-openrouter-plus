@@ -210,6 +210,24 @@ window.__ModuleLoader__.load({
       'strip.tierHint': 'Presets only apply to endpoints that accept OpenAI-style routing fields (OpenRouter itself, and some compatible gateways).',
       'strip.routedHint': 'Requests from this provider go through the relay. The preset is chosen per session from the composer chip.',
       'strip.stalled': 'The relay did not confirm the change; reopen this page to retry.',
+      'sync.aria': 'Sync {name} with its live model list',
+      'sync.action': 'Sync live models\u2026',
+      'sync.reading': 'Reading models\u2026',
+      'sync.writing': 'Adding\u2026',
+      'sync.panelAria': 'Live models of {name}',
+      'sync.filter': 'Filter models',
+      'sync.legend': '{count} available \u00b7 {present} already added',
+      'sync.already': 'added',
+      'sync.willRemove': 'will be removed',
+      'sync.selected': '{added} to add \u00b7 {removed} to remove',
+      'sync.apply': 'Apply',
+      'sync.cancel': 'Cancel',
+      'sync.done': 'Applied: {added} added, {removed} removed.',
+      'sync.noneSelected': 'Nothing changed: tick a model to add, or untick one to remove.',
+      'sync.noMatch': 'No model matches that filter.',
+      'sync.hint': 'Lists what the endpoint reports right now, so models published after the bundled catalog appear here. Pick only what you want \u2014 nothing else is added and existing entries are left untouched.',
+      'sync.loading': 'Reading the endpoint\u2026',
+      'sync.truncated': 'Showing the first {shown} of {total} matches \u2014 narrow the filter.',
 
       'preset.none': 'No pin',
       'preset.standard': 'Standard',
@@ -344,6 +362,24 @@ window.__ModuleLoader__.load({
       'strip.tierHint': '预设只对接受 OpenAI 风格路由字段的端点生效（如 OpenRouter 本身及部分兼容网关）。',
       'strip.routedHint': '该提供商已通过中继转发。预设在输入框的预设按钮里按会话选择。',
       'strip.stalled': '中继未确认本次修改；请重新打开此页面后重试。',
+      'sync.aria': '{name} 的实时模型列表同步',
+      'sync.action': '同步实时模型\u2026',
+      'sync.reading': '正在读取模型\u2026',
+      'sync.writing': '正在添加\u2026',
+      'sync.panelAria': '{name} 的实时模型',
+      'sync.filter': '筛选模型',
+      'sync.legend': '可用 {count} \u00b7 已添加 {present}',
+      'sync.already': '已添加',
+      'sync.willRemove': '将被移除',
+      'sync.selected': '新增 {added} \u00b7 移除 {removed}',
+      'sync.apply': '应用',
+      'sync.cancel': '取消',
+      'sync.done': '已应用：新增 {added}，移除 {removed}。',
+      'sync.noneSelected': '没有改动：勾选以添加，取消勾选以移除。',
+      'sync.noMatch': '没有匹配该筛选条件的模型。',
+      'sync.hint': '列出端点当前的模型，因此内置目录发布之后新增的模型也会出现。只添加你勾选的模型，其他内容不会被修改。',
+      'sync.loading': '正在读取端点\u2026',
+      'sync.truncated': '仅显示前 {shown} 个（共 {total} 个）——请缩小筛选范围。',
 
       'preset.none': '不固定',
       'preset.standard': '标准',
@@ -971,6 +1007,10 @@ window.__ModuleLoader__.load({
     /* Theme tokens only, each with a plain CSS fallback so the page still reads well if
        a token is renamed upstream. Inline styles only: no global CSS, no class names. */
 
+    /* A route can point at an endpoint reporting hundreds of models; render a window
+       and let the filter do the work rather than mounting them all. */
+    const PICKER_LIMIT = 150;
+
     const COLORS = {
       primary: 'var(--dsw-alias-label-primary, CanvasText)',
       secondary: 'var(--dsw-alias-label-secondary, GrayText)',
@@ -1268,6 +1308,87 @@ window.__ModuleLoader__.load({
     };
 
     const STRIP_HINT_STYLE = { margin: 0, flexBasis: '100%', color: COLORS.secondary, font: FONTS.tiny };
+
+    /* The live-model row sits under the routing switch on the same card. */
+    const STRIP_ACTIONS_STYLE = {
+      display: 'inline-flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: 0,
+    };
+
+    /* The model picker needs a real surface: a long scrollable list plus a filter. */
+    const STRIP_PICKER_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      flexBasis: '100%',
+      minWidth: 0,
+      padding: '8px',
+      border: '1px solid ' + COLORS.border,
+      borderRadius: 'var(--dsw-radius-md, 8px)',
+      background: COLORS.layerTwo,
+    };
+
+    const PICKER_FILTER_STYLE = {
+      margin: 0,
+      padding: '3px 8px',
+      minHeight: '24px',
+      boxSizing: 'border-box',
+      border: '1px solid ' + COLORS.borderStrong,
+      borderRadius: 'var(--dsw-radius-md, 8px)',
+      background: COLORS.primary === '' ? undefined : 'transparent',
+      color: COLORS.primary,
+      font: FONTS.small,
+      width: '100%',
+    };
+
+    const PICKER_LIST_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      maxHeight: '240px',
+      overflowY: 'auto',
+    };
+
+    const PICKER_ROW_STYLE = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      padding: '2px 4px',
+      minWidth: 0,
+      color: COLORS.primary,
+      font: FONTS.tiny,
+      cursor: 'pointer',
+    };
+
+    /* An id the route already declares: visible, but not an invitation to add it. */
+    const PICKER_ROW_ADDED_STYLE = { ...PICKER_ROW_STYLE, color: COLORS.secondary, cursor: 'default' };
+
+    /* A model ticked off the route: still listed, visibly on its way out. */
+    const PICKER_ROW_REMOVING_STYLE = { ...PICKER_ROW_STYLE, color: COLORS.error, textDecoration: 'line-through' };
+
+    const PICKER_REMOVE_BADGE_STYLE = {
+      flex: '0 0 auto',
+      marginLeft: 'auto',
+      padding: '0 6px',
+      borderRadius: '999px',
+      border: '1px solid ' + COLORS.error,
+      color: COLORS.error,
+      font: FONTS.tiny,
+      textDecoration: 'none',
+    };
+
+    const PICKER_BADGE_STYLE = {
+      flex: '0 0 auto',
+      marginLeft: 'auto',
+      padding: '0 6px',
+      borderRadius: '999px',
+      border: '1px solid ' + COLORS.border,
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+    };
 
     /* Composer chip: 24px tall to sit on the composer's 28px control row without
        pushing it, and it never grows past the space the row has for it. */
@@ -2729,6 +2850,11 @@ window.__ModuleLoader__.load({
       const [feedState, setFeedState] = React.useState(() => feed.snapshot());
       const [pending, setPending] = React.useState(null);
       const [error, setError] = React.useState('');
+      /* Live-model reconciliation: null when idle, otherwise the phase plus the
+         preview the Host computed. The preview is what the user confirms, and it
+         comes from the same planner the write runs. */
+      const [sync, setSync] = React.useState(null);
+      const [note, setNote] = React.useState('');
 
       const aliveRef = React.useRef(true);
       const lifetimeRef = React.useRef(null);
@@ -2769,6 +2895,8 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         setPending(null);
         setError('');
+        setSync(null);
+        setNote('');
       }, [route]);
 
       const data = feedState.data;
@@ -2925,6 +3053,161 @@ window.__ModuleLoader__.load({
         setPending(null);
       };
 
+      /* ── live model picker ───────────────────────────────────────────────
+         The Models page's own "Fetch available models" is answered from the pi-ai
+         snapshot for any catalog-backed route, and it answers *before* it reads that
+         route's baseURL — so it can never show a model OpenRouter published after
+         pi-ai was released. This reads the row's own endpoint instead, lists what it
+         reports, and adds only the models the user ticks. */
+      const modelEndpoint = upstream;
+
+      const readModels = async () => {
+        if (pending !== null || (sync !== null && sync.phase !== 'ready')) return;
+        const origin = feedState.origin;
+        if (origin === null || origin === undefined) {
+          setError(t('offline.noReason'));
+          return;
+        }
+        setSync({ phase: 'reading', models: [], selected: [], removed: [], present: 0 });
+        setError('');
+        setNote('');
+        const controller = new AbortController();
+        actionControllerRef.current = controller;
+        const timer = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch (exception) {
+            /* already settled */
+          }
+        }, MUTATION_TIMEOUT_MS);
+        try {
+          const url =
+            origin + CONTROL_PREFIX + '/models?route=' + encodeURIComponent(route) +
+            '&upstream=' + encodeURIComponent(modelEndpoint);
+          const response = await fetch(url, {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+          });
+          const payload = await readJsonSafe(response);
+          if (!response.ok) {
+            const message = payloadErrorMessage(payload);
+            throw new Error(message === '' ? t('error.http', { status: String(response.status) }) : message);
+          }
+          if (!aliveRef.current) return;
+          const models = Array.isArray(payload.models) ? payload.models : [];
+          setSync({
+            phase: 'ready',
+            models: models,
+            /* Existing models start ticked (they are in the route); new ones start
+               clear, so the list reads as the route's current contents plus what is
+               on offer. Unticking an existing model marks it for removal. */
+            selected: [],
+            removed: [],
+            present: models.filter((model) => model.inRoute === true).length,
+          });
+        } catch (exception) {
+          if (!aliveRef.current) return;
+          setSync(null);
+          setError(mutationMessage(exception));
+        } finally {
+          clearTimeout(timer);
+          if (actionControllerRef.current === controller) actionControllerRef.current = null;
+        }
+      };
+
+      const toggleModel = (id, inRoute) => {
+        setSync((current) => {
+          if (current === null || current.phase !== 'ready') return current;
+          /* One list, two directions: a model already in the route is unticked into
+             `removed`, a model on offer is ticked into `selected`. */
+          if (inRoute === true) {
+            const removed = current.removed.includes(id)
+              ? current.removed.filter((value) => value !== id)
+              : [...current.removed, id];
+            return { ...current, removed: removed };
+          }
+          const selected = current.selected.includes(id)
+            ? current.selected.filter((value) => value !== id)
+            : [...current.selected, id];
+          return { ...current, selected: selected };
+        });
+      };
+
+      const applyModels = async () => {
+        if (sync === null || sync.phase !== 'ready') return;
+        if (sync.selected.length === 0 && sync.removed.length === 0) {
+          setError(t('sync.noneSelected'));
+          return;
+        }
+        const origin = feedState.origin;
+        if (origin === null || origin === undefined) {
+          setError(t('offline.noReason'));
+          return;
+        }
+        const chosen = [...sync.selected];
+        const dropped = [...sync.removed];
+        setSync({ ...sync, phase: 'writing' });
+        setError('');
+        let failure = '';
+        const controller = new AbortController();
+        actionControllerRef.current = controller;
+        const timer = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch (exception) {
+            /* already settled */
+          }
+        }, MUTATION_TIMEOUT_MS);
+        try {
+          const response = await fetch(origin + CONTROL_PREFIX + '/models/add', {
+            method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: {
+              accept: 'application/json',
+              'content-type': 'application/json',
+              'x-oorp-client': CLIENT_HEADER,
+            },
+            body: JSON.stringify({
+              route: route,
+              upstream: modelEndpoint,
+              models: chosen,
+              remove: dropped,
+              confirmRemove: dropped.length > 0,
+            }),
+            signal: controller.signal,
+          });
+          const payload = await readJsonSafe(response);
+          if (!response.ok) {
+            const message = payloadErrorMessage(payload);
+            throw new Error(message === '' ? t('error.http', { status: String(response.status) }) : message);
+          }
+          if (!aliveRef.current) return;
+          setNote(t('sync.done', {
+            added: String(Array.isArray(payload.added) ? payload.added.length : 0),
+            removed: String(Array.isArray(payload.removed) ? payload.removed.length : 0),
+          }));
+        } catch (exception) {
+          failure = mutationMessage(exception);
+        } finally {
+          clearTimeout(timer);
+          if (actionControllerRef.current === controller) actionControllerRef.current = null;
+        }
+        /* The write changed the route, so the card's snapshot is stale either way. */
+        const found = await reconcile();
+        if (found !== null) feed.publish(found.origin, found.data);
+        if (!aliveRef.current) return;
+        if (failure === '') {
+          setSync(null);
+        } else {
+          setSync({ ...sync, phase: 'ready', selected: chosen, removed: dropped });
+          setError(failure);
+        }
+      };
+
       const errorLine = error === '' ? null : h('p', { role: 'alert', style: ALERT_STYLE }, error);
 
       /* A legacy leg (`<origin>/<tier>/v1`) predates targets: it still reaches the relay,
@@ -2983,10 +3266,149 @@ window.__ModuleLoader__.load({
           ? null
           : h('span', { role: 'status', 'aria-live': 'polite', style: STRIP_HINT_STYLE }, busyLabel),
         h('p', { style: STRIP_HINT_STYLE }, ticked ? t('strip.routedHint') : t('strip.tierHint')),
+        modelEndpoint === ''
+          ? null
+          : h(
+              'div',
+              { style: STRIP_ACTIONS_STYLE },
+              h(ActionButton, {
+                label: sync !== null && sync.phase === 'reading' ? t('sync.reading') : t('sync.action'),
+                title: t('sync.hint'),
+                ariaLabel: t('sync.aria', { name: name }),
+                disabled: pending !== null || (sync !== null && sync.phase === 'writing'),
+                onClick: () => {
+                  void readModels();
+                },
+              }),
+            ),
+        /* The picker: every model the endpoint reports, with the ones this route
+           already declares marked so they are not offered twice. Only ticked rows are
+           ever written. */
+        sync !== null && sync.phase !== 'reading' && sync.models.length > 0
+          ? h(SyncPicker, {
+              t: t,
+              name: name,
+              models: sync.models,
+              selected: sync.selected,
+              removed: sync.removed,
+              present: sync.present,
+              busy: sync.phase === 'writing',
+              onToggle: toggleModel,
+              onApply: () => {
+                void applyModels();
+              },
+              onCancel: () => setSync(null),
+            })
+          : null,
+        note === ''
+          ? null
+          : h('p', { role: 'status', 'aria-live': 'polite', style: STRIP_HINT_STYLE }, note),
         errorLine,
       );
     }
 
+    /**
+     * The live-model checklist.
+     *
+     * A route can point at an endpoint that reports hundreds of models, so the list
+     * is filtered rather than paginated, and the ids already declared stay visible
+     * and unticked (they are marked "added") so the user can see both what they have
+     * and what is on offer without the two lists diverging.
+     */
+    function SyncPicker(props) {
+      const t = props.t;
+      const [filter, setFilter] = React.useState('');
+      const needle = filter.trim().toLowerCase();
+      const visible = needle === ''
+        ? props.models
+        : props.models.filter((model) => String(model.id).toLowerCase().includes(needle)
+            || String(model.name || '').toLowerCase().includes(needle));
+      const selectedCount = props.selected.length;
+      const shown = visible.slice(0, PICKER_LIMIT);
+
+      return h(
+        'div',
+        {
+          role: 'group',
+          'aria-label': t('sync.panelAria', { name: props.name }),
+          'aria-busy': props.busy ? 'true' : undefined,
+          style: STRIP_PICKER_STYLE,
+        },
+        h('p', { style: { margin: 0, color: COLORS.primary, font: FONTS.tiny } }, t('sync.legend', {
+          count: String(props.models.length),
+          present: String(props.present),
+        })),
+        h('input', {
+          type: 'search',
+          value: filter,
+          placeholder: t('sync.filter'),
+          'aria-label': t('sync.filter'),
+          disabled: props.busy,
+          onChange: (event) => setFilter(event.target.value),
+          style: PICKER_FILTER_STYLE,
+        }),
+        h(
+          'div',
+          { style: PICKER_LIST_STYLE },
+          visible.length === 0
+            ? h('p', { style: STRIP_HINT_STYLE }, t('sync.noMatch'))
+            : visible.length > shown.length
+              ? h('p', { style: STRIP_HINT_STYLE }, t('sync.truncated', {
+                  shown: String(shown.length),
+                  total: String(visible.length),
+                }))
+              : null,
+          shown.map((model) => {
+            const id = String(model.id);
+            const inRoute = model.inRoute === true;
+            const removing = inRoute && props.removed.includes(id);
+            const ticking = !inRoute && props.selected.includes(id);
+            return h(
+              'label',
+              { key: id, style: removing ? PICKER_ROW_REMOVING_STYLE : inRoute ? PICKER_ROW_ADDED_STYLE : PICKER_ROW_STYLE },
+              h('input', {
+                type: 'checkbox',
+                /* Ticked means "in the route after Apply": present and not dropped,
+                   or chosen from the catalogue. Unticking an existing model removes it,
+                   so this is one list with two directions rather than an add-only list. */
+                checked: inRoute ? !removing : ticking,
+                disabled: props.busy,
+                style: { margin: 0, flex: '0 0 auto' },
+                onChange: () => props.onToggle(id, inRoute),
+              }),
+              h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, id),
+              removing
+                ? h('span', { style: PICKER_REMOVE_BADGE_STYLE }, t('sync.willRemove'))
+                : inRoute
+                  ? h('span', { style: PICKER_BADGE_STYLE }, t('sync.already'))
+                  : null,
+            );
+          }),
+        ),
+        h(
+          'div',
+          { style: STRIP_ACTIONS_STYLE },
+          h(ActionButton, {
+            label: props.busy ? t('sync.writing') : t('sync.apply'),
+            title: t('sync.selected', {
+              added: String(selectedCount),
+              removed: String(props.removed.length),
+            }),
+            disabled: props.busy || (selectedCount === 0 && props.removed.length === 0),
+            onClick: props.onApply,
+          }),
+          h('span', { style: STRIP_STATUS_STYLE }, t('sync.selected', {
+            added: String(selectedCount),
+            removed: String(props.removed.length),
+          })),
+          h(ActionButton, {
+            label: t('sync.cancel'),
+            disabled: props.busy,
+            onClick: props.onCancel,
+          }),
+        ),
+      );
+    }
 
     /** One tier row inside the chip's menu. */
     function ChipOption(props) {

@@ -9,6 +9,59 @@ the config keys can still change.
 
 Nothing yet.
 
+## [0.2.0] — 2026-10-27
+
+Adds a second, independent capability: **live model lists**. A provider route's models can now be
+edited from the endpoint the route points at, which is the only way to reach models that
+`@earendil-works/pi-ai` does not ship yet.
+
+### Added
+
+- **Sync live models…** on every `llm-pi-ai` provider row. It reads the row's own `/models`
+  endpoint and opens a checklist of what that endpoint publishes *right now*, with a filter box.
+  Each row is one model and one checkbox, and the list is two-way:
+  - tick a model the route does not have → it is **added**;
+  - untick a model the route already has → it is marked **will be removed** (struck through) and
+    dropped on Apply.
+  Apply stays disabled until something actually differs, and shows `N to add · M to remove`.
+- **Existing entries are never rewritten.** An entry the route already declares keeps its name,
+  context window, `maxTokens`, input modalities and effort map byte for byte; additions append, so a
+  curated order is not reshuffled. An id the endpoint stops listing is left alone rather than pruned.
+- A newly added model gets the reasoning capability from the same evidence `repair` uses, so it
+  arrives with an effort selector instead of materialising as "no reasoning levels". Only the models
+  just added are filled — repairing older ones stays `repair`'s job.
+- **`GET /__openrouter-plus/models?route=<id>[&upstream=<url>]`** — the live catalogue for one route,
+  each model marked `inRoute`, resolved through the target registry when the row is relay-routed.
+- **`POST /__openrouter-plus/models/add`** — applies an edit: `models` to add, `remove` to drop. An
+  id already in the route is reported as `already`, an id the endpoint does not list as `unknown`;
+  neither is written. A removal requires `confirmRemove: true`, because an untick is destructive and
+  a client should have to say so.
+
+### Why this exists
+
+*Fetch available models* is answered from the catalog baked into `@earendil-works/pi-ai`, and for a
+catalog-backed route (`openrouter`) it answers **before** it reads that route's `baseURL`
+(`dsh-llm-pi-ai`'s `discoverModels` returns `catalogModels(provider)` first). Pointing the row at a
+relay therefore changes nothing: the provider *name* is what short-circuits, not the URL. The
+snapshot only refreshes when pi-ai is published, so on the build this was written against it was
+missing **65 of OpenRouter's 463 live models**.
+
+A plugin cannot change that function — `registerModelDiscovery` is keyed by the `llm-pi-ai` settings
+namespace and refuses a duplicate. It can write the other half: a route that declares `models`
+serves exactly that list, ahead of the installed catalog. So this edits the list the user curates
+rather than trying to answer for the button.
+
+### Notes
+
+- The write declares the route's `api` (`openai-completions`) when the route has none and a model was
+  added. `dsh-llm-pi-ai` resolves a model's protocol from the *route*, never from the entry, and
+  `openrouter`'s catalog spans two protocols so no shared value can be inherited; without this the
+  whole write is rejected with *"needs an api"*.
+- The listing read is bounded (8 MB) and the picker renders a window of 150 rows with a filter,
+  because a route can point at an endpoint reporting hundreds of models.
+- `:batch` endpoints are excluded by default: 71 of OpenRouter's 463 ids are the asynchronous batch
+  API, not chat endpoints. Other variants (`:free`, `:nitro`) are kept.
+
 ## [0.1.1] — 2026-10-27
 
 ### Changed

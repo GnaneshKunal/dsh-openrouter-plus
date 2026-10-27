@@ -14,6 +14,7 @@
 import { createMetrics } from './lib/metrics.js'
 import { createRelay } from './lib/proxy.js'
 import { createConfigBridge } from './lib/config-bridge.js'
+import { MODEL_LISTING_MAX_BYTES, annotateLive, readLiveModels } from './lib/models-sync.js'
 import { normalizeReasoningEfforts } from './lib/reasoning.js'
 import { createAutoRepair } from './lib/auto-repair.js'
 
@@ -96,7 +97,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.1.1'
+const VERSION = '0.2.0'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -768,6 +769,95 @@ export function apply(ctx, rawConfig) {
     return { targetId: mountId, tier }
   }
 
+  // ── live model listing ───────────────────────────────────────────────────
+  // `dsh-llm-pi-ai` answers "Fetch available models" for a catalog provider from
+  // the snapshot baked into `@earendil-works/pi-ai`, and it answers *before* it
+  // reads the route's `baseURL` — so a row pointed at this relay still reports the
+  // bundled snapshot, and every model OpenRouter has added since pi-ai was last
+  // published is invisible. A plugin cannot change that function. It can write the
+  // other half: a route that declares `models` serves exactly that list.
+
+  /**
+   * The endpoint a route's model listing should be read from.
+   *
+   * A routed row has no endpoint of its own left — its `baseURL` is one of our
+   * mounts — so the target registry answers with what the relay forwards to. A row
+   * that is not routed answers with its own `baseURL`. A catalog row that declares
+   * none (the stock `openrouter` row resolves its endpoint from the installed
+   * catalog) falls back to the one the caller read off the card, which is the only
+   * endpoint that row honestly has.
+   *
+   * @param {string} route
+   * @param {unknown} supplied - the endpoint the caller already knows, if any.
+   * @returns {Promise<{ upstream: string, source: 'target' | 'route' | 'request' } | null>}
+   */
+  async function upstreamOf(route, supplied) {
+    const source = await sourceOf(route)
+    const baseURL = typeof source?.baseURL === 'string' ? source.baseURL : ''
+    const mount = relayMountOf(baseURL)
+    if (mount) {
+      const registered = targetUrl(ownTargets()[mount.targetId]?.upstream)
+      if (registered) return { upstream: registered, source: 'target' }
+    }
+    const own = targetUrl(baseURL)
+    if (own) return { upstream: own, source: 'route' }
+    const shared = targetUrl(supplied)
+    if (shared) return { upstream: shared, source: 'request' }
+    return null
+  }
+
+  /**
+   * Read one upstream's live model listing.
+   *
+   * Bounded on purpose: the reply is buffered so its size can be checked before it
+   * is parsed. OpenRouter's full listing is already ~780 KB, so an upstream that
+   * streams without end must not be able to exhaust the Host process.
+   *
+   * @param {string} upstream - normalised endpoint, no trailing slash.
+   * @returns {Promise<{ models: Array<Record<string, any>>, skipped: number, duplicates: number, url: string }>}
+   */
+  async function fetchListing(upstream) {
+    const url = `${upstream}/models`
+    let response
+    try {
+      response = await fetch(url, { method: 'GET', headers: { accept: 'application/json' } })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw badRequest(`could not reach ${url}: ${reason}`, 502)
+    }
+    if (!response.ok) {
+      const hint = response.status === 401 || response.status === 403 ? '; this endpoint needs a credential' : ''
+      throw badRequest(`${url} answered ${response.status}${hint}`, 502)
+    }
+    const text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > MODEL_LISTING_MAX_BYTES) {
+      throw badRequest(`${url} answered with more than ${MODEL_LISTING_MAX_BYTES} bytes`, 502)
+    }
+    let payload
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      throw badRequest(`${url} did not answer with JSON`, 502)
+    }
+    try {
+      return { ...readLiveModels(payload), url }
+    } catch (error) {
+      throw badRequest(`${url}: ${error instanceof Error ? error.message : String(error)}`, 502)
+    }
+  }
+
+  /**
+   * The route a model-sync request names.
+   *
+   * Only emptiness is refused here: whether the name exists in the profile is the
+   * bridge's answer, and it already reports the routes that do exist.
+   */
+  function requireRoute(value) {
+    const route = typeof value === 'string' ? value.trim() : ''
+    if (!route) throw badRequest('route is required: the provider id whose models to read')
+    return route
+  }
+
   /**
    * Run a bridge mutation and turn its user-facing refusals into 400s. The bridge
    * throws plain messages (no status) on purpose, so the mapping lives here.
@@ -1036,10 +1126,83 @@ export function apply(ctx, rawConfig) {
       sendJson(res, 200, { ok: true, ...repaired })
     }),
 
-    // ── attaching a provider endpoint to this relay ────────────────────────
-    // The Models page's own provider form calls these: registering an upstream
-    // is what makes a mount exist, and `/routes/attach` is what moves a provider
-    // row onto that mount without the operator editing YAML.
+    // ── live model catalogue ────────────────────────────────────────────────
+    // The Models page's own "Fetch available models" is answered from the pi-ai
+    // snapshot for any catalog-backed route, before that route's baseURL is even
+    // read, so it cannot be corrected from a plugin. These two endpoints are the
+    // plugin's own answer: read OpenRouter live, reconcile against what the route
+    // already declares, and write it through the normal Loader path.
+    [`${CONTROL_PREFIX}/models`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'GET')) return
+      const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
+      const route = requireRoute(query.get('route'))
+      if (!bridge.available()) {
+        throw badRequest('live model discovery needs the Host config editor, which this plain Host does not provide')
+      }
+      const endpoint = await upstreamOf(route, query.get('upstream'))
+      if (!endpoint) {
+        throw badRequest(`cannot tell where provider route ${JSON.stringify(route)} points: it declares no baseURL and none was supplied`)
+      }
+      const listing = await fetchListing(endpoint.upstream)
+      // `inRoute` is what the picker renders as "already added": the full live
+      // catalogue stays visible, and the ids this route already declares are marked
+      // so they cannot be added twice.
+      const models = annotateLive(listing.models, bridge.declaredModels(route))
+      sendJson(res, 200, {
+        ok: true,
+        route,
+        upstream: endpoint.upstream,
+        source: endpoint.source,
+        live: {
+          count: models.length,
+          skipped: listing.skipped,
+          duplicates: listing.duplicates,
+          present: models.filter((model) => model.inRoute === true).length,
+        },
+        models,
+      })
+    }),
+
+    // The write takes an explicit selection: nothing is added that the caller did
+    // not name, so the model list stays something the user curates rather than
+    // something a sync dumps on them.
+    [`${CONTROL_PREFIX}/models/add`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const route = requireRoute(body.route)
+      const selected = Array.isArray(body.models) ? body.models : []
+      const remove = Array.isArray(body.remove) ? body.remove : []
+      if (selected.length === 0 && remove.length === 0) {
+        throw badRequest('nothing to apply: send models to add, remove to drop, or both')
+      }
+      if (remove.length > 0 && body.confirmRemove !== true) {
+        throw badRequest('removing models needs confirmRemove: true; an untick is a destructive edit')
+      }
+      if (!bridge.available()) {
+        throw badRequest('adding models needs the provider config editor')
+      }
+      const endpoint = await upstreamOf(route, body.upstream)
+      if (!endpoint) {
+        throw badRequest(`cannot tell where provider route ${JSON.stringify(route)} points: it declares no baseURL and none was supplied`)
+      }
+      const catalogue = await fetchListing(endpoint.upstream)
+      const result = await outsideHmrTransaction(ctx, () =>
+        bridge.addModels({
+          route,
+          live: catalogue.models,
+          selected,
+          remove,
+        }),
+      )
+      log('info', 'edited a provider route model list', {
+        route,
+        added: result.added.length,
+        removed: result.removed.length,
+        total: result.total,
+      })
+      sendJson(res, 200, { ok: true, route, upstream: endpoint.upstream, ...result })
+    }),
+
     [`${CONTROL_PREFIX}/targets/register`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'POST')) return
       const body = await readJsonBody(req)

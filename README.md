@@ -3,19 +3,30 @@
 [![npm](https://img.shields.io/npm/v/dsh-openrouter-plus.svg)](https://www.npmjs.com/package/dsh-openrouter-plus)
 [![license](https://img.shields.io/npm/l/dsh-openrouter-plus.svg)](LICENSE)
 
-**Service-tier routing for OpenRouter — as a DeepSeek Harness plugin, with no patched packages.**
+**Service-tier routing *and* a live model list for OpenRouter — as a DeepSeek Harness plugin, with
+no patched packages.**
 
-OpenRouter lets you steer where a request is served from: `flex` endpoints bill half price on a
-slower pool, `priority` endpoints bill a multiplier for lower latency, and the throughput or price
-comparators reorder the pool in between. In `@deepseek-ai/dsh-llm-pi-ai` none of that is reachable —
-provider profiles expose `baseURL` and `headers`, but no request-body fields
+DSH's OpenRouter support has two gaps, and neither one is reachable from a provider profile.
+
+**Routing.** OpenRouter lets you steer where a request is served from: `flex` endpoints bill half
+price on a slower pool, `priority` endpoints bill a multiplier for lower latency, and the throughput
+or price comparators reorder the pool in between. `@deepseek-ai/dsh-llm-pi-ai` exposes `baseURL` and
+`headers` on a provider profile, but no request-body fields
 ([discussion #9787](https://github.com/deepseek-ai/deepseek-harness/discussions/9787)).
 
-This plugin reaches the same wire result from the outside. It runs a **loopback relay**; a provider
-route points at it, and the relay writes the routing fields into the request body on the way
-upstream — `service_tier`, `provider.sort`, or the `:floor` model variant, depending on the
-**preset** you picked. Because it only uses schema fields the profile already has, it survives
-`bun install -g` upgrades and never touches `~/.bun/install/global`.
+**Model discovery.** *Fetch available models* is answered from the catalog baked into
+`@earendil-works/pi-ai`, and for a catalog-backed route (`openrouter`) it answers **before** it reads
+that route's `baseURL`. The snapshot only refreshes when pi-ai is published again, so every model
+OpenRouter has added since then is invisible — on the build this plugin was written against, that was
+**65 of OpenRouter's 463 live models**, including `openai/gpt-6.1-terra`,
+`moonshotai/kimi-k3.1-pro` and `x-ai/grok-4.20-multi-agent`. Pointing the row at another endpoint
+does not help: the provider *name* is what short-circuits, not the URL.
+
+This plugin closes both gaps from the outside, and it never patches a shipped package. A **loopback
+relay** applies the routing preset to each request. **Sync live models** reads the endpoint a route
+points at and lists it, so you can tick the models you want and add just those. Both ride on schema
+fields the profile already has, so both survive `bun install -g` upgrades and never touch
+`~/.bun/install/global`.
 
 The preset is chosen **per session, at request time**. One provider row keeps serving every preset, so
 switching never mints a provider, a route or a model list.
@@ -28,10 +39,18 @@ switching never mints a provider, a route or a model list.
       baseURL =           │ reads the session from x-session-id / prompt_cache_key,
   127.0.0.1:8791/t/<id>/v1  │ applies that session's preset to the body
                             └── /__openrouter-plus/* ──► OpenRouter Plus settings page
+                                  ├ /models      reads the live listing
+                                  └ /models/add  adds only the ticked models
 ```
 
 ## What you get
 
+- **Sync live models.** Every `llm-pi-ai` provider row gets a **Sync live models…** button. It reads
+  the endpoint that row points at and shows what it publishes *right now* — including models added
+  after the pi-ai catalog in your install was generated — with a filter box and a checkbox per model.
+  Tick what you want and only those are added; models the route already declares are marked
+  `added` and cannot be added twice. Nothing is rewritten: hand-written names, context windows and
+  effort maps are left exactly as they are.
 - **One provider row, any preset.** A routed provider keeps its key, protocol and models and gains
   one thing: a composable **preset** that the relay applies to each request. No per-preset provider
   copies, no sibling route per preset, no model list duplicated nine times.
@@ -330,6 +349,8 @@ Served on the same loopback listener, outside the proxy path space:
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
+| `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
+| `POST /__openrouter-plus/models/add` | `{ route, upstream?, models: [], remove: [], confirmRemove? }` — add/remove an explicit selection; a removal requires `confirmRemove: true` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
 | `POST /__openrouter-plus/routes/repair` | adds missing `reasoningEfforts` to the routes this plugin owns |
 | `POST /__openrouter-plus/routes/attach` | `{ route, upstream }` — record the endpoint and point that provider at the relay |
