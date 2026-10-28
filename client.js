@@ -3203,6 +3203,15 @@ window.__ModuleLoader__.load({
       const ticked = own !== null;
       const busyLabel = pending === 'attach' ? t('strip.applying') : pending === 'detach' ? t('strip.detaching') : '';
 
+      /*
+       * The live-model picker belongs to "OpenRouter Plus is on for this row", not to the
+       * pi-ai adapter in general: a row that is not routed through the relay shows the
+       * switch and nothing else. That keeps this plugin's surface on the rows the operator
+       * actually opted in, instead of decorating every `llm-pi-ai` card with a button that
+       * edits a list this plugin is not otherwise part of.
+       */
+      const canSyncModels = ticked && modelEndpoint !== '';
+
       return h(
         'div',
         {
@@ -3221,6 +3230,9 @@ window.__ModuleLoader__.load({
             style: { margin: 0 },
             onChange: () => {
               if (error !== '') setError('');
+              /* Switching the row changes which endpoint the list would describe, so a
+                 panel from the previous posture is never carried across. */
+              if (sync !== null) setSync(null);
               void (ticked ? detach() : attach());
             },
           }),
@@ -3230,9 +3242,8 @@ window.__ModuleLoader__.load({
           ? null
           : h('span', { role: 'status', 'aria-live': 'polite', style: STRIP_HINT_STYLE }, busyLabel),
         h('p', { style: STRIP_HINT_STYLE }, ticked ? t('strip.routedHint') : t('strip.tierHint')),
-        modelEndpoint === ''
-          ? null
-          : h(
+        canSyncModels
+          ? h(
               'div',
               { style: STRIP_ACTIONS_STYLE },
               h(ActionButton, {
@@ -3244,11 +3255,12 @@ window.__ModuleLoader__.load({
                   void readModels();
                 },
               }),
-            ),
+            )
+          : null,
         /* The picker: every model the endpoint reports, with the ones this route
-           already declares marked so they are not offered twice. Only ticked rows are
-           ever written. */
-        sync !== null && sync.phase !== 'reading' && sync.models.length > 0
+           already declares marked so they are not offered twice. It is offered, and it
+           writes, only while the row is routed through OpenRouter Plus. */
+        canSyncModels && sync !== null && sync.phase !== 'reading' && sync.models.length > 0
           ? h(SyncPicker, {
               t: t,
               name: name,

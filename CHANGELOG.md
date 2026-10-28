@@ -5,6 +5,17 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.2.2] — 2026-10-28
+
+### Fixed
+
+- **Sync live models… only appears on a routed provider row.** The button used to render on every
+  `llm-pi-ai` card that had a usable endpoint, including rows that never ticked **Route through
+  OpenRouter Plus** — so an unrelated provider (a second OpenRouter row, a gateway, a local server)
+  grew a control from a plugin it had not opted into. The switch stays on every row; the live-model
+  picker now waits for that row to carry a relay target, and switching the row off also drops an open
+  picker instead of carrying its preview across.
+
 ## [0.2.1] — 2026-10-27
 
 **The settings page, the Models-row switch and the composer chip now work anywhere the GUI loads** —

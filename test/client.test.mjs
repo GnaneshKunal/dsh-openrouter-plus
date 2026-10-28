@@ -177,3 +177,17 @@ test('the browser half names no loopback address or relay port', async () => {
   assert.equal(/\b879[1-4]\b/.test(source), false, 'no relay port')
   assert.equal(/localhost/.test(source), false, 'no localhost literal')
 })
+
+test('the Sync control is offered only on a provider row routed through the relay', async () => {
+  /* The rule: the **Route through OpenRouter Plus** switch is on every `llm-pi-ai`
+     card, and the live-model picker (button and panel alike) waits for that switch.
+     Pinned structurally because the strip is a slot registration, not an export:
+     two readers of one `canSyncModels` predicate cannot drift apart unnoticed. */
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /const canSyncModels = ticked && modelEndpoint !== '';/)
+  const reads = source.match(/canSyncModels/g) || []
+  assert.equal(reads.length, 3, 'one declaration, and the button plus the picker reading it')
+  /* The pre-fix shape offered the button on any row with an endpoint. */
+  assert.equal(/modelEndpoint === ''\s*\n\s*\? null/.test(source), false, 'no ungated button')
+})

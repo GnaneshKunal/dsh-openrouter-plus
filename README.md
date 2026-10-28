@@ -45,12 +45,13 @@ switching never mints a provider, a route or a model list.
 
 ## What you get
 
-- **Sync live models.** Every `llm-pi-ai` provider row gets a **Sync live models…** button. It reads
-  the endpoint that row points at and shows what it publishes *right now* — including models added
-  after the pi-ai catalog in your install was generated — with a filter box and a checkbox per model.
-  Tick what you want and only those are added; models the route already declares are marked
-  `added` and cannot be added twice. Nothing is rewritten: hand-written names, context windows and
-  effort maps are left exactly as they are.
+- **Sync live models.** A provider row routed through OpenRouter Plus also gets a **Sync live
+  models…** button. It reads the endpoint that row points at and shows what it publishes *right
+  now* — including models added after the pi-ai catalog in your install was generated — with a
+  filter box and a checkbox per model. Tick what you want and only those are added; models the
+  route already declares are marked `added` and cannot be added twice. Nothing is rewritten:
+  hand-written names, context windows and effort maps are left exactly as they are. A row that is
+  not routed shows the switch alone: the button belongs to the opt-in, not to every `llm-pi-ai` card.
 - **One provider row, any preset.** A routed provider keeps its key, protocol and models and gains
   one thing: a composable **preset** that the relay applies to each request. No per-preset provider
   copies, no sibling route per preset, no model list duplicated nine times.
@@ -99,7 +100,7 @@ The composer chip, which switches the preset for one Session without touching an
 
 ![Composer chip showing a per-session preset next to the model selector](docs/images/composer-chip.jpg)
 
-The provider row also carries **Sync live models…**: it lists what that row's endpoint publishes
+A routed provider row also carries **Sync live models…**: it lists what that row's endpoint publishes
 right now, ticked where the route already has the model, so you can add a model or untick one
 without touching anything else. Hand-written entries are never rewritten.
 

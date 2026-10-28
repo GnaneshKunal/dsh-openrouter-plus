@@ -388,7 +388,9 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   unreachable, and it must never call `settings.mutate`: the card holds its own `expectedRevision`,
   so a plugin write while the card is open would make the card's next save fail with
   `settings/conflict`. Re-render hands it a fresh `provider` object each snapshot, so the strip syncs
-  from props rather than caching identity.
+  from props rather than caching identity. Only the **Route through OpenRouter Plus** switch is offered
+  unconditionally: the live-model picker (`GET /models`, `POST /models/add`) renders only while that
+  row carries a relay target, so a card that never opted in gains no control from this plugin.
 - **The composer chip.** A third seat, `conversation.input.right` (a free `list` slot — "compact
   controls before the composer submit action", `replaceRisk: none`), registered as
   `{ name: 'conversation.input.right', id: 'openrouter-plus-tier', order: 0 }`. It exists because
