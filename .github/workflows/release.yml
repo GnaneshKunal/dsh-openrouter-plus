@@ -36,6 +36,17 @@ jobs:
             exit 1
           fi
 
+      # CI checks this on every branch; a release must too, or a tag publishes a build whose
+      # `/status` reports a different version than the artifact it came in (what 0.2.2 did).
+      - name: Version agrees with the runtime constant
+        run: |
+          package=$(node -p "require('./package.json').version")
+          constant=$(node -p "require('node:fs').readFileSync('index.js','utf8').match(/const VERSION = '([^']+)'/)[1]")
+          if [ "$package" != "$constant" ]; then
+            echo "::error::package.json $package != index.js VERSION $constant"
+            exit 1
+          fi
+
       - run: npm run check
       - run: npm test
 

@@ -5,6 +5,15 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.2.3] — 2026-10-28
+
+### Fixed
+
+- **`/status` reports the version the package actually is.** `index.js` carries a `VERSION` constant
+  apart from `package.json`, and the release job never compared the two, so `0.2.2` went out with the
+  constant still on `0.2.1`: the settings page labelled a 0.2.2 install `v0.2.1`. They agree now, and
+  the release workflow gained the check CI already ran, so a tag cannot publish a skewed pair again.
+
 ## [0.2.2] — 2026-10-28
 
 ### Fixed

@@ -102,7 +102,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.2.1'
+const VERSION = '0.2.3'
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
