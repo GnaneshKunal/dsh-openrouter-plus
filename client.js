@@ -6,6 +6,12 @@
  * shows one pinned base URL per preset (with a copy button), the weighted cost signal,
  * provider-route creation, and the most recent relayed requests.
  *
+ * The same page answers `plugins.bundle.config`, keyed by this package's name, so the
+ * bundle's card under Plugins → Installed has the page instead of only a version and an
+ * Uninstall button. One body, two seats: the Settings section supplies no chrome, the
+ * Plugins page supplies the title and description, so the body drops its own title and
+ * intro in that seat (see `pageChrome`) and keeps everything else.
+ *
  * It also answers the `settings.models.provider-card` seat for the `llm-pi-ai` family:
  * one compact strip per provider row that routes that row through the relay (attach or
  * detach) without touching the settings card's own draft.
@@ -1626,11 +1632,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Which page chrome this seat draws.
+     *
+     * The same body answers two seats, and the frames around them are not the same height.
+     * `settings.section` renders our page alone in the content column — the Settings shell
+     * supplies no copy of its own — so the title and the one-line intro have to come from
+     * here. `plugins.bundle.config` renders *inside* the bundle's Plugins page, which already
+     * draws the package title, its version and its `package.json` description above the body;
+     * repeating either would print "OpenRouter Plus" twice and say the same thing twice.
+     *
+     * Everything else — status, the relay/upstream line, mounts, counters, routes — is
+     * identical in both seats, and that is the point of registering one body in two places.
+     */
+    function pageChrome(seat) {
+      const inPlugins = seat === 'plugins';
+      return { title: !inPlugins, intro: !inPlugins };
+    }
+
+    /**
      * The page body. Everything stateful lives here so the slot wrapper stays trivial and
      * unmounting the slot tears down every timer, fetch and listener this page owns.
      */
     function PageBody(props) {
       const t = props.t;
+      const chrome = pageChrome(props.seat);
 
       /* One base, because the control API is mounted on this page's own origin. */
       const origin = CONTROL_BASE;
@@ -2149,7 +2174,7 @@ window.__ModuleLoader__.load({
           'div',
           { style: HEADER_ROW_STYLE },
           h('span', { style: dotStyle(connection), 'aria-hidden': 'true' }),
-          h('h2', { style: TITLE_STYLE }, t('card.title')),
+          chrome.title ? h('h2', { style: TITLE_STYLE }, t('card.title')) : null,
           h('span', { role: 'status', 'aria-live': 'polite', style: STATUS_TEXT_STYLE }, t(connectionKey)),
           snapshot !== null && snapshot.version !== ''
             ? h(
@@ -2597,7 +2622,7 @@ window.__ModuleLoader__.load({
         'section',
         { 'aria-label': t('card.regionAria'), style: PAGE_STYLE },
         header,
-        h('p', { style: INTRO_STYLE }, t('page.intro')),
+        chrome.intro ? h('p', { style: INTRO_STYLE }, t('page.intro')) : null,
         connection === 'offline' ? renderOffline() : null,
         connection === 'online' && snapshot !== null ? renderMounts() : null,
         connection === 'online' && snapshot !== null ? renderSavings() : null,
@@ -3804,6 +3829,7 @@ window.__ModuleLoader__.load({
         normalizeMounts,
         pinnedMounts,
         presetFromLegacyTier,
+        pageChrome,
         controlUrl,
         controlBase: CONTROL_BASE,
       },
@@ -3816,8 +3842,15 @@ window.__ModuleLoader__.load({
 
         const t = ctx.locale.bind(NS);
 
-        function OpenRouterPlusPage() {
-          return h(PageBoundary, { t: t }, h(PageBody, { t: t }));
+        /*
+        * One body, two seats. `seat` decides the chrome (see `pageChrome`), not the content:
+        * the Settings page draws its own title and intro, the Plugins bundle page is framed by
+        * the package's title, version and description.
+        */
+        function pageFor(seat) {
+          return function OpenRouterPlusPage() {
+            return h(PageBoundary, { t: t }, h(PageBody, { t: t, seat: seat }));
+          };
         }
 
         /*
@@ -3830,7 +3863,32 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') },
-            OpenRouterPlusPage,
+            pageFor('settings'),
+          ),
+        );
+
+        /*
+        * The same page on the bundle's own Plugins page (Plugins → Installed → OpenRouter
+        * Plus, in the sidebar's plugin manager, not Settings → Built-in plugins, which only
+        * lists component status). The profile lists this plugin as a bundle, so that card
+        * exists whether or not we answer here — without this registration it shows the
+        * package's title, rows, version, source and Uninstall, and nothing to configure.
+        *
+        * The seat is keyed by the BUNDLE's package name, `dsh-openrouter-plus` — not the row
+        * id (`openrouter-plus`) the patch declares and not the locale namespace; a wrong key
+        * fails silently by rendering nothing. The page draws its own title, icon and crumb,
+        * and `view` is always `'page'` here (bundle configuration has no summary form), which
+        * is why the seat cannot be told apart from the owner props and travels as our own
+        * prop instead.
+        *
+        * Keep this seat `view: 'page'` and the body self-contained: the host-owned `form`
+        * prop (a `ConfigPageForm` over the settings service) is unused here, because this
+        * plugin's configuration lives on the relay's control API, not in a settings schema.
+        */
+        ctx.slots.inject('plugins.bundle.config', () =>
+          ctx.slots.register(
+            { name: 'plugins.bundle.config', key: 'dsh-openrouter-plus' },
+            pageFor('plugins'),
           ),
         );
 

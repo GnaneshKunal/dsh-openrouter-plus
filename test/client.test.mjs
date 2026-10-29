@@ -178,6 +178,65 @@ test('the browser half names no loopback address or relay port', async () => {
   assert.equal(/localhost/.test(source), false, 'no localhost literal')
 })
 
+test('the page drops its own title and intro inside the Plugins frame', () => {
+  /* The same body answers Settings → OpenRouter Plus and the bundle's Plugins page.
+     Only the first frame is empty: the Settings shell supplies no copy of its own, so
+     the page has to draw its own `h2` and intro line. The Plugins page draws the
+     package title, its version and its `package.json` description above the body, so
+     both would print twice. */
+  const { pageChrome } = module.__test
+  assert.deepEqual(pageChrome('settings'), { title: true, intro: true })
+  assert.deepEqual(pageChrome(undefined), { title: true, intro: true }, 'the Settings seat is the default')
+  assert.deepEqual(pageChrome('plugins'), { title: false, intro: false })
+})
+
+test('the page answers both the Settings nav and the bundle page', () => {
+  /* `plugins.bundle.config` is keyed by the BUNDLE's package name — not the row id the
+     patch declares (`openrouter-plus`) and not the locale namespace. A wrong key does not
+     error: the seat renders nothing, and the plugin's card in Installed plugins keeps
+     showing a version and an Uninstall button with nothing to configure. */
+  const registrations = []
+  const pending = []
+  const ctx = {
+    effect: (factory) => {
+      const dispose = factory()
+      return () => {
+        if (typeof dispose === 'function') dispose()
+      }
+    },
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    slots: {
+      inject: (name, factory) => {
+        pending.push({ name, factory })
+        return () => {}
+      },
+      register: (entry, component) => {
+        registrations.push({ entry, component })
+        return () => {}
+      },
+    },
+    inject: () => {},
+  }
+
+  module.apply(ctx)
+  for (const { factory } of pending) factory()
+
+  const byName = (name) => registrations.find((registration) => registration.entry.name === name)
+  const section = byName('settings.section')
+  assert.equal(section.entry.id, 'openrouter-plus')
+  assert.equal(typeof section.component, 'function')
+
+  const bundle = byName('plugins.bundle.config')
+  assert.ok(bundle, 'the bundle page has no body without this registration')
+  assert.equal(bundle.entry.key, 'dsh-openrouter-plus', 'keyed by the bundle package name')
+  assert.equal(bundle.entry.key, definition.id, 'and the loader id is that same package')
+  assert.equal(typeof bundle.component, 'function')
+
+  /* Two registrations, two components: the seat travels as a prop, so the Plugins one
+     must not be the Settings page handed over again without it. */
+  assert.notEqual(bundle.component, section.component)
+})
+
 test('the Sync control is offered only on a provider row routed through the relay', async () => {
   /* The rule: the **Route through OpenRouter Plus** switch is on every `llm-pi-ai`
      card, and the live-model picker (button and panel alike) waits for that switch.

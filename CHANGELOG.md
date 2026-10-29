@@ -5,6 +5,40 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.2.4] — 2026-10-29
+
+### Added
+
+- **The page now also lives on its own Plugins card.** The profile has always listed this package as
+  a bundle, so Plugins → Installed showed a card for it — title, version, the row
+  the patch declares, source, **Uninstall** — and that card answered nothing when opened. It now
+  registers `plugins.bundle.config`, keyed by the package name, and renders the same page there: relay
+  state, the mount table, the counters, the routes. Someone who installs a plugin from that page can
+  finally configure it from that page too, without hunting for the nav row it added.
+
+  The two frames are not the same height, so the body draws its chrome per seat: the Settings shell
+  supplies no copy of its own and the page keeps its `h2` title and intro line there, while the
+  Plugins page already prints the package title, its version and its `package.json` description a few
+  pixels above the body — so the same two elements are dropped in that seat. Nothing below changes;
+  it is one body in two places, not a second copy.
+
+  Settings → OpenRouter Plus is unchanged and stays: the seat is a *second address* for the console,
+  not a replacement. A dashboard of live traffic in the bundle page's slot — between the description
+  and the rows — would have been three clicks deep, under the Uninstall button.
+
+  Both registrations are pinned by `test/client.test.mjs`: that the bundle seat is keyed by
+  `dsh-openrouter-plus` (the package, not the row id `openrouter-plus`, which renders nothing and
+  fails silently) and that the two seats get distinct components, since the seat travels as a prop.
+  The chrome rule is pinned through a `pageChrome` test rather than by reading the source.
+
+### Fixed
+
+- **A failing boot test hung the suite instead of failing it.** `test/host.test.mjs` compared
+  `/health` against a hardcoded version string, so the 0.2.4 bump turned it red — and because the
+  test called `dispose()` on its last line, the throw skipped it, the relay stayed bound, and
+  `node --test` never exited. The assertion now reads `package.json`, so a bump cannot break it, and
+  the test registers a shutdown net that runs whether the body passes or throws.
+
 ## [0.2.3] — 2026-10-28
 
 ### Fixed

@@ -6,8 +6,14 @@
 import { strict as assert } from 'node:assert'
 import http from 'node:http'
 import { test } from 'node:test'
+import { readFile } from 'node:fs/promises'
 
 import { apply, normalizeConfig, normalizeRoutes } from '../index.js'
+
+/** The version the package declares, so `/health` is compared against the truth and not a literal. */
+const { version: PACKAGE_VERSION } = JSON.parse(
+  await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+)
 
 /** Reserve a port by binding it, then hand it over. */
 async function freePort() {
@@ -161,9 +167,20 @@ test('normalizeConfig applies defaults and rejects nonsense', () => {
   )
 })
 
-test('boots the relay, serves control endpoints, and stops cleanly', async () => {
+test('boots the relay, serves control endpoints, and stops cleanly', async (t) => {
   const port = await freePort()
   const { ctx, logs, dispose } = createFakeContext()
+
+  /* A failure anywhere below would otherwise skip `dispose()` and leave the listener
+     bound, which keeps the process alive: the suite hangs instead of reporting a
+     failure. The test still asserts the shutdown itself; this is only the net. */
+  let stopped = false
+  const stop = async () => {
+    if (stopped) return
+    stopped = true
+    await dispose()
+  }
+  t.after(stop)
 
   apply(ctx, { port, portFallback: false })
 
@@ -188,7 +205,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
 
   const health = await (await fetch(`${origin}/__openrouter-plus/health`)).json()
   assert.equal(health.ok, true)
-  assert.equal(health.version, '0.2.3')
+  assert.equal(health.version, PACKAGE_VERSION, '/health reports the version package.json ships')
   assert.equal(typeof health.uptimeMs, 'number')
 
   // CORS is reflected for a loopback GUI origin only
@@ -292,7 +309,7 @@ test('boots the relay, serves control endpoints, and stops cleanly', async () =>
   const noSession = await postJson(`${origin}/__openrouter-plus/tier`, { preset: 'priority' })
   assert.equal(noSession.status, 400, 'the Session is required')
 
-  await dispose()
+  await stop()
 
   await waitFor(async () => {
     try {

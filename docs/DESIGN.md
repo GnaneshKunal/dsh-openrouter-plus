@@ -133,6 +133,41 @@ So the write takes an explicit selection:
    and a listener created during activation inherits that async context — the same reason every other
    route mutation here is wrapped in `outsideHmrTransaction`.
 
+## Where the page lives: two seats, one body
+
+The relay's page is the operator's console: relay state, the mount table to copy from, the measured
+multiplier, the traffic counters. It is not a form, and that is what makes its address a real
+question.
+
+**Settings navigation (`settings.section`, `order: 12`) — kept.** The shell supplies no copy of its
+own for a section page, so the page carries its own title and intro line and sits one click from
+whatever the operator was doing. This is where a page that answers "is my routing working right now"
+belongs.
+
+**Plugins → Installed (`plugins.bundle.config`) — added in 0.2.4.** The profile already
+listed this package as a bundle, so the card was always there — title, version, the row the patch
+declares, source, Uninstall — and answered nothing when opened. A plugin that installs from that page
+and cannot be configured from it is a hole, not a design: someone who came for the uninstall button
+should find the settings beside it.
+
+Both seats render the same body; only the chrome differs, because the two frames are not the same
+height. `pageChrome(seat)` drops the page's `h2` and its intro line in the Plugins seat — that page
+already prints the package title, its version and its `package.json` description a few pixels above.
+Everything below stays identical, which is the point: two addresses for one console, no second copy
+of the logic to drift.
+
+What was considered and rejected: **moving the page out of Settings.** The bundle page renders a
+contribution between the package description and its rows, which suits a compact config form (that is
+what `dsh-client-auto-continue` puts there — six tabs of settings, no live data). A dashboard of live
+traffic in that slot is three clicks deep, under a page whose most prominent control is *Uninstall*.
+Kept as a second address instead of a replacement. `dsh-cost-meter` reached the same conclusion and
+registers one component in both seats.
+
+Also rejected: **`plugins.row.config`** (keyed `dsh-openrouter-plus#openrouter-plus`). It renders the
+page behind a *Configure* control on the row, headed by the plugin's own display title — a tidier
+frame for a full page, at the cost of hiding the status behind one more click. If the status ever
+comes off this page, that is the seat to move it to.
+
 ## Invariants worth protecting
 
 1. **Never invent a routing decision the caller did not choose.** The pass-through preset sends no

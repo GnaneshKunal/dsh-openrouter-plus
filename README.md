@@ -63,7 +63,10 @@ switching never mints a provider, a route or a model list.
   offers the same choice twice.
 - **Its own settings page** (Settings → OpenRouter Plus) showing relay state, one pinned base URL
   per preset with a copy button, live request/token counters per preset, the measured effective
-  multiplier, and recent requests.
+  multiplier, and recent requests. The same page is the bundle's body on its Plugins card
+  (Plugins → Installed → OpenRouter Plus, in the sidebar's plugin manager), beside the version and
+  the Uninstall button — so the plugin is configurable from where it was installed, not only from
+  the nav row it added.
 - **A preset chip in the composer** — next to the model selector, a compact chip shows the preset
   this Session will actually apply and switches it in one click. The switch is **per session**: it
   changes what the next request from *this* conversation carries, so two conversations can sit on
@@ -130,6 +133,12 @@ it was tested against instead of mounting something that cannot work.
 
 The plugin adds one entry to Settings navigation: **OpenRouter Plus**, directly after *Models*. If
 the relay is up, the page shows the origin (`http://127.0.0.1:8791`) and its mounts.
+
+It also fills the body of its own card under **Plugins → Installed**, the plugin manager in the main
+sidebar (not *Settings → Built-in plugins*, which only lists component status). Both seats render the
+same page, so there is one place to learn the relay state and one place to change it — pick whichever
+you were already in. The Plugins card additionally carries the installed version, the rows the bundle
+declares, the npm source and the uninstall button.
 
 ## Releasing
 
@@ -447,6 +456,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `Ultra` behaves like `Priority` | `ultrafast` only holds on OpenAI models that receive a `max_tokens` limit; without one the API degrades to priority. The relay never invents a limit, so set one on the model row. |
 | The page says *failed to render*, and switching the chip says *the relay did not confirm the change* | The tab is running the browser half from before the update against the restarted Host. Reload the page (or reopen the app window); only a document reload re-fetches the client bundle, and a Host restart alone keeps the old module in memory. |
 | No effort selector for a relay route's model | The model has no `reasoningEfforts` — usually because the model list was edited in Settings → Models afterwards. It is restored automatically; if `autoRepairReasoning` is off, press **Add reasoning to N models** on the OpenRouter Plus page. See "Reasoning effort on a relay route". |
+| The Plugins card for OpenRouter Plus shows a version and nothing else | You are on a build older than 0.2.4, where the page answered Settings navigation only. Update; the card then carries the same page as Settings → OpenRouter Plus. |
 
 ## Uninstall
 

@@ -41,6 +41,12 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 - Settings navigation is a list slot (`settings.section`): one registration = one page, with a
   localized `label` thunk and an `order` seat. We take a page of our own at `order: 12` (right after
   Models), so the relay surface is not appended to a page owned by another feature.
+- A plugin page has a second home. The profile lists this package in `dsh.profile.bundles`, so
+  Plugins → Installed (the sidebar's plugin manager) already renders a card for it — title, version, the rows
+  the patch declares, source, enable switch, Uninstall — with no body of its own. `plugins.bundle.config`
+  is a `keyed`, root-scoped seat on that page (`view: 'page'` only; keyed by the **package** name, not
+  the row id), rendered between the package description and its rows. Answering it puts the page
+  there; the page's chrome (title, icon, crumb) is drawn by the Plugins page, not by us.
 - `ctx.configEditor` (Host) exposes `entries()`, `configuration()` and
   `edit(entry, (current, inherited) => nextRawConfig)`; edits go through the normal Loader path, so
   a new route appears in the Models page / model picker once reconciliation completes.
@@ -56,7 +62,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
 | `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
-| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus" and the `settings.models.provider-card` row extension. |
+| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), and the `settings.models.provider-card` row extension. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
 Plain ESM JavaScript, **no build step, no third-party runtime dependencies** (Node ≥ 20 built-ins
@@ -350,7 +356,11 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - `const React = require('react')` — never install a second React.
 - `inject: ['slots', 'locale']`; register a locale namespace (`dsh-openrouter-plus`) with `en` and
   `zh` dictionaries through `ctx.locale.register(ns, { en, zh })` and bind it.
-- `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, OpenRouterPlusPage))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
+- `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'openrouter-plus', order: 12, label: () => t('nav') }, pageFor('settings')))` — one seat in Settings navigation rendered as a full page (720 px column, `h2` title, intro line), not a card appended to another feature's page.
+- `ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: 'dsh-openrouter-plus' }, pageFor('plugins')))` — the same body on the bundle's own Plugins page (Plugins → Installed → OpenRouter Plus). This is the sidebar's plugin manager, not Settings → Built-in plugins, which is a read-only inventory. Three details, each of which fails quietly when wrong:
+  - **The key is the bundle's package name.** `openrouter-plus` (the row id in `cordis.patch.yml`) and the locale namespace are both wrong; a key nothing matches renders nothing, and the card keeps showing a version and an Uninstall button as if the plugin had no settings at all.
+  - **`view` is always `'page'`.** Bundle configuration has no summary form, so the seat cannot be told apart from the owner props. It travels as our own `seat` prop through a per-seat component (`pageFor`), and `pageChrome()` drops the `h2` and the intro line in the Plugins seat — that page already draws the package title, its version and its `package.json` description above the body.
+  - **The host-owned `form` prop goes unused.** It is a `ConfigPageForm` over the DSH settings service (`state`/`mutate` against a settings entry); everything here reads and writes the control API instead. Wiring it up would create a second source of truth for the same settings.
 - **The relay and the page update independently.** A Host restart re-applies `index.js`; the page
   keeps the client bundle it already evaluated until the document is reloaded, because the loader
   fetches each bundle once per document. So the client reads both payload shapes: `/tier` answers
