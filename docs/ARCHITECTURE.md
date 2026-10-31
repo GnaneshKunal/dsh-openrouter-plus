@@ -56,13 +56,14 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | File | Owner | Contract |
 | --- | --- | --- |
 | `index.js` | lead | Host plugin entry: config normalization, lifecycle, control endpoints. |
-| `lib/proxy.js` | relay-core | `createRelay(options) -> { start, stop, address, routes }` |
-| `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot }` |
+| `lib/proxy.js` | relay-core | `createRelay(options) -> { start, stop, address, routes }`; also exports the response sniffer (`findUsage`, `findGenerationId`, `createUsageSniffer`) |
+| `lib/metrics.js` | relay-core | `createMetrics(options) -> { record, snapshot, exportState, hydrate, dayKey }`; real-USD cost in local-day buckets, tokens as process counters |
+| `lib/usage-store.js` | relay-core | `usageStorePath(env)`, `decodeUsageStore(raw)`, `readUsageStoreSync(path)`, `writeUsageStore(path, state)`; the persisted day table, atomic and advisory |
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
 | `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
-| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), and the `settings.models.provider-card` row extension. |
+| `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
 Plain ESM JavaScript, **no build step, no third-party runtime dependencies** (Node ≥ 20 built-ins
@@ -81,7 +82,7 @@ dispatch call, not a second implementation.
 | Method + path | Body | Response |
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
-| `GET /__openrouter-plus/status` | — | `{ ok, version, address, upstream, routes, controlPrefix, metrics }` |
+| `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
 | `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, reasoning: { fill, levels } }` | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
@@ -94,6 +95,7 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, preset, wire: { serviceTier, sort, variant }, chosen, default, presets }` — what that Session applies *now* |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` (or a tier-era `tier`) | the same body; `preset: null`/absent clears. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` (or `tier`) | `{ ok, default, presets }`; one config write, because it is a preference. An absent preset means `none` |
+| `POST /__openrouter-plus/widget` | `{ enabled: boolean }` | `{ ok: true, usageWidget: { enabled } }`; one config write — the sidebar card's preference (`usageWidget` on the plugin row). A non-boolean `enabled` is a `400` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
@@ -240,43 +242,117 @@ Behaviour that the caller relies on:
 4. **Timeouts** — no request timeout on the server and no upstream timeout unless configured, so a
    long completion is not cut. Client aborts propagate upstream.
 5. **Metrics** — `onRecord` receives one entry per proxied request:
-   `{ at, tier, preset, model, streaming, status, ms, bytes, promptTokens, completionTokens }`.
-   `tier` is the wire field that was sent (if any), `preset` the outcome the Session picked — a sort
-   preset sends no tier, so these two are not the same thing.
-   Token counts come from a `usage` object when one is visible in a non-streaming JSON response or
-   in the tail of an SSE stream; otherwise they are `null` and `bytes` is the signal.
+   `{ at, tier, preset, sessionId, model, servedModel, servedTier, streaming, status, ms, bytes,
+   promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens, costUsd,
+   upstreamCostUsd, upstreamPromptCostUsd, upstreamCompletionCostUsd, serverToolCostUsd, byok,
+   genId }`. `tier` is the wire field that was sent (if any), `preset` the outcome the Session
+   picked — a sort preset sends no tier, so these two are not the same thing; `model` is what the
+   request asked for while `servedModel`/`servedTier` are what answered (a fallback can change them).
+   Usage is read from a `usage` object in a non-streaming JSON body or in the tail of an SSE stream;
+   a bounded head copy keeps the `gen-…` id of a stream that was aborted before its usage chunk.
+   **Cost fields are `null` when the provider did not report them** — zero is reserved for a free
+   endpoint that really said zero — and the sniffer never alters the bytes it inspects.
 6. **Errors** — an unreachable upstream yields a `502` JSON body `{ error: { message } }`; no stack
    traces leak to the caller.
 
 ## `lib/metrics.js`
+
+Two facts live here and the code keeps them apart: **cost** is the money OpenRouter charged, read off
+each response's `usage.cost` (so it already reflects the endpoint that served — flex, priority,
+ultrafast, a `:floor` endpoint, an upstream fallback); **tokens** are counters since this process
+started, plus a `multiplier` view used only to compare tiers. A multiplier is a weight, never money,
+and it is not allowed to stand in for `costUsd`.
 
 ```js
 /**
  * @param {object} [options]
  * @param {number} [options.recentLimit=50]
  * @param {Record<string, number>} [options.tierMultipliers]   default: see below
+ * @param {number} [options.dayLimit=USAGE_DAY_LIMIT]
  */
 export function createMetrics(options)
 
-// record(entry)  entry: { at?, tier, model?, status, ms, bytes, streaming, promptTokens, completionTokens }
+// record(entry)   entry: { at?, tier?, preset?, model?, servedModel?, servedTier?, sessionId?,
+//   status?, ms?, bytes?, streaming?, promptTokens?, completionTokens?, cacheReadTokens?,
+//   cacheWriteTokens?, reasoningTokens?, costUsd?, upstreamCostUsd?,
+//   upstreamPromptCostUsd?, upstreamCompletionCostUsd?, serverToolCostUsd?,
+//   byok?, genId? }
 // snapshot() -> {
-//   startedAt, requests, errors, streamingRequests,
-//   promptTokens, completionTokens, bytes,
-//   byTier: Record<string, { requests, promptTokens, completionTokens, multiplier, effectiveTokens }>,
-//   effectiveMultiplier,          // weighted average billed multiplier across tiers with traffic
-//   recent: entry[]               // newest first, capped at recentLimit; carries `preset` too
+//   startedAt, uptimeMs, requests, errors, streamingRequests,
+//   promptTokens, completionTokens, tokens, bytes,
+//   costUsd,                     // money across the retained window
+//   todayUsd,                    // the local calendar day in progress
+//   byTier: Record<string, { requests, promptTokens, completionTokens, tokens, multiplier,
+//                            effectiveTokens, costUsd }>,
+//   byModel: Row[],              // today's models, sorted by costUsd then tokens (both desc)
+//   byModelAll: Row[],           // the retained window's models, same ordering
+//   bySession: Array<{ session, requests, promptTokens, completionTokens, costUsd, lastAt }>,
+//                                // per relayed session, cost desc, process-local, capped
+//   days: Array<{ date, requests, promptTokens, completionTokens, costUsd }>,  // newest first
+//   effectiveMultiplier, tierMultipliers,
+//   recent: entry[]              // newest first, capped at recentLimit; carries every field
+//                                // above, plus promptCostUsd/completionCostUsd (the split)
 // }
+// exportState() -> { version: 2, counters, tiers, sessions, recent, days }  // a reload keeps all of it
+// hydrate(state)                                 // replaces the day table; bad rows are skipped
+// dayKey(atMs) -> 'YYYY-MM-DD'                   // the local day, exported for callers/tests
 ```
 
-Default multipliers (OpenAI/OpenRouter tier pricing): `flex: 0.5`, `scale: 1.0`, `auto: 1.0`,
-`default: 1.0`, `priority: 2.0`, `fast: 2.0`, `ultrafast: 4.0`, and `null/unset: 1.0`. They are a
-*rough* weight for the cost signal, not a promise: the page shows the preset a request actually ran
-under, and a preset that sends no `service_tier` sorts by price or throughput instead of billing a
-multiplier.
-`effectiveTokens = (promptTokens + completionTokens) * multiplier`.
+Rules the surfaces depend on:
 
-`snapshot()` must be cheap and non-throwing for a stats endpoint polled every few seconds, and the
-`recent` ring must never grow unbounded.
+- **Local calendar days, not UTC and not "since start".** `dayKey()` is the local
+  `YYYY-MM-DD`, because "today" on the card and `todayUsd` are phrased in the user's own day.
+  `USAGE_DAY_LIMIT` (14) bounds the window: a new bucket older than the window is dropped as it is
+  created, oldest days go first, and each day keeps rollups for at most `USAGE_MODEL_LIMIT` (40)
+  models — the cheapest tail is dropped from the *rollup*, while the day's totals still count every
+  request.
+- **Null is a fact; zero is a claim.** `costUsd: null` (a failed call, an aborted stream, no usage
+  block) stays `null` in `recent` and adds no money; a reported `0` stays `0` and is preserved as a
+  free call. The same guard runs at ingest: non-finite, negative or absurd amounts become 0 rather
+  than poisoning every later total, and unusable token counts become 0.
+- **A call that reported nothing is still traffic.** It increments `requests`/`errors` and the day's
+  request count, but creates no model row: an empty line would push a real model down the card.
+- **`servedModel`/`servedTier` describe what answered; `model`/`tier` describe what was asked.**
+  `preset` is the outcome a person picked, which a sort preset sends without a tier at all.
+- **Money persists, traffic does not.** `exportState()` carries the day buckets only — cost, tokens
+  and model rollups per day. The `recent` ring, the global counters and `byTier` (including its
+  `costUsd`) stay process-local: replaying them after a reload would attribute requests that no
+  longer exist.
+- `snapshot()` must stay cheap and non-throwing for a stats endpoint polled every few seconds, and
+  `recent` must never grow past `recentLimit`.
+
+Default multipliers (OpenAI/OpenRouter tier pricing): `flex: 0.5`, `scale: 1.0`, `auto: 1.0`,
+`default: 1.0`, `priority: 2.0`, `fast: 2.0`, `ultrafast: 4.0`, and `null/unset: 1.0`.
+`effectiveTokens = (promptTokens + completionTokens) * multiplier`, and `effectiveMultiplier` is the
+weighted average across tiers with traffic. See `docs/USAGE.md` for the user-facing cost semantics.
+
+## `lib/usage-store.js`
+
+The persisted half of the cost telemetry: the one number the plugin cannot recompute once the
+response is gone.
+
+```js
+export const USAGE_STORE_VERSION = 1
+export const USAGE_STORE_MAX_BYTES = 256 * 1024
+
+export function usageStorePath(env = process.env)   // $DSH_HOME/storages/dsh-openrouter-plus/usage.json
+export function decodeUsageStore(raw)               // envelope only: { version: 1, days: object[] } | null
+export function readUsageStoreSync(path)            // decoded snapshot or null; never throws
+export async function writeUsageStore(path, state)  // boolean; false = refused or failed, never throws
+```
+
+- **Synchronous read at start.** The relay must not begin forwarding before the day table is loaded,
+  or the first requests of a reload could be overwritten by the hydrate landing a tick later.
+- **Atomic, owner-only, bounded.** A write lands through a temp file beside the target plus a rename,
+  mode `0600`; an unencodable snapshot or one over 256 KiB is refused with `false`. The caller keeps
+  serving: a failed write is not a failed request, and the numbers stay in memory for the next flush.
+- **Advisory on read.** A missing, corrupt, oversized or unknown-version file answers `null` — "no
+  history yet". `decodeUsageStore` validates only the envelope (`version` exactly 1, `days` an
+  array); `metrics.hydrate` validates every row, so one bad day is dropped instead of the whole
+  snapshot.
+- **Who drives it.** `index.js` reads it at plugin start (`metrics.hydrate`), writes on a 5 s
+  debounce after traffic and flushes on dispose. With zero day buckets the flush is skipped, so a
+  Host that never carried a request creates no file in the user's home directory.
 
 ## `lib/config-bridge.js`
 
@@ -372,12 +448,16 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   clear the timer on unmount), renders connection state, one pinned base URL per preset
   (`pinnedMounts()`, which
   folds `/auto/v1`, `/fast/v1` and `/scale/v1` onto the mount that means the same thing) with copy
-  buttons, live counters, and a
+  buttons, live counters, the money rows (today and the retained window, plus cost per preset, all
+  hidden on a Host that reports no cost rather than shown as `$0`), and a
   "routes on this relay" block that reads `/targets`, sets the profile **Service tier for new
   sessions** (`POST /tier/default`) together with a short table of what each preset sends, and posts
   `/routes/remove` — all with the `x-oorp-client: web` header. The per-Session control is the
   composer chip, not this page. The split is deliberate: the picker is a preset switch, the page
-  explains what each pin does.
+  explains what each pin does. The same section carries the **Show spend card in the sidebar**
+  switch, driven by `POST /widget`: it is a config write, so the relay re-applies the row and
+  `/status` can fail or answer the old flag for a second — the click is held optimistically and the
+  next read-back decides, and a cut connection is not treated as a refusal.
 - **Why the API is not on the relay.** The relay listens on loopback because it is an upstream
   proxy that forwards the caller's key, and only the Host dials it. The page is a different client:
   it runs wherever the user opened the GUI, so it addresses `/__openrouter-plus/*` relatively and
@@ -413,6 +493,40 @@ factory(require) { ... } })` call (see the decoration template). Inside:
   Its menu carries labels only; the descriptions are on the settings page. It renders nothing unless
   the Session's current provider sits on a `/t/<targetId>/…` mount and never calls
   `settings.mutate`.
+- **The sidebar spend card.** A fourth seat, `sidebar.footer.action` (a free `list` seat at the
+  sidebar's foot, beside Settings), registered as
+  `{ name: 'sidebar.footer.action', id: 'openrouter-plus-usage', order: 0 }` — keyed by our own id,
+  no owner key. It owns its own chained-`setTimeout` poll of `/status` (never `setInterval`, so a
+  slow relay cannot stack probes), skips the fetch while the document is hidden, aborts on unmount,
+  and draws **nothing** until three Host facts line up: `usageWidget.enabled === true`,
+  `bound === true`, and `metrics.costUsd` present. That gate is why an older Host shows no card
+  instead of a confident `$0.00`; the collapsed rail (`wide === false`) draws nothing either, and a
+  render crash is swallowed by a boundary that renders nothing *and* logs nothing — the sidebar foot
+  is always on screen and is not the place to announce that a card failed.
+- **The details dialog.** The card is a single button: `OpenRouter` plus today's spend, and one press
+  opens the dialog — it does not unfold in the sidebar. The dialog keeps today / all time above four
+  tabs: **Models** (a table of model, input, cache read/write, output, requests and cost, with a
+  totals row), **Requests** (the last 50 with model, the response's top-level `provider` as its own
+  column, preset, session id + title, status, duration, stream, cost and tokens; each row expands one
+  at a time into the raw fields — served model and tier, BYOK, generation id, `usage.cost`, and the
+  upstream prompt/completion and server-tool charges), **Presets** (cost by routing outcome) and
+  **Sessions** (name + id, requests, tokens and spend per relayed session, from `metrics.bySession`
+  with titles resolved through the Host's `sessions` service — ids, not titles, are what the relay
+  itself stores). It closes on Escape, on the
+  backdrop, and when the relay stops answering rather than freezing a snapshot of a service that is
+  gone.
+  It is **not** rendered inside the card: the card's slot can be hosted by a shell popover that
+  unmounts on the very press that opens the dialog, so the dialog is mounted into a React root of
+  its own on `document.body` (`createUsageDialogMount`, cleaned up with the plugin). The card only
+  calls `open(usage, t)`; a host that publishes no `react-dom/client` falls back to the inline
+  dialog, which is why that older path survives.
+- **Payload tolerance is the rule, not an afterthought.** The Host half and the browser half update
+  independently, so every cost field is read defensively: an absent `usageWidget` becomes
+  `available: false` (the settings page then offers no checkbox) rather than "off"; a missing
+  `metrics.costUsd` omits the cost rows instead of printing `$0`; a missing `todayUsd` is rendered
+  *not reported*; `normalizeUsageRecent` accepts the cost details under either the wire's snake_case
+  (`upstream_inference_cost`) or the camelCase a Host may forward, and a `null` amount stays null.
+  BYOK's upstream charge is displayed beside `costUsd`, never added to it.
 - Do not replace `conversation.input.model`: it is a `single` seat owned by
   `ui-model-selection` (`replaceRisk: shadows-shipped-ui`), and occupying it means reimplementing the
   two-level provider/model menu, effort levels, search and `/model` parity.

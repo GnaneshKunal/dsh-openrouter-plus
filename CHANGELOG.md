@@ -5,6 +5,92 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.3.0] — 2026-10-31
+
+**Spend, in dollars, not a token estimate.** The relay now records what OpenRouter actually charged
+for each request — `usage.cost`, which already reflects the endpoint that served it — keeps up to 14
+local days across a Host restart, and surfaces them in a sidebar card, a details dialog, the settings
+page and the status API.
+
+### Added
+
+- **The billed amount is read off the response.** The sniffer now captures `usage.cost`, the
+  `usage.cost_details` breakdown (`upstream_inference_cost`, its prompt/completion split and
+  `server_tool_cost`), `usage.is_byok`, the served `service_tier`, the served `model` and the
+  `gen-…` generation id. It reads a bounded head (8 KiB, where the first envelope and the id arrive)
+  and tail (64 KiB, where a stream's final usage block lands) of bytes it forwards untouched, so a
+  stream's timing is unaffected and an aborted stream still keeps the id its charge can be found by.
+  Every field is `null` when the provider did not report it — `0` is kept for a free endpoint that
+  really said zero.
+- **A sidebar spend card and a details dialog.** `sidebar.footer.action` gains a one-line card
+  (`OpenRouter` · today's spend) that opens the dialog on press; the dialog keeps today vs all time
+  above **Models** (a full table), **Requests**, **Presets** and **Sessions** tabs. It polls
+  `/status` itself (hidden tabs do not poll), and draws nothing — not `$0.00` — on a Host that
+  predates the cost fields, while the relay owns no socket, or when the card is switched off.
+  Requests lists the last 50 with time, model, the response's top-level `provider` (its own column),
+  preset, session id + title, status, duration, stream, cost and tokens (each expandable into the raw
+  fields); Sessions sums `metrics.bySession` (name + id), which the relay builds from the session id
+  on each request, with titles resolved through the Host's session service.
+- **The whole snapshot survives a reload.** `usage.json` is now `version: 2` and stores the counters,
+  the per-tier split, the per-session rollup and the recent-requests ring alongside the day buckets
+  (a `version: 1` file still loads). Session names are folded from the Host's session log through
+  `sessionQuery.readTitleSnapshot(id)` at status time — never written into the snapshot — and cached
+  for a minute, so the Sessions tab and the Requests session column show the same name the sidebar
+  does.
+- **14 days of spend survive a reload.** Local-day buckets are persisted at
+  `$DSH_HOME/storages/dsh-openrouter-plus/usage.json` (`{ version: 1, days: [...] }`): read
+  synchronously at plugin start so a reload cannot overwrite the first requests, written on a 5 s
+  debounce and on dispose, replaced atomically (temp file + rename, mode `0600`, 256 KiB cap), and
+  ignored when missing, malformed or oversized. `metrics` gains `costUsd`, `todayUsd`, `byModel`
+  (today only), `byModelAll` (the retained window), `days[]` and `byTier[*].costUsd`; recent rows
+  carry the session, served model/tier, cache read/write and reasoning tokens, BYOK and generation
+  id.
+- **`usageWidget` and `POST /__openrouter-plus/widget`.** The card is on unless switched off; the
+  setting accepts `{ enabled: false }` or a bare `false` in the profile, and `/status` reports the
+  normalized object. The switch is a config write (the relay re-applies the row), so the page holds
+  the click optimistically and the next read-back decides — a cut connection is not a refusal.
+- **BYOK is kept as two bills.** `costUsd` is OpenRouter's charge for the request;
+  `upstreamCostUsd` is what the caller's own provider key was billed. They are shown side by side and
+  never summed.
+- **`docs/USAGE.md`** documents the field contract, the local-day window, null-vs-zero and what a
+  reload keeps.
+
+### Changed
+
+- The multipliers remain a **weight**, never money: `byTier` grew `costUsd` beside the multiplier
+  view, and every surface that shows money labels it as USD instead of implying the multiplier is a
+  price.
+- The settings page's *Spend impact* section gained the money rows and a cost-per-preset table; the
+  per-request cost, stream and token columns live in the new details dialog, where there is room for
+  them beside the expandable raw fields.
+- `/status` keeps its existing fields and adds `usageWidget` plus the money fields. An older client
+  ignores them; this one omits the cost rows when the Host does not report them.
+
+### Notes
+
+- **A reload keeps money, not traffic.** Token counters, the recent ring and `byTier` (including its
+  `costUsd`) start again at zero; `costUsd`, `todayUsd`, `byModel`, `byModelAll` and `days[]` come
+  back from the file.
+- **`null` is not `0`.** An unreported amount — a failed call, a stream aborted before its usage
+  chunk — stays null and renders *not reported*; a free endpoint's real zero is kept. A reported-
+  nothing call still counts as a request but creates no model row.
+- **No price table, no budget.** The relay stores no per-model prices and enforces no limit;
+  OpenRouter remains the source of truth for invoices and the generation id is the join key.
+- Upgrading needs a Host restart: the sniffer, the store and the endpoints are Host-side. The
+  sidebar card appears after the following page reload, and only on a Host that reports the fields.
+
+### Testing
+
+- 157 tests pass (25 added here). `test/metrics.test.mjs` (12) covers cost accumulation, local-day
+  buckets, `todayUsd`, today-vs-window model rollups and their ordering, per-tier cost, day pruning,
+  the model rollup cap, the export/hydrate roundtrip and its deliberate omissions, malformed hydrate
+  rows, the recent ring and null-vs-zero. `test/usage-store.test.mjs` (7) covers envelope validation,
+  tolerant reads, atomic replace at mode `0600`, oversize/unencodable refusal and the roundtrip.
+  `test/host.test.mjs` (+3) pins `normalizeUsageWidget` and the `POST /widget` contract: guard header,
+  boolean-only body, one config edit on the plugin row, and the next boot reading the flag back.
+  `test/client.test.mjs` (+3) pins the card's render gates, the rollup ordering it draws, and the
+  cost-detail tolerance that keeps a `null` from becoming `$0`.
+
 ## [0.2.4] — 2026-10-29
 
 ### Added

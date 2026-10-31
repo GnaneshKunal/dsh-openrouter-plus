@@ -1,36 +1,22 @@
-/**
- * dsh-openrouter-plus — browser half.
- *
- * Registers the `settings.section` page that appears as its own entry in Settings
- * navigation ("OpenRouter Plus"). The page reads the loopback relay's control API and
- * shows one pinned base URL per preset (with a copy button), the weighted cost signal,
- * provider-route creation, and the most recent relayed requests.
- *
- * The same page answers `plugins.bundle.config`, keyed by this package's name, so the
- * bundle's card under Plugins → Installed has the page instead of only a version and an
- * Uninstall button. One body, two seats: the Settings section supplies no chrome, the
- * Plugins page supplies the title and description, so the body drops its own title and
- * intro in that seat (see `pageChrome`) and keeps everything else.
- *
- * It also answers the `settings.models.provider-card` seat for the `llm-pi-ai` family:
- * one compact strip per provider row that routes that row through the relay (attach or
- * detach) without touching the settings card's own draft.
- *
- * Finally it answers `conversation.input.right`: a compact preset chip beside the
- * composer's model selector. A preset is a per-Session choice: the chip POSTs it to the
- * control API, the Host keeps it in memory and the relay applies it to that Session's
- * requests. The chip writes no provider configuration and leaves the model selection —
- * and the reasoning effort riding on it — untouched. Its menu carries labels only; what
- * each preset sends is documented on the settings page.
- *
- * Contract: docs/ARCHITECTURE.md ("client.js"). Plain browser JavaScript: no JSX, no
- * build step, no imports beyond the host React module table.
- */
 window.__ModuleLoader__.load({
   id: 'dsh-openrouter-plus',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
+
+    /*
+     * Detaching the details dialog needs a React root of its own (see
+     * `createUsageDialogMount`). The host publishes react-dom/client to every plugin, but a
+     * host that does not is still usable: the dialog then stays inline in the card, exactly
+     * as before, instead of the bundle throwing on import.
+     */
+    const ReactDOM = (() => {
+      try {
+        return require('react-dom/client');
+      } catch (error) {
+        return null;
+      }
+    })();
 
     /** Locale namespace owned by this plugin. */
     const NS = 'dsh-openrouter-plus';
@@ -55,6 +41,23 @@ window.__ModuleLoader__.load({
     const COPY_FEEDBACK_MS = 1600;
     const NOTICE_MS = 5000;
     const RECENT_LIMIT = 5;
+
+    /*
+     * The sidebar spend card polls `/status` itself instead of sharing the settings page's
+     * poll: that poll is local to `PageBody`, and turning its status machine into a store
+     * two surfaces subscribe to — error state, retry key, origin switch — would be a
+     * rewrite of code that works to save one loopback GET. Five seconds is the card's
+     * whole freshness budget: money only moves while a request is relayed.
+     */
+    const USAGE_POLL_INTERVAL_MS = 5000;
+    /** The Host retains 50; the details dialog lists everything it sends. */
+    const USAGE_RECENT_LIMIT = 50;
+    /**
+     * How long the settings page keeps an optimistic widget flag while the plugin reloads.
+     * A config write restarts the relay listener, so `/status` can answer the old flag for
+     * a moment; after this the next answer wins rather than the click.
+     */
+    const WIDGET_SETTLE_MS = 10000;
 
     /** One URL for every control call: the prefix, resolved against this page. */
     function controlUrl(pathText) {
@@ -180,7 +183,7 @@ window.__ModuleLoader__.load({
       'savings.above': 'Weighted at {multiplier}: priority, fast or ultrafast traffic bills above the list token price.',
       'savings.equal': 'Weighted at {multiplier}: traffic is billing at the default rate.',
       'savings.note':
-        'Multipliers are relative token prices. The relay does not know per-model prices, so no currency amount is shown.',
+        'Multipliers are relative token prices. The USD figures are what OpenRouter charged for relayed requests, read from each response rather than derived from a price table.',
 
       'providers.caption': 'Provider routes',
       'providers.explain':
@@ -277,6 +280,63 @@ window.__ModuleLoader__.load({
       'recent.stream': 'stream',
       'recent.streamTitle': 'Streamed response',
       'recent.bytesTitle': 'No usage reported; {bytes} bytes transferred',
+
+      /* The sidebar spend card and its details dialog. Cost here is money: the billed
+         amount each response reported in `usage.cost`. The multiplier above stays a
+         weight, so nothing on this surface is derived from a price table. */
+      'usage.title': 'OpenRouter',
+      'usage.openAria': 'OpenRouter {today}',
+      'usage.today': 'Today',
+      'usage.total': 'All time',
+      'usage.tabsLabel': 'Usage detail sections',
+      'usage.tab.models': 'Models',
+      'usage.tab.requests': 'Requests',
+      'usage.tab.presets': 'Presets',
+      'usage.tab.sessions': 'Sessions',
+      'usage.dialogTitle': 'OpenRouter usage',
+      'usage.close': 'Close',
+      'usage.byTier': 'Cost by preset',
+      'usage.byTierEmpty': 'No preset has carried a charge in this process yet.',
+      'usage.requests': '{count} requests',
+      'usage.empty': 'No relayed request reported a model today.',
+      'usage.tokensLine': 'Input {input} · Cache {cache} · Output {output}',
+      'usage.tokensTitle': 'Input {input} · Cache read {cacheRead} · Cache write {cacheWrite} · Output {output}',
+      'usage.column.time': 'Time',
+      'usage.column.provider': 'Provider',
+      'usage.column.session': 'Session',
+      'usage.column.sessionName': 'Name',
+      'usage.column.input': 'Input',
+      'usage.column.cacheRead': 'Cache read',
+      'usage.column.cacheWrite': 'Cache write',
+      'usage.column.output': 'Output',
+      'usage.column.requests': 'Requests',
+      'usage.totalsRow': 'Total',
+      'usage.sessionsEmpty': 'No session has been billed in this process yet.',
+      'usage.column.cost': 'Cost',
+      'usage.column.stream': 'Stream',
+      'usage.rowDetailAria': 'Raw fields for the request at {time}',
+      'usage.servedAs': 'served {tier}',
+      'usage.rawFields': 'Raw OpenRouter fields',
+      'usage.servedModel': 'Served model',
+      'usage.servedTier': 'Served service tier',
+      'usage.byok': 'BYOK',
+      'usage.byokNote':
+        'With BYOK your own provider key pays the upstream leg: the two amounts below are separate charges, not a sum.',
+      'usage.yes': 'yes',
+      'usage.no': 'no',
+      'usage.costDetails': 'Cost details',
+      'usage.costTotal': 'Charged by OpenRouter',
+      'usage.costUpstream': 'Billed to your provider key',
+      'usage.costPrompt': 'Prompt',
+      'usage.costCompletion': 'Completion',
+      'usage.costTool': 'Tool',
+      'usage.genId': 'Generation id',
+      'usage.notReported': 'not reported',
+      'usage.usd': '${value}',
+      'usage.toggleSettings': 'Show spend card in the sidebar',
+      'usage.toggleHint':
+        'A collapsible card at the sidebar foot shows today\'s spend and the models that used it. Turning it on reloads the relay.',
+      'usage.toggleFailed': 'Could not change the sidebar card: {message}',
     };
 
     /** Simplified Chinese dictionary, complete against the English key set. */
@@ -336,7 +396,7 @@ window.__ModuleLoader__.load({
       'savings.below': '加权为 {multiplier}：flex 流量低于标价计费，中继正在节省 token 成本。',
       'savings.above': '加权为 {multiplier}：priority、fast 或 ultrafast 流量高于标价计费。',
       'savings.equal': '加权为 {multiplier}：流量按默认价格计费。',
-      'savings.note': '倍率为相对 token 价格。中继不知道各模型的实际价格，因此不显示金额。',
+      'savings.note': '倍率是相对的 token 价格。美元金额是 OpenRouter 对中继请求的实际计费，取自响应本身，而非按价格表推算。',
 
       'providers.caption': '提供商路由',
       'providers.explain': '在设置 → 模型里勾选“经 OpenRouter Plus 转发”，再到编辑器中选择预设。提供商会保留自己的模型与密钥，只有基址切换到本中继。',
@@ -432,6 +492,58 @@ window.__ModuleLoader__.load({
       'recent.stream': '流式',
       'recent.streamTitle': '流式响应',
       'recent.bytesTitle': '未读取到用量；已传输 {bytes} 字节',
+
+      'usage.title': 'OpenRouter',
+      'usage.openAria': 'OpenRouter {today}',
+      'usage.today': '今日',
+      'usage.total': '累计',
+      'usage.tabsLabel': '用量详情分区',
+      'usage.tab.models': '模型',
+      'usage.tab.requests': '请求',
+      'usage.tab.presets': '预设',
+      'usage.tab.sessions': '会话',
+      'usage.dialogTitle': 'OpenRouter 用量',
+      'usage.close': '关闭',
+      'usage.byTier': '按预设计费',
+      'usage.byTierEmpty': '本次进程中尚无按预设产生的费用。',
+      'usage.requests': '{count} 次请求',
+      'usage.empty': '今日尚无报告了模型的请求。',
+      'usage.tokensLine': '输入 {input} · 缓存 {cache} · 输出 {output}',
+      'usage.tokensTitle': '输入 {input} · 缓存读取 {cacheRead} · 缓存写入 {cacheWrite} · 输出 {output}',
+      'usage.column.time': '时间',
+      'usage.column.provider': '服务商',
+      'usage.column.session': '会话',
+      'usage.column.sessionName': '名称',
+      'usage.column.input': '输入',
+      'usage.column.cacheRead': '缓存读取',
+      'usage.column.cacheWrite': '缓存写入',
+      'usage.column.output': '输出',
+      'usage.column.requests': '请求数',
+      'usage.totalsRow': '合计',
+      'usage.sessionsEmpty': '本次进程中尚无按会话计费的记录。',
+      'usage.column.cost': '费用',
+      'usage.column.stream': '流式',
+      'usage.rowDetailAria': '{time} 请求的原始字段',
+      'usage.servedAs': '实际 {tier}',
+      'usage.rawFields': 'OpenRouter 原始字段',
+      'usage.servedModel': '实际服务模型',
+      'usage.servedTier': '实际服务等级',
+      'usage.byok': 'BYOK',
+      'usage.byokNote': 'BYOK 时上游那一段由你自己的提供商密钥付费：下面两笔金额是各自的收费，不能相加。',
+      'usage.yes': '是',
+      'usage.no': '否',
+      'usage.costDetails': '费用明细',
+      'usage.costTotal': 'OpenRouter 收取',
+      'usage.costUpstream': '你的提供商密钥付费',
+      'usage.costPrompt': '输入',
+      'usage.costCompletion': '输出',
+      'usage.costTool': '工具',
+      'usage.genId': '生成 ID',
+      'usage.notReported': '未报告',
+      'usage.usd': '${value}',
+      'usage.toggleSettings': '在侧边栏显示费用卡片',
+      'usage.toggleHint': '侧边栏底部会显示可折叠的费用卡片，包含今日花费与使用的模型。开启会重新加载中继。',
+      'usage.toggleFailed': '无法修改侧边栏卡片：{message}',
     };
 
     /* ------------------------------------------------------------------ helpers */
@@ -477,6 +589,81 @@ window.__ModuleLoader__.load({
       const number = finiteNumber(value);
       if (number === null) return t('common.notAvailable');
       return t('common.multiplier', { value: String(roundTwo(number)) });
+    }
+
+    /**
+     * A USD amount, or null for anything that is not a finite number.
+     *
+     * Two decimals keep a money column aligned; up to six keep a per-request cost from
+     * rounding away, because OpenRouter bills fractions of a cent. `Intl.NumberFormat`
+     * supplies the reader's own grouping and decimal separators.
+     */
+    function formatUsd(value) {
+      const number = finiteNumber(value);
+      if (number === null) return null;
+      try {
+        return new Intl.NumberFormat(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 6,
+        }).format(number);
+      } catch (error) {
+        return number.toFixed(2);
+      }
+    }
+
+    /**
+     * Money for a row. A missing amount is "not reported", never `$0`: a failed call or a
+     * stream aborted before its usage chunk has no billed amount, and zero would be a claim
+     * that nothing was spent.
+     */
+    function usdText(t, value) {
+      const amount = formatUsd(value);
+      return amount === null ? t('usage.notReported') : t('usage.usd', { value: amount });
+    }
+
+    /** Compact token counts for a one-line summary: 8500000 → "8.5M". */
+    function compactTokens(value) {
+      const number = finiteNumber(value);
+      if (number === null) return '0';
+      const magnitude = Math.abs(number);
+      if (magnitude < 1000) return formatCount(number);
+      const scaled = (divisor, suffix) => {
+        const fixed = (number / divisor).toFixed(1);
+        return (fixed.slice(-2) === '.0' ? fixed.slice(0, -2) : fixed) + suffix;
+      };
+      if (magnitude >= 1e9) return scaled(1e9, 'B');
+      if (magnitude >= 1e6) return scaled(1e6, 'M');
+      return scaled(1e3, 'K');
+    }
+
+    /**
+     * Fixed HH:MM:SS in local time. `localTime` keeps the settings page's locale-formatted
+     * stamp; the details dialog's time column wants the same width on every row instead.
+     */
+    function clockTime(value) {
+      const stamp =
+        typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Date.parse(value) : NaN;
+      if (!Number.isFinite(stamp)) return '';
+      try {
+        const date = new Date(stamp);
+        if (!Number.isFinite(date.getTime())) return '';
+        const pad = (part) => String(part).padStart(2, '0');
+        return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+      } catch (error) {
+        return '';
+      }
+    }
+
+    /**
+     * A tier bucket's label. Buckets are keyed by the wire tier that was sent, so they use
+     * the older vocabulary (`default`, `ultrafast`, `unset`) and are mapped onto the preset
+     * labels the rest of this plugin shows; an unknown name stands for itself.
+     */
+    function usageTierLabel(t, tier) {
+      const text = stringValue(tier).trim();
+      if (text === '' || text === 'unset') return t('preset.none');
+      const preset = presetFromLegacyTier(text);
+      return preset === null ? text : t('preset.' + preset);
     }
 
     function hostOf(value) {
@@ -718,11 +905,15 @@ window.__ModuleLoader__.load({
       }
       const at = typeof rawEntry.at === 'string' || typeof rawEntry.at === 'number' ? rawEntry.at : '';
       const tier = stringValue(rawEntry.tier).trim();
+      /* The recent table shows a preset, not the wire tier, because a sort preset sends no
+         tier at all; the Host reports the outcome a person picked beside the raw field. */
+      const preset = stringValue(rawEntry.preset).trim();
       const statusNumber = finiteNumber(rawEntry.status);
       const statusText = stringValue(rawEntry.status).trim();
       return {
         at,
         tier: tier === '' ? null : tier,
+        preset: preset === '' ? null : preset,
         model: stringValue(rawEntry.model).trim(),
         streaming: rawEntry.streaming === true,
         status: statusNumber !== null ? statusNumber : statusText === '' ? null : statusText,
@@ -824,6 +1015,7 @@ window.__ModuleLoader__.load({
           completionTokens: countNumber(entry.completionTokens),
           multiplier: finiteNumber(entry.multiplier),
           effectiveTokens: countNumber(entry.effectiveTokens),
+          costUsd: finiteNumber(entry.costUsd),
         };
       }
 
@@ -840,6 +1032,13 @@ window.__ModuleLoader__.load({
         version: stringValue(payload.version).trim(),
         origin: stringValue(address.origin).trim(),
         upstream: stringValue(payload.upstream).trim(),
+        /* The sidebar card's flag. `available` keeps "this Host has no such preference"
+           apart from "it is off", so the settings page does not offer a checkbox that no
+           endpoint would answer. */
+        usageWidget: {
+          available: isPlainObject(payload.usageWidget),
+          enabled: isPlainObject(payload.usageWidget) && payload.usageWidget.enabled === true,
+        },
         mounts: normalizeMounts(payload.routes, byTier),
         metrics: {
           startedAt: stringValue(payload.metrics.startedAt),
@@ -849,10 +1048,174 @@ window.__ModuleLoader__.load({
           promptTokens: countNumber(payload.metrics.promptTokens),
           completionTokens: countNumber(payload.metrics.completionTokens),
           bytes: countNumber(payload.metrics.bytes),
+          // Money, not the multiplier weight; null means the Host predates the field and
+          // the page then simply omits the cost rows instead of printing $0.
+          costUsd: finiteNumber(payload.metrics.costUsd),
+          todayUsd: finiteNumber(payload.metrics.todayUsd),
           byTier,
           effectiveMultiplier: finiteNumber(payload.metrics.effectiveMultiplier),
           recent,
         },
+      };
+    }
+
+    /**
+     * One recent relayed request, as the details dialog shows it.
+     *
+     * Cost stays nullable: a failed call, or a stream the caller aborted before the usage
+     * chunk, has no billed amount, and printing `$0` would claim the call was free. The raw
+     * OpenRouter fields come from the envelope the Host sniffs; a Host that predates one of
+     * them leaves it empty and the dialog says "not reported" instead of inventing a value.
+     * A cost is read under the Host row's name, the relay sniffer's own name or the wire's
+     * snake_case `cost_details` key, because either half may forward what the other named.
+     */
+    function normalizeUsageRecent(rawEntry) {
+      if (!isPlainObject(rawEntry)) return null;
+      const details = isPlainObject(rawEntry.costDetails)
+        ? rawEntry.costDetails
+        : isPlainObject(rawEntry.cost_details)
+          ? rawEntry.cost_details
+          : null;
+      const money = (fields, wire) => {
+        for (const field of fields) {
+          const direct = finiteNumber(rawEntry[field]);
+          if (direct !== null) return direct;
+        }
+        return details === null ? null : finiteNumber(details[wire]);
+      };
+      const preset = stringValue(rawEntry.preset).trim();
+      const tier = stringValue(rawEntry.tier).trim();
+      return {
+        at: finiteNumber(rawEntry.at),
+        tier: tier === '' ? null : tier,
+        preset: preset === '' ? null : preset,
+        model: stringValue(rawEntry.model).trim(),
+        servedModel: stringValue(rawEntry.servedModel).trim(),
+        servedTier: stringValue(rawEntry.servedTier).trim(),
+        /* The upstream that answered, and the session the call belonged to: both are on
+           every relayed request, and both are what makes the Requests/Sessions tabs useful. */
+        providerName: stringValue(rawEntry.providerName).trim(),
+        sessionId: stringValue(rawEntry.sessionId).trim(),
+        sessionTitle: stringValue(rawEntry.sessionTitle).trim(),
+        status: finiteNumber(rawEntry.status),
+        ms: finiteNumber(rawEntry.ms),
+        streaming: rawEntry.streaming === true,
+        promptTokens: finiteNumber(rawEntry.promptTokens),
+        completionTokens: finiteNumber(rawEntry.completionTokens),
+        cacheReadTokens: finiteNumber(rawEntry.cacheReadTokens),
+        cacheWriteTokens: finiteNumber(rawEntry.cacheWriteTokens),
+        costUsd: finiteNumber(rawEntry.costUsd),
+        // The upstream leg is what the caller's own provider key was billed when OpenRouter
+        // passed the call through (BYOK). It is a separate charge from `costUsd`, never a
+        // part of it, so the two are shown apart and never added.
+        upstreamCostUsd: money(['upstreamCostUsd'], 'upstream_inference_cost'),
+        promptCostUsd: money(['promptCostUsd', 'upstreamPromptCostUsd'], 'upstream_inference_prompt_cost'),
+        completionCostUsd: money(
+          ['completionCostUsd', 'upstreamCompletionCostUsd'],
+          'upstream_inference_completions_cost',
+        ),
+        toolCostUsd: money(['serverToolCostUsd'], 'server_tool_cost'),
+        byok: rawEntry.byok === true,
+        genId: stringValue(rawEntry.genId).trim(),
+      };
+    }
+
+    /**
+     * The sidebar card's own reading of `/status`.
+     *
+     * Null means "draw nothing", and one check per refusal: the feature is off
+     * (`usageWidget.enabled`), the relay owns no socket (`bound`), or the Host predates the
+     * money fields (`metrics.costUsd`). A card in the sidebar has no room to explain a
+     * guess, so an older Host simply shows no card.
+     */
+    function normalizeUsageStatus(payload) {
+      if (!isPlainObject(payload)) return null;
+      if (payload.ok === false) return null;
+      if (payload.bound !== true) return null;
+      if (!isPlainObject(payload.usageWidget)) return null;
+      if (payload.usageWidget.enabled !== true) return null;
+      if (!isPlainObject(payload.metrics)) return null;
+      const totalUsd = finiteNumber(payload.metrics.costUsd);
+      if (totalUsd === null) return null;
+
+      /* Today's models, already sorted by spend; the card draws the same order. A row
+         without a model name (a failed call before routing) has nothing to label. */
+      const byModel = [];
+      const byModelSource = Array.isArray(payload.metrics.byModel) ? payload.metrics.byModel : [];
+      for (const entry of byModelSource) {
+        if (!isPlainObject(entry)) continue;
+        const model = stringValue(entry.model).trim();
+        if (model === '') continue;
+        byModel.push({
+          model,
+          requests: countNumber(entry.requests),
+          promptTokens: countNumber(entry.promptTokens),
+          completionTokens: countNumber(entry.completionTokens),
+          cacheReadTokens: countNumber(entry.cacheReadTokens),
+          cacheWriteTokens: countNumber(entry.cacheWriteTokens),
+          costUsd: finiteNumber(entry.costUsd),
+        });
+      }
+
+      /* Per-tier buckets are process-local, so they can be empty right after a Host reload
+         while the retained day totals still carry money; an empty table is then correct. */
+      const byTier = [];
+      const byTierSource = isPlainObject(payload.metrics.byTier) ? payload.metrics.byTier : {};
+      for (const key of Object.keys(byTierSource)) {
+        const entry = byTierSource[key];
+        if (!isPlainObject(entry)) continue;
+        const requests = countNumber(entry.requests);
+        if (requests === 0) continue;
+        byTier.push({
+          tier: key,
+          requests,
+          costUsd: finiteNumber(entry.costUsd),
+          multiplier: finiteNumber(entry.multiplier),
+        });
+      }
+      byTier.sort((left, right) => {
+        const leftCost = left.costUsd === null ? 0 : left.costUsd;
+        const rightCost = right.costUsd === null ? 0 : right.costUsd;
+        if (rightCost !== leftCost) return rightCost - leftCost;
+        return left.tier < right.tier ? -1 : left.tier > right.tier ? 1 : 0;
+      });
+
+      const recent = [];
+      const recentSource = Array.isArray(payload.metrics.recent) ? payload.metrics.recent : [];
+      for (const entry of recentSource) {
+        if (recent.length >= USAGE_RECENT_LIMIT) break;
+        const normalized = normalizeUsageRecent(entry);
+        if (normalized !== null) recent.push(normalized);
+      }
+
+      /* Cost per session, already ordered by spend by the Host. Process-local, like the
+         per-tier buckets: a Host reload empties it while the day totals still carry money. */
+      const bySession = [];
+      const bySessionSource = Array.isArray(payload.metrics.bySession) ? payload.metrics.bySession : [];
+      for (const entry of bySessionSource) {
+        if (!isPlainObject(entry)) continue;
+        const session = stringValue(entry.session).trim();
+        if (session === '') continue;
+        bySession.push({
+          session,
+          requests: countNumber(entry.requests),
+          promptTokens: countNumber(entry.promptTokens),
+          completionTokens: countNumber(entry.completionTokens),
+          costUsd: finiteNumber(entry.costUsd),
+          lastAt: finiteNumber(entry.lastAt),
+          title: stringValue(entry.title).trim(),
+        });
+      }
+
+      return {
+        /* A partial Host can report the total without today; the card then says "not
+           reported" for the day rather than $0.00. */
+        todayUsd: finiteNumber(payload.metrics.todayUsd),
+        totalUsd,
+        byModel,
+        byTier,
+        bySession,
+        recent,
       };
     }
 
@@ -1025,6 +1388,9 @@ window.__ModuleLoader__.load({
       warn: 'var(--dsw-alias-state-warn-primary, #b08800)',
       brand: 'var(--dsw-alias-brand-primary, Highlight)',
       fill: 'var(--dsw-alias-fill-l1, rgba(0, 0, 0, 0.06))',
+      // The modal scrim the shell paints behind its own dialogs, so the overlay dims with
+      // the theme instead of a fixed black that the light theme would over-darken.
+      mask: 'var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.42))',
     };
 
     const FONTS = {
@@ -1549,6 +1915,312 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /* -------------------------------------------------------------- usage styles */
+
+    /*
+     * The sidebar spend card and its dialog. Inline styles over the shell's tokens only:
+     * the card lives in a narrow column the sidebar owns, so it brings no stylesheet and
+     * no class names of its own, and nothing here touches the document root.
+     */
+    const USAGE_CARD_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      width: '100%',
+      minWidth: 0,
+      boxSizing: 'border-box',
+      border: '1px solid ' + COLORS.border,
+      borderRadius: 'var(--dsw-radius-md, 8px)',
+      background: COLORS.layerTwo,
+      overflow: 'hidden',
+    };
+
+    function usageHeaderStyle(state) {
+      return {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        width: '100%',
+        margin: 0,
+        padding: '4px 8px',
+        minHeight: '26px',
+        boxSizing: 'border-box',
+        border: 0,
+        borderRadius: 0,
+        background: state.hovered ? COLORS.fill : 'transparent',
+        color: COLORS.primary,
+        font: FONTS.small,
+        lineHeight: '18px',
+        textAlign: 'left',
+        cursor: 'pointer',
+        outline: state.focused ? '2px solid ' + COLORS.brand : 'none',
+        outlineOffset: '-2px',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+      };
+    }
+
+    const USAGE_CHEVRON_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
+
+    const USAGE_TITLE_STYLE = {
+      flex: '1 1 auto',
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      color: COLORS.primary,
+      font: FONTS.smallStrong,
+    };
+
+    const USAGE_AMOUNT_STYLE = {
+      flex: '0 0 auto',
+      color: COLORS.primary,
+      font: FONTS.smallStrong,
+      fontVariantNumeric: 'tabular-nums',
+    };
+
+    const USAGE_MODEL_LIST_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      margin: 0,
+      padding: 0,
+      listStyle: 'none',
+      minWidth: 0,
+    };
+
+    const USAGE_MODEL_HEAD_STYLE = {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      gap: '8px',
+      minWidth: 0,
+    };
+
+    const USAGE_MODEL_ROW_STYLE = { display: 'flex', flexDirection: 'column', minWidth: 0 };
+
+    const USAGE_MODEL_NAME_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      color: COLORS.primary,
+      font: FONTS.tiny,
+    };
+
+    const USAGE_MODEL_COST_STYLE = {
+      flex: '0 0 auto',
+      color: COLORS.primary,
+      font: FONTS.tiny,
+      fontVariantNumeric: 'tabular-nums',
+    };
+
+    const USAGE_MODEL_TOKENS_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+    };
+
+    const USAGE_EMPTY_STYLE = { color: COLORS.secondary, font: FONTS.tiny };
+
+    /* The dialog's tab strip and the ids that tie each tab to the panel below it. */
+    const USAGE_TAB_ID_PREFIX = 'usage-tab-';
+    const USAGE_TAB_PANEL_ID = 'openrouter-plus-usage-panel';
+    const USAGE_TAB_BAR_STYLE = {
+      display: 'flex',
+      gap: '2px',
+      padding: '3px',
+      alignSelf: 'flex-start',
+      borderRadius: '8px',
+      background: COLORS.fill,
+      border: '1px solid ' + COLORS.border,
+    };
+    const USAGE_TAB_PANEL_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+      minHeight: '96px',
+    };
+
+    /** One tab button: selected reads as a raised surface, not a colour-only signal. */
+    const usageTabStyle = (active) => ({
+      appearance: 'none',
+      border: 0,
+      margin: 0,
+      padding: '4px 10px',
+      borderRadius: '6px',
+      cursor: 'pointer',
+      font: active ? FONTS.smallStrong : FONTS.small,
+      color: active ? COLORS.primary : COLORS.secondary,
+      background: active ? COLORS.layerTwo : 'transparent',
+      boxShadow: active ? '0 1px 2px rgba(0, 0, 0, 0.12)' : 'none',
+    });
+
+    /*
+     * The dialog: a fixed overlay drawn inline. Nothing above the card creates a containing
+     * block (the sidebar sets no transform), so `fixed` still means the viewport and the
+     * backdrop covers the whole app without a portal.
+     */
+    const USAGE_OVERLAY_STYLE = {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 1200,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '16px',
+      boxSizing: 'border-box',
+      background: COLORS.mask,
+    };
+
+    const USAGE_DIALOG_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      width: 'min(760px, 100%)',
+      maxHeight: '85vh',
+      boxSizing: 'border-box',
+      padding: '16px',
+      overflow: 'auto',
+      outline: 'none',
+      border: '1px solid ' + COLORS.borderStrong,
+      borderRadius: 'var(--dsw-radius-lg, 12px)',
+      background: COLORS.layerTwo,
+      boxShadow: 'var(--dsw-elevation-prominent, 0 12px 32px rgba(0, 0, 0, 0.28))',
+      color: COLORS.primary,
+      font: FONTS.body,
+      textAlign: 'left',
+    };
+
+    const USAGE_DIALOG_HEAD_STYLE = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '12px',
+      minWidth: 0,
+    };
+
+    const USAGE_DIALOG_TITLE_STYLE = { margin: 0, color: COLORS.primary, font: FONTS.metric };
+
+    const USAGE_SECTION_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      minWidth: 0,
+      paddingTop: '10px',
+      borderTop: '1px solid ' + COLORS.border,
+    };
+
+    const USAGE_TIER_LIST_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      margin: 0,
+      padding: 0,
+      listStyle: 'none',
+      minWidth: 0,
+    };
+
+    const USAGE_TIER_BLOCK_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: 0,
+    };
+
+    const USAGE_TIER_ROW_STYLE = {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      gap: '10px',
+      minWidth: 0,
+    };
+
+    const USAGE_TIER_LABEL_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      color: COLORS.primary,
+      font: FONTS.small,
+    };
+
+    const USAGE_TIER_META_STYLE = { flex: '0 0 auto', marginRight: 'auto', color: COLORS.secondary, font: FONTS.tiny };
+
+    const USAGE_TIER_COST_STYLE = {
+      flex: '0 0 auto',
+      color: COLORS.primary,
+      font: FONTS.small,
+      fontVariantNumeric: 'tabular-nums',
+    };
+
+    /* Nine columns do not fit a phone; the dialog scrolls sideways rather than hiding a
+       column, because every one of them is evidence about a bill. */
+    const USAGE_TABLE_SCROLL_STYLE = { maxWidth: '100%', overflowX: 'auto' };
+    const USAGE_TABLE_STYLE = { width: '100%', minWidth: '680px', borderCollapse: 'collapse' };
+
+    const USAGE_RAW_STYLE = {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+      gap: '6px 16px',
+      minWidth: 0,
+      padding: '8px',
+      borderTop: '1px solid ' + COLORS.border,
+    };
+
+    const USAGE_RAW_LABEL_STYLE = { color: COLORS.secondary, font: FONTS.tiny };
+    const USAGE_RAW_VALUE_STYLE = { color: COLORS.primary, font: FONTS.small, overflowWrap: 'anywhere' };
+    const USAGE_RAW_HEADING_STYLE = {
+      gridColumn: '1 / -1',
+      color: COLORS.primary,
+      font: FONTS.smallStrong,
+      paddingTop: '2px',
+    };
+    const USAGE_RAW_NOTE_STYLE = { gridColumn: '1 / -1', margin: 0, color: COLORS.secondary, font: FONTS.tiny };
+
+    /*
+     * The row disclosure. No hover state: it is one button per row of a fifty-row table, and
+     * the UA focus ring is left alone so keyboard focus is visible without tracking it.
+     */
+    const USAGE_TRIGGER_STYLE = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: '18px',
+      height: '18px',
+      margin: 0,
+      padding: 0,
+      border: 0,
+      borderRadius: 'var(--dsw-radius-sm, 6px)',
+      background: 'transparent',
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+      lineHeight: '18px',
+      cursor: 'pointer',
+      appearance: 'none',
+      WebkitAppearance: 'none',
+    };
+
+    const USAGE_TOGGLE_STYLE = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: 0,
+      color: COLORS.primary,
+      font: FONTS.small,
+      cursor: 'pointer',
+    };
+
+    const USAGE_TOGGLE_ROW_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: 0,
+      paddingTop: '4px',
+    };
+
     /* ------------------------------------------------------------------ components */
 
     /**
@@ -1669,12 +2341,18 @@ window.__ModuleLoader__.load({
       const [actionError, setActionError] = React.useState('');
       const [notice, setNotice] = React.useState('');
       const [copyState, setCopyState] = React.useState(null);
+      /* The sidebar card's switch is reported by `/status`, but its write reloads the plugin:
+         the click's value is held here until the relay reports it back, so the checkbox does
+         not appear to bounce while the reload settles. */
+      const [widgetPending, setWidgetPending] = React.useState(null);
+      const [widgetError, setWidgetError] = React.useState('');
 
       const mountedRef = React.useRef(true);
       const busyRef = React.useRef(null);
       const actionControllerRef = React.useRef(null);
       const noticeTimerRef = React.useRef(null);
       const copyTimerRef = React.useRef(null);
+      const widgetTimerRef = React.useRef(null);
 
       /* Track mount state and clear every owned timer/request on unmount. */
       React.useEffect(() => {
@@ -1702,6 +2380,10 @@ window.__ModuleLoader__.load({
           if (copyTimerRef.current !== null) {
             clearTimeout(copyTimerRef.current);
             copyTimerRef.current = null;
+          }
+          if (widgetTimerRef.current !== null) {
+            clearTimeout(widgetTimerRef.current);
+            widgetTimerRef.current = null;
           }
         };
       }, []);
@@ -1792,12 +2474,21 @@ window.__ModuleLoader__.load({
             setSnapshot(normalized);
             setStatusError('');
             setConnection('online');
+            /* The widget write reloads the plugin, so its flag can trail the response by a
+               poll or two; the optimistic value stands until the relay reports it, and
+               `WIDGET_SETTLE_MS` stops it from outliving a write that never landed. */
+            setWidgetPending((pending) =>
+              pending !== null && normalized.usageWidget.enabled === pending ? null : pending,
+            );
           } catch (error) {
             if (cancelled) return;
-            /* There is no second address to try: the API shares this page's origin, so
-               a failure is the Host's — and when the Host answers with its own reason
-               (`ok: false` plus `error`) that reason is what the banner shows. */
-            setSnapshot(null);
+            /* There is no second address to try: the API shares this page's origin, so a
+               failure is the Host's — and when the Host answers with its own reason
+               (`ok: false` plus `error`) that reason is what the banner shows.
+               The last snapshot is kept, though: a plugin reload — a widget write, a route
+               edit — fails this poll for a second or two, and blanking the page would throw
+               away numbers that are still true. The next tick replaces it if it never
+               comes back. */
             setStatusError(errorMessage(t, error));
             setConnection('offline');
           }
@@ -2023,6 +2714,81 @@ window.__ModuleLoader__.load({
       };
 
       /*
+       * The sidebar card's own switch. It is a config write, so the relay reloads the plugin
+       * to apply it and `/status` can fail — or still answer the old flag — for a second
+       * afterwards. The click is held optimistically and the read-back decides; the page
+       * keeps its snapshot through the reload, so nothing blanks while that settles.
+       */
+      const runWidgetToggle = (enabled) => {
+        if (busy !== null || busyRef.current !== null) return;
+        const controller = new AbortController();
+        busyRef.current = 'widget';
+        actionControllerRef.current = controller;
+        setBusy({ kind: 'widget', key: 'widget' });
+        setWidgetError('');
+        setWidgetPending(enabled);
+        /* The optimistic value is bounded: if the read-back never agrees — a write that
+           never landed, a relay that stayed down — the next status answer wins over the
+           click rather than the checkbox claiming a preference that was never saved. */
+        if (widgetTimerRef.current !== null) {
+          clearTimeout(widgetTimerRef.current);
+          widgetTimerRef.current = null;
+        }
+        widgetTimerRef.current = setTimeout(() => {
+          widgetTimerRef.current = null;
+          if (mountedRef.current) setWidgetPending(null);
+        }, WIDGET_SETTLE_MS);
+        (async () => {
+          /* Set only for an answer the relay actually gave: a cut connection is not a
+             refusal, and a reload can cut it after the write landed. */
+          let refused = false;
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/widget', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: JSON.stringify({ enabled: enabled }),
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            if (!response.ok) {
+              refused = true;
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+            if (!mountedRef.current) return;
+            /* The write landed; the reload is the only thing left, so re-read now rather
+               than after the interval. The click stands until the relay reports it. */
+            setRefreshKey((key) => key + 1);
+          } catch (error) {
+            if (!mountedRef.current) return;
+            if (refused) {
+              setWidgetPending(null);
+              setWidgetError(t('usage.toggleFailed', { message: errorMessage(t, error) }));
+            }
+            /* Otherwise the outcome is unknown: the config write may well have landed
+               before the connection dropped, so the checkbox keeps the click and the next
+               status answer is the truth. Saying "failed" here would be a guess. */
+          } finally {
+            if (mountedRef.current) {
+              busyRef.current = null;
+              setBusy(null);
+            }
+            if (actionControllerRef.current === controller) actionControllerRef.current = null;
+          }
+        })();
+      };
+
+      /*
        * Ask the relay to fill effort levels onto every route this page owns.
        * It is a config write, so it shares the create/remove guards: one action
        * at a time, aborted on unmount, and the same error line. A refresh (not
@@ -2163,6 +2929,29 @@ window.__ModuleLoader__.load({
           else if (rounded > 1.005) savingsSentence = t('savings.above', { multiplier: label });
           else savingsSentence = t('savings.equal', { multiplier: label });
         }
+      }
+
+      /*
+       * Money beside the counters. `costUsd` is what OpenRouter charged across the retained
+       * window and `todayUsd` the local day in progress; both are read from each response's
+       * own `usage.cost`, so nothing here is derived from a price table. A Host that predates
+       * the fields reports null, and the block then shows only what it always did.
+       */
+      const hasCost = metrics !== null && metrics.costUsd !== null;
+      const tierCosts = [];
+      if (hasCost) {
+        for (const tierKey of Object.keys(metrics.byTier)) {
+          const bucket = metrics.byTier[tierKey];
+          if (bucket.requests === 0) continue;
+          tierCosts.push({ tier: tierKey, requests: bucket.requests, costUsd: bucket.costUsd });
+        }
+        /* Cost first, so the expensive preset is not lost at the bottom of a long list. */
+        tierCosts.sort((left, right) => {
+          const leftCost = left.costUsd === null ? 0 : left.costUsd;
+          const rightCost = right.costUsd === null ? 0 : right.costUsd;
+          if (rightCost !== leftCost) return rightCost - leftCost;
+          return left.tier < right.tier ? -1 : left.tier > right.tier ? 1 : 0;
+        });
       }
 
       /* ---------------------------------------------------------------- render helpers */
@@ -2310,6 +3099,33 @@ window.__ModuleLoader__.load({
         );
       };
 
+      /*
+       * The card's own switch, beside the numbers it produces. The Host answers it on the
+       * same control API; a Host from before the preference reports `available: false` and
+       * no checkbox is offered for an endpoint that would not answer.
+       */
+      const renderWidgetToggle = () => {
+        if (snapshot === null || snapshot.usageWidget.available !== true) return null;
+        const enabled = widgetPending === null ? snapshot.usageWidget.enabled : widgetPending;
+        return h(
+          'div',
+          { style: USAGE_TOGGLE_ROW_STYLE },
+          h(
+            'label',
+            { style: USAGE_TOGGLE_STYLE },
+            h('input', {
+              type: 'checkbox',
+              checked: enabled,
+              disabled: busy !== null,
+              onChange: (event) => runWidgetToggle(event.target.checked),
+            }),
+            h('span', null, t('usage.toggleSettings')),
+          ),
+          h('p', { style: HINT_STYLE }, t('usage.toggleHint')),
+          widgetError !== '' ? h('p', { role: 'alert', style: ALERT_STYLE }, widgetError) : null,
+        );
+      };
+
       const renderSavings = () =>
         h(
           'section',
@@ -2336,9 +3152,50 @@ window.__ModuleLoader__.load({
               h('span', { style: STAT_LABEL_STYLE }, t('savings.multiplier')),
               h('span', { style: { font: FONTS.metric } }, multiplierLabel(t, metrics !== null ? metrics.effectiveMultiplier : null)),
             ),
+            hasCost
+              ? h(
+                  'div',
+                  { style: STAT_STYLE },
+                  h('span', { style: STAT_LABEL_STYLE }, t('usage.today')),
+                  h('span', { style: { font: FONTS.metric } }, usdText(t, metrics.todayUsd)),
+                )
+              : null,
+            hasCost
+              ? h(
+                  'div',
+                  { style: STAT_STYLE },
+                  h('span', { style: STAT_LABEL_STYLE }, t('usage.total')),
+                  h('span', { style: { font: FONTS.metric } }, usdText(t, metrics.costUsd)),
+                )
+              : null,
           ),
+          tierCosts.length === 0
+            ? null
+            : h(
+                'div',
+                { style: USAGE_TIER_BLOCK_STYLE },
+                h('span', { style: SUB_LABEL_STYLE }, t('usage.byTier')),
+                h(
+                  'ul',
+                  { style: USAGE_TIER_LIST_STYLE },
+                  tierCosts.map((row) =>
+                    h(
+                      'li',
+                      { key: row.tier, style: USAGE_TIER_ROW_STYLE },
+                      h('span', { style: USAGE_TIER_LABEL_STYLE }, usageTierLabel(t, row.tier)),
+                      h(
+                        'span',
+                        { style: USAGE_TIER_META_STYLE },
+                        t('usage.requests', { count: formatCount(row.requests) }),
+                      ),
+                      h('span', { style: USAGE_TIER_COST_STYLE }, usdText(t, row.costUsd)),
+                    ),
+                  ),
+                ),
+              ),
           h('p', { style: PARAGRAPH_STYLE }, savingsSentence),
           h('p', { style: HINT_STYLE }, t('savings.note')),
+          renderWidgetToggle(),
         );
 
       const renderRecent = () => {
@@ -2618,16 +3475,19 @@ window.__ModuleLoader__.load({
 
       /* ---------------------------------------------------------------- assembly */
 
+      /* The sections follow the snapshot, not the connection: a poll that fails mid-reload
+         keeps the last snapshot (see the status poll), so the page shows the numbers it has
+         under the offline banner instead of blanking for a second. */
       return h(
         'section',
         { 'aria-label': t('card.regionAria'), style: PAGE_STYLE },
         header,
         chrome.intro ? h('p', { style: INTRO_STYLE }, t('page.intro')) : null,
         connection === 'offline' ? renderOffline() : null,
-        connection === 'online' && snapshot !== null ? renderMounts() : null,
-        connection === 'online' && snapshot !== null ? renderSavings() : null,
-        connection === 'online' && snapshot !== null ? renderProviders() : null,
-        connection === 'online' && snapshot !== null ? renderRecent() : null,
+        snapshot !== null ? renderMounts() : null,
+        snapshot !== null ? renderSavings() : null,
+        snapshot !== null ? renderProviders() : null,
+        snapshot !== null ? renderRecent() : null,
       );
     }
 
@@ -3816,6 +4676,794 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* ----------------------------------------- sidebar spend card and its dialog */
+
+    /**
+     * Hard stop for the card: a thrown render must leave the sidebar's foot intact. Unlike
+     * the page boundary it renders nothing *and* logs nothing — the sidebar is always on
+     * screen, and a footer card is not the place to announce that it failed.
+     */
+    class UsageBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { failed: false };
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      render() {
+        return this.state.failed === true ? null : this.props.children;
+      }
+    }
+
+    /**
+     * The sidebar foot card: today's spend and the models that produced it.
+     *
+     * It owns one chained-setTimeout poll of `/status` (never `setInterval`, so a slow relay
+     * cannot stack probes) in the same request shape the settings page uses. Nothing renders
+     * until three Host facts line up — the flag is on, the relay owns a socket, and the
+     * payload carries a cost — so a Host from before this feature draws no card at all
+     * rather than a confident `$0.00`.
+     */
+    function UsageCard(props) {
+      const t = props.t;
+      /* The shell computes `wide` as `!collapsed` for the sidebar (frozen through its
+         150 ms collapse animation), so `wide === false` is exactly the 56 px rail — where a
+         money row cannot live and footer actions are shrunk and centred instead. A shell
+         that predates the prop passes nothing, which is treated as wide. */
+      const wide = props.wide !== false;
+
+      const [usage, setUsage] = React.useState(null);
+      const [detailsOpen, setDetailsOpen] = React.useState(false);
+      const [hovered, setHovered] = React.useState(false);
+      const [focused, setFocused] = React.useState(false);
+
+      React.useEffect(() => {
+        let cancelled = false;
+        let pollTimer = null;
+        let inflight = null;
+
+        const schedule = (delayMs) => {
+          if (cancelled) return;
+          if (pollTimer !== null) clearTimeout(pollTimer);
+          pollTimer = setTimeout(() => {
+            pollTimer = null;
+            void tick();
+          }, delayMs);
+        };
+
+        const load = async () => {
+          const controller = new AbortController();
+          inflight = controller;
+          const timer = setTimeout(() => {
+            try {
+              controller.abort();
+            } catch (error) {
+              /* already settled */
+            }
+          }, STATUS_TIMEOUT_MS);
+          try {
+            /* No origin is prepended: the control API is mounted on this document's own
+               origin (`CONTROL_BASE` is empty), exactly as the settings page calls it. */
+            const response = await fetch(controlUrl('/status'), {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: { accept: 'application/json' },
+              signal: controller.signal,
+            });
+            if (!response.ok) return null;
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            return normalizeUsageStatus(payload);
+          } finally {
+            clearTimeout(timer);
+            if (inflight === controller) inflight = null;
+          }
+        };
+
+        async function tick() {
+          if (cancelled) return;
+          /* A background tab relays nothing, so it also asks nothing; the chain stays alive
+             and the first tick after the tab is visible again is at most one interval away. */
+          const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+          if (!hidden) {
+            let next = null;
+            try {
+              next = await load();
+            } catch (error) {
+              /* A refusal, a timeout or a reloading Host means "not now": the card draws
+                 nothing and the next tick asks again. Nothing is logged — see the gate. */
+              next = null;
+            }
+            if (cancelled) return;
+            setUsage(next);
+          }
+          schedule(USAGE_POLL_INTERVAL_MS);
+        }
+
+        schedule(0);
+
+        return () => {
+          cancelled = true;
+          if (pollTimer !== null) clearTimeout(pollTimer);
+          pollTimer = null;
+          if (inflight !== null) {
+            try {
+              inflight.abort();
+            } catch (error) {
+              /* already settled */
+            }
+            inflight = null;
+          }
+        };
+      }, []);
+
+      /* A relay that stops answering has nothing to show: close the dialog rather than hold
+         a frozen snapshot of a service that is gone. Only a *transition* counts — a card that
+         remounts with an empty poll (the shell reopening its popover) must not close a dialog
+         the reader is looking at. */
+      const hadUsage = React.useRef(false);
+      React.useEffect(() => {
+        if (usage !== null) {
+          hadUsage.current = true;
+          return;
+        }
+        setDetailsOpen(false);
+        if (hadUsage.current) usageDialogMount.close();
+        hadUsage.current = false;
+      }, [usage]);
+
+      const closeDetails = React.useCallback(() => setDetailsOpen(false), []);
+
+      if (!wide || usage === null) return null;
+
+      const todayText = usdText(t, usage.todayUsd);
+
+      return h(
+        'div',
+        { style: USAGE_CARD_STYLE },
+        h(
+          'button',
+          {
+            type: 'button',
+            'aria-haspopup': 'dialog',
+            'aria-label': t('usage.openAria', { today: todayText }),
+            /* One press, one dialog: the models, the requests and the per-preset split are
+               tabs inside the dialog, not a disclosure folded out of the sidebar. */
+            onClick: () => {
+              /* The card may live inside a shell popover that unmounts on this very press.
+                 Opening a root of our own is what keeps the dialog on screen; only a host
+                 without react-dom falls back to rendering it in here. */
+              if (!usageDialogMount.open(usage, t)) setDetailsOpen(true);
+            },
+            onMouseEnter: () => setHovered(true),
+            onMouseLeave: () => setHovered(false),
+            onFocus: () => setFocused(true),
+            onBlur: () => setFocused(false),
+            style: usageHeaderStyle({ hovered: hovered, focused: focused }),
+          },
+          h('span', { 'aria-hidden': 'true', style: USAGE_CHEVRON_STYLE }, '\u25b8'),
+          h('span', { style: USAGE_TITLE_STYLE }, t('usage.title')),
+          h('span', { style: USAGE_AMOUNT_STYLE, title: t('usage.today') }, todayText),
+        ),
+        detailsOpen ? h(UsageDialog, { t: t, usage: usage, onClose: closeDetails }) : null,
+      );
+    }
+
+    /**
+     * What the card cannot fit: the totals, the per-preset split, and one row per recent
+     * relayed request with the raw OpenRouter fields behind a disclosure.
+     *
+     * It holds no data of its own — the card's poll keeps running while it is open, so the
+     * numbers stay live — and its only lifecycle work is the initial focus and Escape.
+     */
+    function UsageDialog(props) {
+      const t = props.t;
+      const usage = props.usage;
+      const onClose = props.onClose;
+      /* One drawer at a time: fifty rows each with a five-field cost block open at once
+         would bury the table this dialog exists to show. */
+      const [openRow, setOpenRow] = React.useState(-1);
+      /* Three views, one dialog. Each tab is one screenful, so money is read as money and
+         logs as logs instead of one scroll that mixes the two. */
+      const [tab, setTab] = React.useState('models');
+      const panelRef = React.useRef(null);
+
+      React.useEffect(() => {
+        if (typeof document === 'undefined') return undefined;
+        const onKey = (event) => {
+          if (event.key === 'Escape') onClose();
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+      }, [onClose]);
+
+      /* A dialog opens where the reader looks: the panel itself, whose own label names it.
+         Focus is not trapped past this, so Tab reaches the close button first. */
+      React.useEffect(() => {
+        const node = panelRef.current;
+        if (node === null || node === undefined || typeof node.focus !== 'function') return;
+        try {
+          node.focus({ preventScroll: true });
+        } catch (error) {
+          /* an engine that only takes the argument-less form */
+        }
+      }, []);
+
+      const summary = h(
+        'div',
+        { key: 'summary', style: STATS_ROW_STYLE },
+        h(
+          'div',
+          { style: STAT_STYLE },
+          h('span', { style: STAT_LABEL_STYLE }, t('usage.today')),
+          h('span', { style: { font: FONTS.metric } }, usdText(t, usage.todayUsd)),
+        ),
+        h(
+          'div',
+          { style: STAT_STYLE },
+          h('span', { style: STAT_LABEL_STYLE }, t('usage.total')),
+          h('span', { style: { font: FONTS.metric } }, usdText(t, usage.totalUsd)),
+        ),
+      );
+
+      /* Models: what each model that answered today cost, and the token mix behind it. */
+      /* Models as a table: one row per model, and the columns carry the numbers the card
+         used to jam into a sentence. The footer totals the day, so nobody has to add a
+         column up by eye. */
+      const modelRows = usage.byModel.map((row) =>
+        h(
+          'tr',
+          { key: row.model },
+          h(
+            'td',
+            { style: TD_STYLE },
+            h(
+              'div',
+              {
+                style: Object.assign({}, codeStyle, {
+                  maxWidth: '240px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }),
+                title: row.model,
+              },
+              row.model,
+            ),
+          ),
+          h('td', { style: TD_RIGHT_STYLE }, compactTokens(row.promptTokens)),
+          h('td', { style: TD_RIGHT_STYLE }, compactTokens(row.cacheReadTokens)),
+          h('td', { style: TD_RIGHT_STYLE }, compactTokens(row.cacheWriteTokens)),
+          h('td', { style: TD_RIGHT_STYLE }, compactTokens(row.completionTokens)),
+          h('td', { style: TD_RIGHT_STYLE }, formatCount(row.requests)),
+          h('td', { style: TD_RIGHT_STYLE }, usdText(t, row.costUsd)),
+        ),
+      );
+      const modelTotals = usage.byModel.reduce(
+        (total, row) => ({
+          promptTokens: total.promptTokens + row.promptTokens,
+          cacheReadTokens: total.cacheReadTokens + row.cacheReadTokens,
+          cacheWriteTokens: total.cacheWriteTokens + row.cacheWriteTokens,
+          completionTokens: total.completionTokens + row.completionTokens,
+          requests: total.requests + row.requests,
+        }),
+        { promptTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, completionTokens: 0, requests: 0 },
+      );
+      const modelsSection =
+        usage.byModel.length === 0
+          ? h('p', { style: USAGE_EMPTY_STYLE }, t('usage.empty'))
+          : h(
+              'div',
+              { style: USAGE_TABLE_SCROLL_STYLE },
+              h(
+                'table',
+                { style: USAGE_TABLE_STYLE },
+                h(
+                  'thead',
+                  null,
+                  h(
+                    'tr',
+                    null,
+                    h('th', { scope: 'col', style: TH_STYLE }, t('recent.column.model')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.input')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.cacheRead')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.cacheWrite')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.output')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.requests')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.cost')),
+                  ),
+                ),
+                h('tbody', null, modelRows),
+                h(
+                  'tfoot',
+                  null,
+                  h(
+                    'tr',
+                    null,
+                    h('td', { style: Object.assign({}, TD_STYLE, { color: COLORS.secondary }) }, t('usage.totalsRow')),
+                    h('td', { style: TD_RIGHT_STYLE }, compactTokens(modelTotals.promptTokens)),
+                    h('td', { style: TD_RIGHT_STYLE }, compactTokens(modelTotals.cacheReadTokens)),
+                    h('td', { style: TD_RIGHT_STYLE }, compactTokens(modelTotals.cacheWriteTokens)),
+                    h('td', { style: TD_RIGHT_STYLE }, compactTokens(modelTotals.completionTokens)),
+                    h('td', { style: TD_RIGHT_STYLE }, formatCount(modelTotals.requests)),
+                    h('td', { style: TD_RIGHT_STYLE }, usdText(t, usage.todayUsd)),
+                  ),
+                ),
+              ),
+            );
+
+      /* Presets: which routing outcome the money actually went through. */
+      const presetsSection =
+        usage.byTier.length === 0
+          ? h('p', { style: USAGE_EMPTY_STYLE }, t('usage.byTierEmpty'))
+          : h(
+              'ul',
+              { style: USAGE_TIER_LIST_STYLE },
+              usage.byTier.map((row) =>
+                h(
+                  'li',
+                  { key: row.tier, style: USAGE_TIER_ROW_STYLE },
+                  h('span', { style: USAGE_TIER_LABEL_STYLE }, usageTierLabel(t, row.tier)),
+                  h('span', { style: USAGE_TIER_META_STYLE }, t('usage.requests', { count: formatCount(row.requests) })),
+                  h('span', { style: USAGE_TIER_COST_STYLE }, usdText(t, row.costUsd)),
+                ),
+              ),
+            );
+
+      /* Sessions: the same money cut by the conversation that spent it. The relay learns the
+         session from the request envelope, so this cut needs no join with the Host. */
+      const sessionsSection =
+        usage.bySession.length === 0
+          ? h('p', { style: USAGE_EMPTY_STYLE }, t('usage.sessionsEmpty'))
+          : h(
+              'div',
+              { style: USAGE_TABLE_SCROLL_STYLE },
+              h(
+                'table',
+                { style: USAGE_TABLE_STYLE },
+                h(
+                  'thead',
+                  null,
+                  h(
+                    'tr',
+                    null,
+                    h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.sessionName')),
+                    h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.session')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.requests')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('recent.column.tokens')),
+                    h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.cost')),
+                  ),
+                ),
+                h(
+                  'tbody',
+                  null,
+                  usage.bySession.map((row) =>
+                    h(
+                      'tr',
+                      { key: row.session },
+                      h(
+                        'td',
+                        { style: TD_STYLE },
+                        h(
+                          'div',
+                          {
+                            style: {
+                              maxWidth: '220px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            },
+                            title: row.title === '' ? undefined : row.title,
+                          },
+                          row.title === '' ? t('common.notAvailable') : row.title,
+                        ),
+                      ),
+                      h(
+                        'td',
+                        { style: TD_STYLE },
+                        h(
+                          'div',
+                          {
+                            style: Object.assign({}, codeStyle, {
+                              maxWidth: '240px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }),
+                            title: row.session,
+                          },
+                          row.session,
+                        ),
+                      ),
+                      h('td', { style: TD_RIGHT_STYLE }, formatCount(row.requests)),
+                      h('td', { style: TD_RIGHT_STYLE }, compactTokens(row.promptTokens + row.completionTokens)),
+                      h('td', { style: TD_RIGHT_STYLE }, usdText(t, row.costUsd)),
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+      const rawField = (label, value) =>
+        h(
+          'div',
+          { key: label, style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+          h('span', { style: USAGE_RAW_LABEL_STYLE }, label),
+          h('span', { style: USAGE_RAW_VALUE_STYLE }, value),
+        );
+
+      const rows = [];
+      if (usage.recent.length === 0) {
+        rows.push(
+          h(
+            'tr',
+            { key: 'empty' },
+            h(
+              'td',
+              { colSpan: 11, style: Object.assign({}, TD_STYLE, { color: COLORS.secondary }) },
+              t('recent.empty'),
+            ),
+          ),
+        );
+      } else {
+        usage.recent.forEach((entry, index) => {
+          const time = clockTime(entry.at);
+          const timeText = time === '' ? t('common.notAvailable') : time;
+          /* The preset is the outcome a person picked; the wire tier only exists for the
+             presets that send one, so it is the fallback label. */
+          const preset = presetFromLegacyTier(entry.preset);
+          const presetLabel = preset === null ? usageTierLabel(t, entry.tier) : t('preset.' + preset);
+          /* A served tier that differs from the sent one is the "the provider shed this
+             request" case: OpenRouter answered on a different endpoint than asked for. Raw
+             names on both sides, because that difference is the information. */
+          const sentTier = entry.tier === null ? '' : entry.tier;
+          const shed = entry.servedTier !== '' && entry.servedTier.toLowerCase() !== sentTier.toLowerCase();
+          const promptTokens = entry.promptTokens;
+          const completionTokens = entry.completionTokens;
+          const tokenTotal =
+            promptTokens === null && completionTokens === null
+              ? null
+              : (promptTokens === null ? 0 : promptTokens) + (completionTokens === null ? 0 : completionTokens);
+          const open = openRow === index;
+          const rawId = 'openrouter-plus-usage-raw-' + String(index);
+          const modelText = entry.model === '' ? t('common.notAvailable') : entry.model;
+          const sessionFull = entry.sessionId === '' ? '' : entry.sessionId;
+          const sessionText = sessionFull === ''
+            ? t('common.notAvailable')
+            : sessionFull.length > 12
+              ? sessionFull.slice(0, 8) + '\u2026'
+              : sessionFull;
+
+          rows.push(
+            h(
+              'tr',
+              { key: 'row-' + String(index) },
+              h(
+                'td',
+                { style: Object.assign({}, TD_STYLE, { width: '20px', paddingRight: '2px' }) },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'aria-expanded': open,
+                    'aria-controls': rawId,
+                    'aria-label': t('usage.rowDetailAria', { time: timeText }),
+                    onClick: () => setOpenRow(open ? -1 : index),
+                    style: USAGE_TRIGGER_STYLE,
+                  },
+                  h('span', { 'aria-hidden': 'true' }, open ? '\u25be' : '\u25b8'),
+                ),
+              ),
+              h('td', { style: Object.assign({}, TD_STYLE, { whiteSpace: 'nowrap' }) }, timeText),
+              h(
+                'td',
+                { style: TD_STYLE },
+                h(
+                  'div',
+                  {
+                    style: Object.assign({}, codeStyle, {
+                      maxWidth: '220px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }),
+                    title: modelText,
+                  },
+                  modelText,
+                ),
+              ),
+              h(
+                'td',
+                { style: TD_STYLE },
+                entry.providerName === ''
+                  ? t('common.notAvailable')
+                  : h(
+                      'div',
+                      {
+                        style: {
+                          maxWidth: '110px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        },
+                        title: entry.providerName,
+                      },
+                      entry.providerName,
+                    ),
+              ),
+              h(
+                'td',
+                { style: TD_STYLE },
+                h('span', { style: BADGE_STYLE }, presetLabel),
+                shed
+                  ? h(
+                      'div',
+                      { style: { color: COLORS.secondary, font: FONTS.tiny } },
+                      t('usage.servedAs', { tier: entry.servedTier }),
+                    )
+                  : null,
+              ),
+              h(
+                'td',
+                {
+                  style: Object.assign({}, TD_STYLE, { whiteSpace: 'nowrap' }),
+                  title: sessionFull === '' ? undefined : sessionFull,
+                },
+                sessionText,
+                entry.sessionTitle === ''
+                  ? null
+                  : h(
+                      'div',
+                      {
+                        style: {
+                          color: COLORS.secondary,
+                          font: FONTS.tiny,
+                          maxWidth: '130px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        },
+                      },
+                      entry.sessionTitle,
+                    ),
+              ),
+              h(
+                'td',
+                {
+                  style: Object.assign({}, TD_STYLE, {
+                    color: entry.status !== null && entry.status >= 400 ? COLORS.error : COLORS.primary,
+                  }),
+                },
+                entry.status === null ? t('common.notAvailable') : String(entry.status),
+              ),
+              h(
+                'td',
+                { style: TD_RIGHT_STYLE },
+                entry.ms === null ? t('common.notAvailable') : t('common.ms', { value: formatCount(entry.ms) }),
+              ),
+              h('td', { style: TD_STYLE }, entry.streaming ? t('recent.stream') : t('common.notAvailable')),
+              h('td', { style: TD_RIGHT_STYLE }, usdText(t, entry.costUsd)),
+              h(
+                'td',
+                {
+                  style: TD_RIGHT_STYLE,
+                  title:
+                    tokenTotal === null
+                      ? undefined
+                      : t('usage.tokensTitle', {
+                          input: formatCount(promptTokens),
+                          cacheRead: formatCount(entry.cacheReadTokens),
+                          cacheWrite: formatCount(entry.cacheWriteTokens),
+                          output: formatCount(completionTokens),
+                        }),
+                },
+                tokenTotal === null ? t('usage.notReported') : formatCount(tokenTotal),
+              ),
+            ),
+          );
+
+          if (!open) return;
+          rows.push(
+            h(
+              'tr',
+              { key: 'raw-' + String(index) },
+              h(
+                'td',
+                { colSpan: 9, style: { padding: 0, borderBottom: '1px solid ' + COLORS.border } },
+                h(
+                  'div',
+                  { id: rawId, style: USAGE_RAW_STYLE },
+                  h('span', { style: USAGE_RAW_HEADING_STYLE }, t('usage.rawFields')),
+                  rawField(
+                    t('usage.servedModel'),
+                    entry.servedModel !== '' ? entry.servedModel : entry.model !== '' ? entry.model : t('usage.notReported'),
+                  ),
+                  rawField(t('usage.servedTier'), entry.servedTier === '' ? t('usage.notReported') : entry.servedTier),
+                  rawField(t('usage.byok'), entry.byok ? t('usage.yes') : t('usage.no')),
+                  rawField(t('usage.genId'), entry.genId === '' ? t('usage.notReported') : entry.genId),
+                  h(
+                    'span',
+                    { style: Object.assign({}, USAGE_RAW_HEADING_STYLE, { paddingTop: '6px' }) },
+                    t('usage.costDetails'),
+                  ),
+                  /* Two separate charges: what OpenRouter billed for the relayed call, and
+                     what the caller's own provider key paid for the upstream leg. Never
+                     summed — with BYOK the second one is the caller's bill, not OpenRouter's. */
+                  rawField(t('usage.costTotal'), usdText(t, entry.costUsd)),
+                  rawField(t('usage.costUpstream'), usdText(t, entry.upstreamCostUsd)),
+                  rawField(t('usage.costPrompt'), usdText(t, entry.promptCostUsd)),
+                  rawField(t('usage.costCompletion'), usdText(t, entry.completionCostUsd)),
+                  rawField(t('usage.costTool'), usdText(t, entry.toolCostUsd)),
+                  entry.byok ? h('p', { style: USAGE_RAW_NOTE_STYLE }, t('usage.byokNote')) : null,
+                ),
+              ),
+            ),
+          );
+        });
+      }
+
+      const recentSection = h(
+        'div',
+        { key: 'recent', style: USAGE_SECTION_STYLE },
+        h(
+          'div',
+          { style: USAGE_TABLE_SCROLL_STYLE },
+          h(
+            'table',
+            { style: USAGE_TABLE_STYLE },
+            h(
+              'thead',
+              null,
+              h(
+                'tr',
+                null,
+                h('th', { scope: 'col', style: TH_STYLE }, h('span', { style: visuallyHidden }, t('usage.rawFields'))),
+                h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.time')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('recent.column.model')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.provider')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('recent.column.tier')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.session')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('recent.column.status')),
+                h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('recent.column.ms')),
+                h('th', { scope: 'col', style: TH_STYLE }, t('usage.column.stream')),
+                h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('usage.column.cost')),
+                h('th', { scope: 'col', style: TH_RIGHT_STYLE }, t('recent.column.tokens')),
+              ),
+            ),
+            h('tbody', null, rows),
+          ),
+        ),
+      );
+
+      /* Tabs, not one long scroll: Models answers "what cost money", Requests answers "which
+         call", Presets answers "which routing outcome". The split keeps each panel a reader
+         can take in at once. */
+      const USAGE_TAB_IDS = ['models', 'requests', 'presets', 'sessions'];
+      const tabBar = h(
+        'div',
+        { role: 'tablist', 'aria-label': t('usage.tabsLabel'), style: USAGE_TAB_BAR_STYLE },
+        USAGE_TAB_IDS.map((id) =>
+          h(
+            'button',
+            {
+              key: id,
+              id: USAGE_TAB_ID_PREFIX + id,
+              type: 'button',
+              role: 'tab',
+              'aria-selected': tab === id,
+              'aria-controls': USAGE_TAB_PANEL_ID,
+              onClick: () => setTab(id),
+              style: usageTabStyle(tab === id),
+            },
+            t('usage.tab.' + id),
+          ),
+        ),
+      );
+      const panels = { models: modelsSection, requests: recentSection, presets: presetsSection, sessions: sessionsSection };
+      const panel = h(
+        'div',
+        {
+          role: 'tabpanel',
+          id: USAGE_TAB_PANEL_ID,
+          'aria-labelledby': USAGE_TAB_ID_PREFIX + tab,
+          style: USAGE_TAB_PANEL_STYLE,
+        },
+        panels[tab],
+      );
+
+      return h(
+        'div',
+        {
+          style: USAGE_OVERLAY_STYLE,
+          onMouseDown: (event) => {
+            /* A press that starts on the backdrop closes it; one that starts inside the
+               panel and ends here (a text selection dragged out) must not. */
+            if (event.target === event.currentTarget) onClose();
+          },
+        },
+        h(
+          'div',
+          {
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': t('usage.dialogTitle'),
+            tabIndex: -1,
+            ref: panelRef,
+            style: USAGE_DIALOG_STYLE,
+          },
+          h(
+            'div',
+            { style: USAGE_DIALOG_HEAD_STYLE },
+            h('h3', { style: USAGE_DIALOG_TITLE_STYLE }, t('usage.dialogTitle')),
+            h(ActionButton, { label: t('usage.close'), ariaLabel: t('usage.close'), onClick: onClose }),
+          ),
+          summary,
+          tabBar,
+          panel,
+        ),
+      );
+    }
+
+    /**
+     * The details dialog has to outlive the card that opens it.
+     *
+     * The card sits in `sidebar.footer.action`, and a shell is free to host that slot inside
+     * a popover that unmounts on the next outside press — including the press on our own
+     * Details button. A dialog rendered in the card's subtree would die with the card, so it
+     * is mounted into a root of its own on `document.body` and owned by this module instead:
+     * opening it is a call, not a card state change, and only closing it removes the dialog.
+     * That also takes it out of any `[data-...-part~=foot-area]` subtree a skin styles.
+     *
+     * @returns {{ available: boolean, open: (usage: object, t: Function) => boolean,
+     *   close: () => void, destroy: () => void }}
+     */
+    function createUsageDialogMount() {
+      let host = null;
+      let root = null;
+      const available = ReactDOM !== null && typeof document !== 'undefined';
+
+      function close() {
+        /* Keep the root: reopening is common, and unmounting would throw away the container
+           the shell already painted over. `render(null)` takes the dialog down. */
+        if (root !== null) root.render(null);
+      }
+
+      function open(usage, t) {
+        if (!available || usage === null || usage === undefined) return false;
+        if (host === null) {
+          host = document.createElement('div');
+          host.setAttribute('data-openrouter-plus', 'usage-dialog');
+          document.body.appendChild(host);
+          root = ReactDOM.createRoot(host);
+        }
+        root.render(h(UsageDialog, { t: t, usage: usage, onClose: close }));
+        return true;
+      }
+
+      function destroy() {
+        try {
+          if (root !== null) root.unmount();
+        } catch (error) {
+          /* a root already torn down by the shell */
+        }
+        root = null;
+        if (host !== null && host.parentNode !== null) host.parentNode.removeChild(host);
+        host = null;
+      }
+
+      return { available, open, close, destroy };
+    }
+
+    const usageDialogMount = createUsageDialogMount();
+
     /* -------------------------------------------------------------------- plugin */
 
     return {
@@ -3829,6 +5477,10 @@ window.__ModuleLoader__.load({
         normalizeMounts,
         pinnedMounts,
         presetFromLegacyTier,
+        /* The sidebar card's gates are the one place a Host version skew decides whether
+           anything renders at all, so they are pinnable like the mount readers above. */
+        normalizeUsageStatus,
+        normalizeUsageRecent,
         pageChrome,
         controlUrl,
         controlBase: CONTROL_BASE,
@@ -3838,6 +5490,13 @@ window.__ModuleLoader__.load({
         ctx.effect(
           () => ctx.locale.register(NS, { en: en, zh: zh }),
           'dsh-openrouter-plus: locale dictionaries',
+        );
+
+        /* The details dialog is mounted on `document.body`, outside this plugin's tree: a
+           reload has to take its root down or the overlay outlives the bundle that drew it. */
+        ctx.effect(
+          () => () => usageDialogMount.destroy(),
+          'dsh-openrouter-plus: usage dialog root',
         );
 
         const t = ctx.locale.bind(NS);
@@ -3912,6 +5571,21 @@ window.__ModuleLoader__.load({
           ctx.slots.register(
             { name: 'settings.models.provider-card', key: PI_AI_NS },
             ProviderRouteExtension,
+          ),
+        );
+
+        /*
+         * The sidebar foot, beside Settings: `sidebar.footer.action` is a free `list` seat,
+         * so the registration carries an id of ours and no owner key. The card owns its own
+         * poll, and draws nothing unless the Host enables the flag, the relay owns a socket,
+         * and the payload carries a cost — on an older Host the footer is left untouched.
+         */
+        ctx.slots.inject('sidebar.footer.action', () =>
+          ctx.slots.register(
+            { name: 'sidebar.footer.action', id: 'openrouter-plus-usage', order: 0 },
+            function OpenRouterPlusUsage(props) {
+              return h(UsageBoundary, null, h(UsageCard, Object.assign({}, props, { t: t })));
+            },
           ),
         );
 

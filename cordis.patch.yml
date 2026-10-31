@@ -88,3 +88,11 @@
         #     upstream: https://api.acme.dev/v1
         #     tier: flex
         targets: {}
+
+        # The spend card in the sidebar footer, next to Settings. It shows what
+        # OpenRouter actually charged (read from each response's `usage.cost`), not an
+        # estimate, so it stays honest when a request is served by a flex, priority or
+        # floor endpoint. false hides the card only — the settings page keeps showing
+        # the same numbers, and the relay keeps recording them either way.
+        usageWidget:
+          enabled: true

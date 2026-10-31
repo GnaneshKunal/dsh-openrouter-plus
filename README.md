@@ -63,7 +63,8 @@ switching never mints a provider, a route or a model list.
   offers the same choice twice.
 - **Its own settings page** (Settings → OpenRouter Plus) showing relay state, one pinned base URL
   per preset with a copy button, live request/token counters per preset, the measured effective
-  multiplier, and recent requests. The same page is the bundle's body on its Plugins card
+  multiplier, spend in USD (today, the retained window, cost per preset), and recent requests.
+  The same page is the bundle's body on its Plugins card
   (Plugins → Installed → OpenRouter Plus, in the sidebar's plugin manager), beside the version and
   the Uninstall button — so the plugin is configurable from where it was installed, not only from
   the nav row it added.
@@ -84,6 +85,24 @@ switching never mints a provider, a route or a model list.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
   header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
   construction.
+
+## Spend: what it actually cost
+
+The relay reports the **billed amount**, not a token count multiplied by a price list. Each response
+carries `usage.cost` (plus `cost_details` for BYOK's upstream charge and server tools), and the relay
+copies it out of a bounded head/tail while forwarding the bytes untouched. That amount already
+reflects *which endpoint served the request* — flex at half price, priority/ultrafast at a premium,
+a `:floor` variant, or a fallback that answered with another model — which is exactly the
+information a price table cannot reconstruct afterwards.
+
+Cost is bucketed by **local calendar day** and kept for **14 days**, so a Host restart does not reset
+today's number; token counters and the last-50-requests ring are process-local and do start over. A
+`null` means the provider reported nothing (failed call, aborted stream) and is never shown as `$0`;
+a `0` is a genuinely free call. BYOK keeps two separate bills: `costUsd` is OpenRouter's charge,
+`upstreamCostUsd` is your provider's own.
+
+Read [`docs/USAGE.md`](docs/USAGE.md) for the field-by-field contract, the window and persistence
+rules, and what a reload keeps.
 
 ## Screenshots
 
@@ -367,11 +386,12 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
-| `GET /__openrouter-plus/status` | address, `bound`/`port`, upstream, mounts, metrics |
+| `GET /__openrouter-plus/status` | address, `bound`/`port`, upstream, mounts, `usageWidget`, and `metrics` (cost in USD, day buckets, model/tier rollups, recent requests) |
 | `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
+| `POST /__openrouter-plus/widget` | `{ enabled: boolean }` — show/hide the sidebar spend card; a config write |
 | `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
 | `POST /__openrouter-plus/models/add` | `{ route, upstream?, models: [], remove: [], confirmRemove? }` — add/remove an explicit selection; a removal requires `confirmRemove: true` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
@@ -424,6 +444,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
 | `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
+| `usageWidget` | `{ enabled: true }` | draw the sidebar spend card. A bare `false` is accepted; hiding the card hides nothing else — the settings page still shows every number |
 
 ## Security model
 
@@ -434,7 +455,8 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
   Host/Origin check and session cookie the GUI's own API uses. Only a loopback request with no
   `Origin` — a local process — is exempt, and that is the privilege it already had on the relay
   listener.
-- **Read-only telemetry.** The status API exposes counts and token sums, never prompts or keys.
+- **Read-only telemetry.** The status API exposes counts, token sums and billed cost, never prompts
+  or keys.
 - **Reversible by construction.** The plugin only ever adds a provider route whose `baseURL` points
   at its own origin, and only removes routes that pass that same test. The switch is the same idea
   one level down: the endpoint it took over is recorded in the plugin's config, and **Detach** —
@@ -470,7 +492,7 @@ dsh plugin --profile web remove dsh-openrouter-plus
 
 ```bash
 node --check index.js && node --check client.js
-node --test            # 99 tests, no network, no profile writes
+node --test            # 157 tests, no network, no profile writes
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module contract, and

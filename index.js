@@ -22,6 +22,7 @@ import { createConfigBridge } from './lib/config-bridge.js'
 import { MODEL_LISTING_MAX_BYTES, annotateLive, readLiveModels } from './lib/models-sync.js'
 import { normalizeReasoningEfforts } from './lib/reasoning.js'
 import { createAutoRepair } from './lib/auto-repair.js'
+import { readUsageStoreSync, usageStorePath, writeUsageStore, writeUsageStoreSync } from './lib/usage-store.js'
 
 /** Must match the string client.js probes and the docs advertise. */
 const CONTROL_PREFIX = '/__openrouter-plus'
@@ -102,7 +103,13 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.2.4'
+const VERSION = '0.3.0'
+
+/**
+ * How long a burst of relayed calls is coalesced before the usage snapshot is written.
+ * A tool-using turn is dozens of requests, and the file is a rollup, not an audit log.
+ */
+const USAGE_WRITE_DELAY_MS = 5000
 
 /** Largest control-POST body we will read; these are tiny JSON documents. */
 const MAX_CONTROL_BODY = 64 * 1024
@@ -119,6 +126,7 @@ const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
  *   autoRepairReasoning: boolean, defaultPreset: string|null,
  *   sessionPresets: Record<string, string>, sessionPresetStamp: Record<string, number>,
+ *   usageWidget: { enabled: boolean },
  * }}
  */
 export function normalizeConfig(raw) {
@@ -153,7 +161,23 @@ export function normalizeConfig(raw) {
     defaultPreset: normalizePresetId(config.defaultPreset ?? config.defaultTier),
     sessionPresets: sessionPresets.presets,
     sessionPresetStamp: sessionPresets.stamp,
+    // Whether the sidebar card is drawn. The flag hides the card, never the numbers:
+    // the settings page shows the same spend whether or not the card is on.
+    usageWidget: { enabled: normalizeUsageWidget(config.usageWidget) },
   }
+}
+
+/**
+ * The sidebar card is on unless it was switched off. A bare `false` is accepted as the
+ * whole setting so a hand-edited row reads the same as `{ enabled: false }`.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function normalizeUsageWidget(value) {
+  if (value === false) return false
+  if (isPlainObject(value) && value.enabled === false) return false
+  return true
 }
 
 /**
@@ -563,6 +587,189 @@ export function apply(ctx, rawConfig) {
   const metrics = createMetrics({ recentLimit: 50 })
   const startedAt = Date.now()
 
+  // ── usage snapshot ───────────────────────────────────────────────────────
+  // Money is the one thing this relay cannot recompute later: it comes from the
+  // response, so the day buckets are read back before the first call and written on a
+  // debounce. A missing or unreadable file simply means "no history yet".
+  const usagePath = usageStorePath()
+  const persistedUsage = readUsageStoreSync(usagePath)
+  if (persistedUsage !== null) {
+    metrics.hydrate(persistedUsage)
+    /* One line at boot so a restart that restored a log is distinguishable from one that
+       started empty; the dialog itself is the visible proof. */
+    log('info', 'restored the usage snapshot', {
+      days: persistedUsage.days.length,
+      recent: persistedUsage.recent?.length ?? 0,
+      sessions: persistedUsage.sessions?.length ?? 0,
+    })
+  }
+
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let usageWriteTimer = null
+
+  /** Write the day table now: used by the debounce and on dispose. */
+  function flushUsage() {
+    if (usageWriteTimer !== null) {
+      clearTimeout(usageWriteTimer)
+      usageWriteTimer = null
+    }
+    const state = metrics.exportState()
+    // Nothing seen yet means nothing to say. This also keeps a Host that never carried
+    // a request from creating an empty file in the user's home directory.
+    if (state.days.length === 0) return Promise.resolve(true)
+    return writeUsageStore(usagePath, state)
+  }
+
+  /**
+   * Session titles live in the Host's session store, not in the relay: the relay only ever
+   * sees the id advertised on the request. Resolving here keeps conversation text out of the
+   * persisted usage file, and a Host without the service simply reports no title.
+   *
+   * The store's surface differs between Host versions (a synchronous `get`, an async one,
+   * or a resolver method), so the lookup is deliberately tolerant and its answer is cached:
+   * a title changes rarely and the status endpoint is polled every few seconds.
+   *
+   * @type {Map<string, { title: string, at: number }>}
+   */
+  const sessionTitles = new Map()
+
+  /** How long a resolved title is trusted before the store is asked again. */
+  const SESSION_TITLE_TTL_MS = 60000
+
+  /** @param {string} id */
+  async function sessionTitleOf(id) {
+    if (typeof id !== 'string' || id === '') return ''
+    const cached = sessionTitles.get(id)
+    if (cached !== undefined && Date.now() - cached.at < SESSION_TITLE_TTL_MS) return cached.title
+
+    /** One service lookup that treats a missing/foreign context as "not provided". */
+    const service = (name) => {
+      try {
+        return typeof ctx.get === 'function' ? (ctx.get(name) ?? ctx[name]) : ctx[name]
+      } catch {
+        return undefined
+      }
+    }
+
+    const sessions = service('sessions')
+    const query = service('sessionQuery')
+    const projections = service('sessionProjections')
+
+    /* The live session, when the registry still has it. Methods differ across Host versions,
+       so the known spellings are tried; a registry with only `list()` is scanned instead. */
+    let session
+    if (sessions !== undefined && sessions !== null) {
+      for (const method of ['get', 'session', 'resolve', 'find', 'read', 'load', 'peek']) {
+        if (typeof sessions[method] !== 'function') continue
+        try {
+          session = await sessions[method](id)
+        } catch {
+          session = undefined
+        }
+        if (session !== undefined && session !== null) break
+      }
+      if ((session === undefined || session === null) && typeof sessions.list === 'function') {
+        try {
+          const rows = await sessions.list()
+          if (Array.isArray(rows)) session = rows.find((row) => (row?.header?.id ?? row?.id) === id)
+        } catch {
+          session = undefined
+        }
+      }
+    }
+
+    let title = ''
+    /* 1. The name the sidebar shows is folded from `session/title` events in the log, and
+          `sessionQuery.readTitleSnapshot` is the Host service that folds it. */
+    if (query !== undefined && query !== null && typeof query.readTitleSnapshot === 'function') {
+      try {
+        const snapshot = await query.readTitleSnapshot(id)
+        /* `readTitleSnapshot` answers `{ session, title?: SessionTitleSnapshot }`, and the
+           snapshot itself is `{ title, messageSeqs, source, eventSeq, updatedAt }` — the
+           text is one level down. `readTitle` is the same object, so both shapes are read. */
+        const value = snapshot?.title?.title ?? snapshot?.title ?? snapshot?.session?.title
+        if (typeof value === 'string') title = value
+      } catch {
+        title = ''
+      }
+    }
+    /* 2. The same title as a projection (`key: "title"`), which is what the live shell reads. */
+    if (title === '' && projections !== undefined && projections !== null && session !== undefined && session !== null) {
+      try {
+        const snapshot = await projections.snapshot?.(session, ['title'])
+        const projected = snapshot?.values?.title
+        if (typeof projected === 'string') title = projected
+      } catch {
+        /* a projection generation may be replacing itself */
+      }
+    }
+    /* 3. A header title, for a Host that keeps one. */
+    if (title === '' && session !== undefined && session !== null) {
+      const value = session?.header?.title
+        ?? session?.title
+        ?? session?.header?.name
+        ?? session?.name
+      if (typeof value === 'string') title = value
+    }
+
+    sessionTitles.set(id, { title, at: Date.now() })
+    if (sessionTitles.size > 400) {
+      const oldest = [...sessionTitles.entries()].sort((a, b) => a[1].at - b[1].at)
+      for (const [key] of oldest.slice(0, sessionTitles.size - 400)) sessionTitles.delete(key)
+    }
+    return title
+  }
+
+  /**
+   * The status copy of the metrics, with session titles attached where the Host knows them.
+   * Titles are resolved once per unique id per poll; the arrays themselves are copies.
+   */
+  async function usageSnapshot() {
+    const snapshot = metrics.snapshot()
+    const bySession = snapshot.bySession ?? []
+    const recent = snapshot.recent ?? []
+    const ids = new Set()
+    for (const row of bySession) if (row.session !== null) ids.add(row.session)
+    for (const row of recent) if (row.sessionId !== null) ids.add(row.sessionId)
+    const titles = new Map()
+    await Promise.all([...ids].slice(0, 80).map(async (id) => {
+      titles.set(id, await sessionTitleOf(id))
+    }))
+    return {
+      ...snapshot,
+      bySession: bySession.map((row) => ({ ...row, title: titles.get(row.session) ?? '' })),
+      recent: recent.map((row) => (row.sessionId === null
+        ? row
+        : { ...row, sessionTitle: titles.get(row.sessionId) ?? '' })),
+    }
+  }
+
+  /** Coalesce a burst of calls into one write; a tool-using turn is dozens of requests. */
+  function scheduleUsageWrite() {
+    if (usageWriteTimer !== null) return
+    usageWriteTimer = setTimeout(() => {
+      usageWriteTimer = null
+      flushUsage().catch(() => {
+        // A failed write is not a failed request: the numbers stay in memory for the
+        // next flush.
+      })
+    }, USAGE_WRITE_DELAY_MS)
+    usageWriteTimer.unref?.()
+  }
+
+  /* Disposal is synchronous, and an exiting process does not await a floating promise. This is
+     the one write that must land before the Host is gone, so it blocks until the rename lands —
+     otherwise the final requests of a session are lost exactly when a restart is what the user is
+     doing, which reads as "everything resets". */
+  ctx.effect(() => () => {
+    if (usageWriteTimer !== null) {
+      clearTimeout(usageWriteTimer)
+      usageWriteTimer = null
+    }
+    const state = metrics.exportState()
+    if (state.days.length > 0) writeUsageStoreSync(usagePath, state)
+  })
+
   /** Live state the control endpoints report. @type {{ error: string|undefined }} */
   const state = { error: undefined }
 
@@ -739,6 +946,20 @@ export function apply(ctx, rawConfig) {
     await editor.edit(entry, (currentConfig) => ({
       ...(isPlainObject(currentConfig) ? currentConfig : current),
       defaultPreset: preset,
+    }))
+  }
+
+  /**
+   * Persist the sidebar-card flag. Like the default preset it is a preference, so it
+   * belongs in this plugin's own row and survives a restart with the profile.
+   *
+   * @param {boolean} enabled
+   */
+  async function writeUsageWidget(enabled) {
+    const { editor, entry, current } = ownRow()
+    await editor.edit(entry, (currentConfig) => ({
+      ...(isPlainObject(currentConfig) ? currentConfig : current),
+      usageWidget: { enabled },
     }))
   }
 
@@ -1006,7 +1227,7 @@ export function apply(ctx, rawConfig) {
       sendJson(res, 200, { ok: true, version: VERSION, uptimeMs: Date.now() - startedAt })
     }),
 
-    [`${CONTROL_PREFIX}/status`]: controlRoute((req, res) => {
+    [`${CONTROL_PREFIX}/status`]: controlRoute(async (req, res) => {
       if (!requireMethod(req, res, 'GET')) return
       const bound = relay.address()
       const address = bound ?? {
@@ -1029,7 +1250,10 @@ export function apply(ctx, rawConfig) {
         startedAt,
         uptimeMs: Date.now() - startedAt,
         error: state.error ?? null,
-        metrics: metrics.snapshot(),
+        // The flag the sidebar card reads. It is part of /status rather than a separate
+        // round trip because the card already polls this endpoint.
+        usageWidget: config.usageWidget,
+        metrics: await usageSnapshot(),
       })
     }),
 
@@ -1158,6 +1382,20 @@ export function apply(ctx, rawConfig) {
       await outsideHmrTransaction(ctx, () => writeDefaultPreset(preset))
       log('info', 'chose the default service tier preset', { preset })
       sendJson(res, 200, { ok: true, default: preset, presets: PRESET_IDS })
+    }),
+
+    // The sidebar card is a preference, not traffic state: one config key, and the
+    // reloaded config is what the next /status reports back to the page.
+    [`${CONTROL_PREFIX}/widget`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      if (typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { error: { message: 'enabled must be a boolean' } })
+        return
+      }
+      await outsideHmrTransaction(ctx, () => writeUsageWidget(body.enabled))
+      log('info', 'set the usage widget flag', { enabled: body.enabled })
+      sendJson(res, 200, { ok: true, usageWidget: { enabled: body.enabled } })
     }),
 
     // There is deliberately no `/routes/twin`: switching a Session's tier must not
@@ -1525,7 +1763,10 @@ export function apply(ctx, rawConfig) {
     // The tier a bare mount should use for the Session carrying the request. The
     // relay only asks; every choice lives here, in this plugin's own config.
     resolveSessionRecipe: (session) => recipeForSession(session),
-    onRecord: (entry) => metrics.record(entry),
+    onRecord: (entry) => {
+      metrics.record(entry)
+      scheduleUsageWrite()
+    },
   })
 
   ctx.effect(() => {

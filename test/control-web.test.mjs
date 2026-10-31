@@ -8,10 +8,17 @@
  * foreign web page would.
  */
 import { strict as assert } from 'node:assert'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import http from 'node:http'
 import { test } from 'node:test'
 
 import { apply } from '../index.js'
+
+/* Every boot in this file writes the usage snapshot under `$DSH_HOME`. Point that at a
+   throwaway directory so a test run can neither read nor overwrite the real one. */
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-openrouter-plus-test-'))
 
 /** Reserve a port by binding it, then hand it over. */
 async function freePort() {

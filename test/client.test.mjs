@@ -39,6 +39,8 @@ const {
   normalizeMounts,
   normalizePresetTable,
   normalizePresetState,
+  normalizeUsageRecent,
+  normalizeUsageStatus,
   pinnedMounts,
   presetFromLegacyTier,
 } = module.__test
@@ -249,4 +251,104 @@ test('the Sync control is offered only on a provider row routed through the rela
   assert.equal(reads.length, 3, 'one declaration, and the button plus the picker reading it')
   /* The pre-fix shape offered the button on any row with an endpoint. */
   assert.equal(/modelEndpoint === ''\s*\n\s*\? null/.test(source), false, 'no ungated button')
+})
+
+test('the sidebar card draws nothing unless the Host reports a usable status', () => {
+  /* Each clause is a Host reality the card cannot explain in a sidebar footer, so
+     `null` (render nothing) is the answer rather than a confident `$0.00`. */
+  const base = {
+    ok: true,
+    bound: true,
+    usageWidget: { enabled: true },
+    metrics: { costUsd: 0, todayUsd: 0 },
+  }
+  assert.equal(normalizeUsageStatus(null), null)
+  assert.equal(normalizeUsageStatus({ ...base, ok: false }), null, 'the Host reports a failure')
+  assert.equal(normalizeUsageStatus({ ...base, bound: false }), null, 'the relay owns no socket')
+  assert.equal(normalizeUsageStatus({ ...base, usageWidget: undefined }), null, 'a Host from before the flag')
+  assert.equal(normalizeUsageStatus({ ...base, usageWidget: { enabled: false } }), null, 'the card is off')
+  assert.equal(normalizeUsageStatus({ ...base, metrics: {} }), null, 'a Host from before the money fields')
+  assert.equal(normalizeUsageStatus({ ...base, metrics: { costUsd: '0.5' } }), null, 'a non-number is not cost')
+
+  const usage = normalizeUsageStatus(base)
+  assert.equal(usage.totalUsd, 0, 'a real zero is usable: the feature is present and the window is empty')
+  assert.equal(usage.todayUsd, 0)
+  /* A Host that reports the total without today: the card says "not reported" for the
+     day rather than $0.00. */
+  assert.equal(normalizeUsageStatus({ ...base, metrics: { costUsd: 0.5 } }).todayUsd, null)
+})
+
+test('the sidebar rollups keep their order and drop rows they cannot label', () => {
+  const usage = normalizeUsageStatus({
+    ok: true,
+    bound: true,
+    usageWidget: { enabled: true },
+    metrics: {
+      costUsd: 0.9,
+      todayUsd: 0.4,
+      byModel: [
+        { model: 'a/model', requests: '3', promptTokens: 1, completionTokens: 2, cacheReadTokens: 4, cacheWriteTokens: 5, costUsd: 0.4 },
+        { model: '', requests: 9, costUsd: 9 },
+        null,
+        { model: 'b/model', costUsd: null },
+      ],
+      byTier: {
+        flex: { requests: 2, costUsd: 0.1, multiplier: 0.5 },
+        priority: { requests: 1, costUsd: 0.3, multiplier: 2 },
+        idle: { requests: 0, costUsd: 5, multiplier: 1 },
+        broken: null,
+      },
+      recent: [],
+    },
+  })
+
+  assert.deepEqual(usage.byModel.map((row) => row.model), ['a/model', 'b/model'])
+  assert.equal(usage.byModel[0].promptTokens, 1, 'counts are numbers; a missing one defaults to 0')
+  assert.equal(usage.byModel[0].cacheReadTokens, 4)
+  assert.equal(usage.byModel[1].costUsd, null, 'a model row with no money stays null, not 0')
+  /* Cost first, so the expensive preset is not lost at the bottom of a long list; a
+     tier with no requests is not shown, because that bucket never carried traffic. */
+  assert.deepEqual(usage.byTier.map((row) => row.tier), ['priority', 'flex'])
+  assert.equal(usage.byTier[0].multiplier, 2)
+})
+
+test('a recent request keeps its raw cost fields, under either spelling', () => {
+  /* The Host forwards the sniffer's camelCase view; a payload may also carry the wire's
+     snake_case `cost_details`. Both are read, because the dialog must not say "not
+     reported" for a field the payload actually carried. */
+  const direct = normalizeUsageRecent({
+    at: 1_700_000_000_000,
+    tier: '',
+    preset: 'flex',
+    model: 'asked/model',
+    servedModel: 'served/model',
+    servedTier: 'flex',
+    status: 200,
+    ms: 12,
+    streaming: true,
+    promptTokens: 10,
+    completionTokens: 5,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 3,
+    costUsd: null,
+    upstreamCostUsd: 0.002,
+    costDetails: { server_tool_cost: 0.001 },
+    byok: true,
+    genId: ' gen-abc ',
+  })
+  assert.equal(direct.costUsd, null, 'a failed or aborted call is not free')
+  assert.equal(direct.upstreamCostUsd, 0.002)
+  assert.equal(direct.toolCostUsd, 0.001, 'a snake_case detail key is understood')
+  assert.equal(direct.byok, true)
+  assert.equal(direct.genId, 'gen-abc', 'the id is trimmed')
+  assert.equal(direct.tier, null, 'an empty tier is not a wire tier')
+  assert.equal(direct.preset, 'flex')
+  assert.equal(direct.servedModel, 'served/model')
+
+  const wire = normalizeUsageRecent({ cost_details: { upstream_inference_completions_cost: 0.004 } })
+  assert.equal(wire.completionCostUsd, 0.004)
+  assert.equal(wire.upstreamCostUsd, null, 'a detail that was not reported stays null')
+  assert.equal(wire.byok, false, 'only a real true opts the row into BYOK')
+  assert.equal(normalizeUsageRecent(null), null)
+  assert.equal(normalizeUsageRecent('nope'), null)
 })

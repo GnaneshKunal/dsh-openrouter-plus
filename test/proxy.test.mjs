@@ -3,7 +3,26 @@ import http from 'node:http'
 import { after, test } from 'node:test'
 
 import { createMetrics } from '../lib/metrics.js'
-import { applyRecipe, baseModelId, createRelay, findUsage, normalizeRecipe, sessionKeyOf } from '../lib/proxy.js'
+import { applyRecipe, baseModelId, createRelay, findGenerationId, findUsage, normalizeRecipe, sessionKeyOf } from '../lib/proxy.js'
+
+/** The "provider reported nothing" shape, so token-only fixtures stay readable. */
+const emptyUsage = () => ({
+  promptTokens: null,
+  completionTokens: null,
+  cacheReadTokens: null,
+  cacheWriteTokens: null,
+  reasoningTokens: null,
+  costUsd: null,
+  upstreamCostUsd: null,
+  upstreamPromptCostUsd: null,
+  upstreamCompletionCostUsd: null,
+  serverToolCostUsd: null,
+  byok: false,
+  servedTier: null,
+  servedModel: null,
+  providerName: null,
+  genId: null,
+})
 
 /** @type {Array<() => Promise<void>>} */
 const cleanups = []
@@ -262,13 +281,105 @@ test('findUsage reads SSE transcripts and plain JSON bodies', () => {
     'data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4}}',
     'data: [DONE]',
   ].join('\n')
-  assert.deepEqual(findUsage(sse), { promptTokens: 9, completionTokens: 4 })
+  assert.deepEqual(findUsage(sse), {
+    promptTokens: 9,
+    completionTokens: 4,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    reasoningTokens: null,
+    costUsd: null,
+    upstreamCostUsd: null,
+    upstreamPromptCostUsd: null,
+    upstreamCompletionCostUsd: null,
+    serverToolCostUsd: null,
+    byok: false,
+    servedTier: null,
+    servedModel: null,
+    providerName: null,
+    genId: null,
+  })
   assert.deepEqual(
     findUsage('{"id":"x","usage":{"prompt_tokens":3,"completion_tokens":2},"model":"m"}'),
-    { promptTokens: 3, completionTokens: 2 },
+    {
+      promptTokens: 3,
+      completionTokens: 2,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+      costUsd: null,
+      upstreamCostUsd: null,
+      upstreamPromptCostUsd: null,
+      upstreamCompletionCostUsd: null,
+      serverToolCostUsd: null,
+      byok: false,
+      servedTier: null,
+      servedModel: 'm',
+      providerName: null,
+      genId: null,
+    },
   )
-  assert.deepEqual(findUsage('no usage here'), { promptTokens: null, completionTokens: null })
-  assert.deepEqual(findUsage(''), { promptTokens: null, completionTokens: null })
+  assert.deepEqual(findUsage('no usage here'), emptyUsage())
+  assert.deepEqual(findUsage(''), emptyUsage())
+})
+
+test('findUsage reports the billed amount, the served tier and the identity', () => {
+  // The shape OpenRouter appends to a streamed completion: the amount charged is in
+  // `usage.cost`, and the tier that actually served it sits at the top level.
+  const final = {
+    id: 'gen-abc-123',
+    object: 'chat.completion.chunk',
+    model: 'saostar/gpt-test-2026',
+    provider: 'DigitalOcean',
+    service_tier: 'priority',
+    choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: 194,
+      completion_tokens: 2,
+      total_tokens: 196,
+      prompt_tokens_details: { cached_tokens: 100, cache_write_tokens: 7 },
+      completion_tokens_details: { reasoning_tokens: 3 },
+      cost: 0.00042,
+      is_byok: false,
+      cost_details: {
+        upstream_inference_cost: 0.0003,
+        upstream_inference_prompt_cost: 0.0002,
+        upstream_inference_completions_cost: 0.0001,
+        server_tool_cost: null,
+      },
+    },
+  }
+  const text = ['data: {"choices":[{"delta":{"content":"a"}}]}', `data: ${JSON.stringify(final)}`, 'data: [DONE]'].join('\n')
+  assert.deepEqual(findUsage(text), {
+    promptTokens: 194,
+    completionTokens: 2,
+    cacheReadTokens: 100,
+    cacheWriteTokens: 7,
+    reasoningTokens: 3,
+    costUsd: 0.00042,
+    upstreamCostUsd: 0.0003,
+    upstreamPromptCostUsd: 0.0002,
+    upstreamCompletionCostUsd: 0.0001,
+    serverToolCostUsd: null,
+    byok: false,
+    servedTier: 'priority',
+    servedModel: 'saostar/gpt-test-2026',
+    providerName: 'DigitalOcean',
+    genId: 'gen-abc-123',
+  })
+  // A free endpoint reports 0, which is an amount, not a missing one.
+  assert.equal(findUsage('{"usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0}}').costUsd, 0)
+  // An aborted stream has no usage block left, but the identity is still worth keeping.
+  assert.deepEqual(findUsage('data: {"id":"gen-aborted-1","model":"m","choices":[{"delta":{"content":"x"}}]}'), {
+    ...emptyUsage(),
+    servedModel: 'm',
+    genId: 'gen-aborted-1',
+  })
+})
+
+test('findGenerationId reads the id from the first chunk', () => {
+  assert.equal(findGenerationId('data: {"id":"gen-1a2B3c","model":"m"}'), 'gen-1a2B3c')
+  assert.equal(findGenerationId('data: {"id":"not-a-generation"}'), null)
+  assert.equal(findGenerationId(''), null)
 })
 
 // ---- per-target mounts: /t/<targetId>[/<tier>]/v1 ------------------------

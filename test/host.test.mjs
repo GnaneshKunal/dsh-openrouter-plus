@@ -4,11 +4,18 @@
  * HTTP, exactly as the Models card does.
  */
 import { strict as assert } from 'node:assert'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import http from 'node:http'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
 
-import { apply, normalizeConfig, normalizeRoutes } from '../index.js'
+import { apply, normalizeConfig, normalizeRoutes, normalizeUsageWidget } from '../index.js'
+
+/* Every boot in this file writes the usage snapshot under `$DSH_HOME`. Point that at a
+   throwaway directory so a test run can neither read nor overwrite the real one. */
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-openrouter-plus-test-'))
 
 /** The version the package declares, so `/health` is compared against the truth and not a literal. */
 const { version: PACKAGE_VERSION } = JSON.parse(
@@ -167,6 +174,24 @@ test('normalizeConfig applies defaults and rejects nonsense', () => {
   )
 })
 
+test('the sidebar card is on unless it was switched off', () => {
+  // Absent means on: the card is part of the feature, not an opt-in.
+  assert.equal(normalizeConfig(undefined).usageWidget.enabled, true)
+  assert.equal(normalizeConfig({}).usageWidget.enabled, true)
+  assert.equal(normalizeConfig({ usageWidget: { enabled: true } }).usageWidget.enabled, true)
+  assert.equal(normalizeConfig({ usageWidget: { enabled: false } }).usageWidget.enabled, false)
+  // A hand-edited row may write the whole setting as the bare boolean; both read the
+  // same, and anything else stays on rather than hiding the card by accident.
+  assert.equal(normalizeConfig({ usageWidget: false }).usageWidget.enabled, false)
+  assert.equal(normalizeUsageWidget(false), false)
+  assert.equal(normalizeUsageWidget({ enabled: false }), false)
+  assert.equal(normalizeUsageWidget('false'), true)
+  assert.equal(normalizeUsageWidget({ enabled: 'no' }), true)
+  assert.equal(normalizeUsageWidget(null), true)
+  // `/status` answers the object, so the card has one shape to read either way.
+  assert.deepEqual(normalizeConfig({ usageWidget: false }).usageWidget, { enabled: false })
+})
+
 test('boots the relay, serves control endpoints, and stops cleanly', async (t) => {
   const port = await freePort()
   const { ctx, logs, dispose } = createFakeContext()
@@ -319,6 +344,82 @@ test('boots the relay, serves control endpoints, and stops cleanly', async (t) =
       return true
     }
   })
+})
+
+test('the sidebar flag is written through the guarded control API, and only to the plugin row', async (t) => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  // A leaked listener keeps the runner's event loop alive, so cleanup is registered
+  // before the first assertion can throw.
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false })
+
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  // The card reads the flag off /status: one object shape whether the config wrote a
+  // bare boolean or `{ enabled }`.
+  assert.deepEqual((await (await fetch(`${origin}/__openrouter-plus/status`)).json()).usageWidget, { enabled: true })
+
+  const widgetUrl = `${origin}/__openrouter-plus/widget`
+  // Every control write carries the guard header; without it nothing is written.
+  const unguarded = await fetch(widgetUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  })
+  assert.equal(unguarded.status, 403)
+  assert.equal(editor.writes.length, 0, 'an unguarded write must not reach the config')
+
+  // The flag hides a card, so `enabled` must be a real boolean rather than a value
+  // that happens to be falsy.
+  for (const body of [{}, { enabled: 'false' }, { enabled: 0 }]) {
+    assert.equal((await postJson(widgetUrl, body)).status, 400, `${JSON.stringify(body)} is a bad request`)
+  }
+  assert.equal(editor.writes.length, 0)
+
+  // The accepted shape is one config edit on the plugin's own row, and nothing else
+  // in the profile is touched.
+  const written = await postJson(widgetUrl, { enabled: false })
+  assert.equal(written.status, 200)
+  assert.deepEqual(await written.json(), { ok: true, usageWidget: { enabled: false } })
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].entry, editor.rows[0].entry, 'the plugin row is the only row written')
+  assert.deepEqual(editor.writes[0].next, { host: '127.0.0.1', port, usageWidget: { enabled: false } })
+  // The next boot reads the flag back off the row, bare or boxed.
+  assert.equal(normalizeConfig(editor.writes[0].next).usageWidget.enabled, false)
+})
+
+test('booting with the card switched off still reports the cost telemetry', async (t) => {
+  // Hiding the card hides a surface, not the numbers: the settings page shows the
+  // same spend, so /status keeps its full metrics contract.
+  const port = await freePort()
+  const { ctx, dispose } = createFakeContext()
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false, usageWidget: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const payload = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.deepEqual(payload.usageWidget, { enabled: false })
+  for (const key of ['costUsd', 'todayUsd', 'byModel', 'byModelAll', 'days', 'byTier']) {
+    assert.equal(key in payload.metrics, true, `metrics.${key} is part of /status`)
+  }
+  assert.equal(Array.isArray(payload.metrics.days), true)
+  assert.equal(Array.isArray(payload.metrics.byModel), true)
 })
 
 test('enabled: false binds nothing', async () => {
