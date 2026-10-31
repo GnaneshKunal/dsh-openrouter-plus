@@ -1,8 +1,8 @@
 {
   "name": "dsh-openrouter-plus",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "OpenRouter routing presets for DeepSeek Harness — a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset.",
+  "description": "OpenRouter routing presets for DeepSeek Harness — a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) and an optional precision floor (provider.quantizations) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset.",
   "keywords": [
     "deepseek",
     "harness",
@@ -11,6 +11,8 @@
     "openrouter",
     "service-tier",
     "provider-sorting",
+    "quantization",
+    "precision",
     "flex",
     "llm"
   ],
@@ -52,7 +54,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.js && node --check client.js && node --check lib/proxy.js && node --check lib/metrics.js && node --check lib/config-bridge.js && node --check lib/reasoning.js && node --check lib/models-sync.js"
+    "check": "node --check index.js && node --check client.js && node --check lib/proxy.js && node --check lib/metrics.js && node --check lib/config-bridge.js && node --check lib/reasoning.js && node --check lib/models-sync.js && node --check lib/quantization.js && node --check lib/endpoints.js"
   },
   "dsh": {
     "bundle": {

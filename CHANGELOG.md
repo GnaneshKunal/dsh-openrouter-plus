@@ -5,6 +5,77 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.4.0] — 2026-10-31
+
+**A precision floor, and the truth about Exacto.** The cheapest endpoint is usually the most
+compressed one — on `deepseek/deepseek-v3.2`, the cheapest of its nine endpoints is the single `fp4`
+one — and the presets that buy it (`Cheapest`, `Floor`, `Fastest`) also switch off OpenRouter's Auto
+Exacto, because any explicit `provider.sort` disables it. This release adds a second, orthogonal lever
+per Session: a floor on which precisions may serve it at all, chosen in the composer chip beside the
+tier.
+
+### Added
+
+- **Four floors, one wire field.** `any` (default) sends nothing. `no-four-bit`, `eight-bit-up` and
+  `full-width` materialise OpenRouter's twelve-value `quantizations` enum into an allowlist and write
+  it into `provider`. `unknown` is admitted by default on the middle two — it is roughly 40% of the
+  endpoints on the models this plugin routes for, and all of GPT-4o's — and excluded by `full-width`,
+  which would otherwise not be a floor.
+- **The chip is a two-level menu now.** One trigger, and the composer model picker's own shape: a
+  root pane of two rows — **Tier** (the presets, unchanged) and **Precision** (the floors) — each
+  showing its current value and drilling into its own list. Escape or Shift+Tab backs out one level at
+  a time; a pick returns to the rows with the menu still open, so both can be set in one visit. The
+  badge composes (`Cheapest · ≥8-bit`) and omits the second half entirely while the floor is `any`, so
+  the chip is unchanged for anyone who never sets one.
+- **Admission control, because an empty pool is a hard failure.** Excluding every eligible provider
+  fails the request upstream, and `full-width` leaves *zero* endpoints on DeepSeek V3.2. So the relay
+  attaches `quantizations` only after `GET /models/{author}/{slug}/endpoints` shows at least one
+  survivor for that model. The listing is cached for ten minutes and never blocks: a cold cache sends
+  the request unfiltered and warms in the background, one bypass per model per window. Bypasses are
+  counted and reported, so a floor that is not taking effect is visible instead of silent.
+- **`precisionFloor` and per-Session overrides.** The profile key accepts a bare floor id or
+  `{ floor, includeUnknown }`; a Session inherits it until it picks its own, and that choice lives in
+  memory beside the preset the same way. Control API: `GET/POST /__openrouter-plus/precision` and
+  `POST /__openrouter-plus/precision/default`, mirroring `/tier`.
+- **`docs/PRECISION.md`** documents the floors, the wire levels, why the filter is not always sent,
+  what the floor costs, and what it deliberately is not (a budget, a quality guarantee, or anything
+  meaningful for a closed-weight model).
+
+### Changed
+
+- The README's preset section now states the Auto Exacto split: `No pin`, `Standard`, `Flex`,
+  `Priority` and `Ultra` keep it; `Fastest` (both), `Cheapest` and `Floor` bypass it. That was true
+  before this release and undocumented.
+- `/status` gains `precision.default` and `precision.floorBypassed`; the relay sends an
+  `x-oorp-precision` header beside the existing `x-oorp-tier`.
+
+### Notes
+
+- **`any` is byte-identical to 0.3.0.** No key is written to the body and no endpoint listing is
+  fetched until a floor is chosen.
+- **A floor can cost more.** Dropping `fp4` on DeepSeek V3.2 drops its cheapest endpoint, and
+  `full-width` empties many `fp8`-only models. The option list names the wire levels it admits so the
+  trade is legible before it is made.
+- **The first request to a model after a cold cache is unfiltered**, on purpose: a quality preference
+  must never stall a turn or fail one.
+
+### Testing
+
+- 181 tests pass (23 added here). `test/quantization.test.mjs` (9) pins the floor vocabulary, the
+  `includeUnknown` defaults, the label strings, the endpoint parser against the real nine-endpoint
+  DeepSeek V3.2 fixture and the two-endpoint all-`unknown` GPT-4o case, the byte cap and the admission
+  rule. `test/proxy.test.mjs` (+4) pins the merge (`only`/`order`/`allow_fallbacks` survive), the strip
+  on `null`, case-insensitive idempotence, the `x-oorp-precision` matrix (`any`/floor/`bypass`/legacy/
+  pinned mount), that the resolver receives the model, and that a profile with no floor still sends a
+  byte-identical body. `test/host.test.mjs` (+4) covers config normalization and the bounded Session
+  table, the whole control API (guard header, refusals, clear-vs-`any`, config write round-trip), and
+  end-to-end admission: cold bypass → warm send → all-below-floor stays unfiltered and counted → a
+  `404` listing is cached so two requests cost one fetch → `any` reads nothing. `test/client.test.mjs`
+  (+5) pins badge composition and the `any` omission, facet swap, the POST payload, tolerance of a
+  failed read, `en`/`zh` dictionary parity, and the structural shape of the popover (one chipStyle
+  call, tablist/tab/aria-controls, tabpanel, listbox/option, both routes, and that a pick never closes
+  it).
+
 ## [0.3.0] — 2026-10-31
 
 **Spend, in dollars, not a token estimate.** The relay now records what OpenRouter actually charged

@@ -347,17 +347,45 @@ decide different things. Sorting by throughput reorders whatever pool the tier a
 `service_tier: "default"` is what keeps the premium out of it. Neither one alone can say
 "fastest, and never at a premium".
 
-### From the composer (the preset chip)
+### What a sort costs you: Auto Exacto
+
+OpenRouter's [Auto Exacto](https://openrouter.ai/docs/guides/routing/auto-exacto) runs by default on
+every request that carries tools — which, for an agent, is every request. It reorders the providers
+of the chosen model using measured tool-calling success rate, throughput and benchmark scores, per
+endpoint.
+
+**Any explicit `provider.sort` disables it, and so does the `:floor` slug.** That splits this
+plugin's ladder in two:
+
+| Auto Exacto still runs | Auto Exacto is bypassed |
+| --- | --- |
+| No pin, Standard, Flex, Priority, Ultra | Fastest (both), Cheapest, Floor |
+
+So the two cheapest presets buy a compressed endpoint *and* switch off the platform's quality
+ordering. That is a legitimate trade; it should just not be a silent one — which is why the precision
+floor exists, and why the settings page says it next to the picker.
+
+### From the composer (the Tier · Precision chip)
 
 Once a provider row is routed, a compact chip appears in the composer next to the model selector,
-showing the preset the next request will apply. Picking another one there does **not** rewrite any
-config and does **not** mint a provider: the Host records the choice for this Session in memory, and
-the relay applies it to the request body on the way out.
+showing the preset the next request will apply — and, once you have chosen one, a precision floor:
+`Cheapest · ≥8-bit`. Picking another one there does **not** rewrite any config and does **not** mint a
+provider: the Host records the choice for this Session in memory, and the relay applies it to the
+request body on the way out.
 
-The menu carries labels only — `Fastest · any price`, `Cheapest`, `Flex`, `Priority`, … — and the
-long explanation of what each one sends lives on the settings page, where it is read once. The first
-entry, **Profile default (…)**, stops choosing for this Session and shows which preset it will
-inherit.
+The chip opens the same two-level menu the composer's own model picker uses for **Model** and
+**Effort**: two rows, each showing its current value and opening its own list when pressed.
+
+- **Tier** — the presets: `Fastest · any price`, `Cheapest`, `Flex`, `Priority`, … The first entry,
+  **Profile default (…)**, stops choosing for this Session and shows which preset it will inherit.
+- **Precision** — `Any`, `No four-bit`, `Eight-bit up`, `Full width`, each naming the wire levels it
+  admits. `Any` is the default and sends nothing, so until you pick one the badge reads exactly
+  `Cheapest`, the way it always did.
+
+The menu carries labels only; the long explanation of what each entry sends lives on the settings page
+and in [docs/PRECISION.md](docs/PRECISION.md), where it is read once. Escape (or Shift+Tab) backs out
+of a list to the two rows, and again closes the popover. Picking anything returns you to the rows and
+leaves the menu open, so both can be set in one visit without reopening it.
 
 That is why it is per session: two conversations can be on `Flex` and `Priority` at the same time,
 neither of them rewrites the other's provider row, and the reasoning effort you selected survives

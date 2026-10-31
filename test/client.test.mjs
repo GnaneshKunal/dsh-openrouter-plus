@@ -43,7 +43,50 @@ const {
   normalizeUsageStatus,
   pinnedMounts,
   presetFromLegacyTier,
+  /* The chip's second facet: the readers behind it, and the two dictionaries a new key
+     has to land in together. */
+  chipBadgeLabel,
+  chipFacetRows,
+  chipPaneAfterKey,
+  chipPaneRoot,
+  chipPanes,
+  chipRootCells,
+  dictionaries,
+  normalizePrecisionState,
+  precisionFloorOf,
+  precisionFloors,
+  precisionPostBody,
+  precisionShortLabel,
+  precisionWireLevels,
 } = module.__test
+
+/**
+ * A `t()` over the real English (or Chinese) dictionary, failing loud on a key the
+ * dictionaries do not carry: a missing key renders its own name in the chip, which is the
+ * bug these tests exist to prevent rather than reproduce.
+ */
+const translate = (dictionary) => (key, vars) => {
+  const template = dictionary[key]
+  assert.equal(typeof template, 'string', 'no dictionary entry for ' + key)
+  return template.replace(/\{(\w+)\}/g, (match, name) =>
+    Object.prototype.hasOwnProperty.call(vars || {}, name) ? String(vars[name]) : match,
+  )
+}
+const en = translate(dictionaries.en)
+const zh = translate(dictionaries.zh)
+
+/** The preset ids the tier facet lists, inherit excluded. */
+const PRESET_ROWS = [
+  'none',
+  'standard',
+  'fastest',
+  'fastest-standard',
+  'cheapest',
+  'flex',
+  'priority',
+  'ultra',
+  'floor',
+]
 
 test('a preset id or a tier name both name a preset', () => {
   assert.equal(presetFromLegacyTier('cheapest'), 'cheapest')
@@ -351,4 +394,307 @@ test('a recent request keeps its raw cost fields, under either spelling', () => 
   assert.equal(wire.byok, false, 'only a real true opts the row into BYOK')
   assert.equal(normalizeUsageRecent(null), null)
   assert.equal(normalizeUsageRecent('nope'), null)
+})
+
+test('the collapsed badge composes the preset with the precision, and hides it for any', () => {
+  /* One trigger, so the badge is the only place both choices meet. The trigger paints the two
+     halves as separate spans — the preset in the primary tone, the floor in the caption tone,
+     the way the model seat prints "model  effort" — and these are the strings those spans
+     carry. The halves are glued by the row's own `gap`, so there is no punctuation between
+     them: `any` must leave no separator and no trailing space behind. */
+  const preset = 'Cheapest'
+  const badge = (precision) => chipBadgeLabel(en, preset, precision)
+
+  assert.equal(badge({ floor: 'any' }), 'Cheapest')
+  assert.equal(badge(null), 'Cheapest', 'a failed fetch must not decorate the chip')
+  assert.equal(badge({ floor: 'no-four-bit' }), 'Cheapest \u22656-bit')
+  assert.equal(badge({ floor: 'eight-bit-up' }), 'Cheapest \u22658-bit')
+  assert.equal(badge({ floor: 'full-width' }), 'Cheapest FP16+')
+
+  /* `any` leaves no second half behind: it is absent, not empty, and never a stray separator. */
+  assert.equal(badge({ floor: 'any' }).includes('\u00b7'), false)
+  assert.equal(badge({ floor: 'any' }).includes(' '), false)
+  /* A floor from a newer relay is not allowed to render a raw i18n key. */
+  assert.equal(badge({ floor: 'future-floor' }), 'Cheapest')
+
+  assert.equal(precisionShortLabel(en, 'any'), '', 'any is hidden, not labelled')
+  assert.equal(precisionShortLabel(en, 'full-width'), 'FP16+')
+  assert.equal(precisionFloorOf(undefined), 'any')
+  assert.equal(precisionFloorOf('EIGHT-BIT-UP'), 'eight-bit-up')
+})
+
+test('the two drilled panes are two distinct lists', () => {
+  /* Tier lists the nine presets behind the inherit row; Precision lists four floors with
+     the wire levels each admits. Drilling into one or the other swaps the rows, never the
+     trigger. */
+  const view = {
+    presetLabel: (id) => en('preset.' + id),
+    profileDefault: 'standard',
+    chosenPreset: 'cheapest',
+    precisionFloor: 'eight-bit-up',
+  }
+  const tier = chipFacetRows(en, 'tier', view)
+  const precision = chipFacetRows(en, 'precision', view)
+
+  assert.equal(tier.length, PRESET_ROWS.length + 1, 'inherit, then every preset')
+  assert.equal(tier[0].value, '', 'the inherit row is the empty value, as the POST expects')
+  assert.equal(tier[0].label, 'Profile default (Standard)')
+  assert.deepEqual(tier.slice(1).map((row) => row.value), PRESET_ROWS)
+  assert.deepEqual(tier.filter((row) => row.selected).map((row) => row.value), ['cheapest'])
+  assert.equal(tier[1].hint, '', 'a preset row stays one line')
+
+  assert.deepEqual(precision.map((row) => row.value), [...precisionFloors])
+  assert.deepEqual(precision.map((row) => row.label), [
+    'Any',
+    'No four-bit',
+    'Eight-bit up',
+    'Full width',
+  ])
+  assert.deepEqual(precision.filter((row) => row.selected).map((row) => row.value), [
+    'eight-bit-up',
+  ])
+  /* Every row names what it admits, from the relay's own wire vocabulary. */
+  assert.equal(precision[0].hint, 'No filter: every endpoint stays eligible.')
+  assert.equal(
+    precision[1].hint,
+    'Admits ' + precisionWireLevels['no-four-bit'].join(', '),
+    'fp6 is 4-bit-adjacent but above it: the no-four-bit floor admits it',
+  )
+  assert.equal(precision[2].hint, 'Admits ' + precisionWireLevels['eight-bit-up'].join(', '))
+  assert.equal(precision[3].hint, 'Admits ' + precisionWireLevels['full-width'].join(', '))
+  /* Each floor is a strictly narrower list than the one before it. */
+  assert.ok(precisionWireLevels['full-width'].length < precisionWireLevels['eight-bit-up'].length)
+  assert.ok(precisionWireLevels['eight-bit-up'].length < precisionWireLevels['no-four-bit'].length)
+  assert.deepEqual(precisionWireLevels.any, [])
+
+  /* The swap is real: the two facets never show the same rows. */
+  assert.notDeepEqual(
+    tier.map((row) => row.value),
+    precision.map((row) => row.value),
+  )
+  /* The Chinese chip renders Chinese facet and row copy, not English. */
+  assert.equal(zh('chip.facet.precision'), '精度')
+  assert.equal(chipFacetRows(zh, 'precision', view)[1].label, '不含四位')
+})
+
+test('the precision POST names the floor and that floor\u2019s own unknown default', () => {
+  /* The frozen body: { session, precision: { floor, includeUnknown } }. `allow` is the
+     relay's materialised wire list and is deliberately never sent from here. */
+  assert.deepEqual(precisionPostBody('sess-1', 'eight-bit-up'), {
+    session: 'sess-1',
+    precision: { floor: 'eight-bit-up', includeUnknown: true },
+  })
+  assert.deepEqual(precisionPostBody('sess-1', 'no-four-bit').precision, {
+    floor: 'no-four-bit',
+    includeUnknown: true,
+  })
+  /* "Full width" that admits undeclared precision is not a floor. */
+  assert.deepEqual(precisionPostBody('sess-1', 'full-width').precision, {
+    floor: 'full-width',
+    includeUnknown: false,
+  })
+  /* `any` is the released behaviour: no list is sent, so the relay's own default (off)
+     is named rather than inventing a true the Host would not have produced. */
+  assert.deepEqual(precisionPostBody('sess-1', 'any'), {
+    session: 'sess-1',
+    precision: { floor: 'any', includeUnknown: false },
+  })
+  /* The per-floor table is the relay's (`lib/quantization.js`): unknown is admitted by
+     the two middle floors only. */
+  assert.equal(precisionPostBody('s', 'any').precision.includeUnknown, false)
+  assert.equal(precisionPostBody('s', 'no-four-bit').precision.includeUnknown, true)
+  assert.equal(precisionPostBody('s', 'eight-bit-up').precision.includeUnknown, true)
+  assert.equal(precisionPostBody('s', 'full-width').precision.includeUnknown, false)
+  assert.equal(precisionPostBody('sess-1', 'nonsense').precision.floor, 'any')
+  assert.equal(Object.prototype.hasOwnProperty.call(precisionPostBody('s', 'any').precision, 'allow'), false)
+})
+
+test('a failed precision fetch leaves the chip exactly as it shipped', () => {
+  /* The chip must never be the thing that breaks the composer: every junk answer reads as
+     "no answer", and the badge then renders the preset alone. */
+  for (const junk of [null, undefined, 'x', 42, [], {}, { ok: false }, { precision: null }, { precision: 'x' }]) {
+    assert.equal(normalizePrecisionState(junk), null)
+  }
+  assert.equal(chipBadgeLabel(en, en('preset.cheapest'), null), 'Cheapest')
+
+  const full = normalizePrecisionState({
+    precision: {
+      floor: 'eight-bit-up',
+      includeUnknown: true,
+      allow: ['int8', ' fp8 ', ''],
+    },
+    inherited: true,
+    source: 'session',
+  })
+  assert.deepEqual(full, {
+    floor: 'eight-bit-up',
+    includeUnknown: true,
+    allow: ['int8', 'fp8'],
+    inherited: true,
+    source: 'session',
+  })
+  /* A relay that reports the floor without the switch still gets the documented default. */
+  assert.equal(normalizePrecisionState({ precision: { floor: 'full-width' } }).includeUnknown, false)
+  assert.equal(normalizePrecisionState({ precision: { floor: 'no-four-bit' } }).includeUnknown, true)
+  assert.equal(normalizePrecisionState({ precision: { floor: 'any' } }).includeUnknown, false)
+  /* `allow: null` is the materialised "sends nothing" of `any`, not a parse failure. */
+  assert.equal(normalizePrecisionState({ precision: { floor: 'any', allow: null } }).allow, null)
+  assert.equal(normalizePrecisionState({ precision: { floor: 'any' } }).inherited, false)
+  assert.equal(normalizePrecisionState({ precision: { floor: 'any' } }).source, 'default')
+})
+
+test('both dictionaries carry every key, and the Chinese copy is Chinese', () => {
+  /* A key in one language only renders its own name for the other reader. The zh side must
+     be real Chinese; the one exemption is a unit (`FP16+`), which is not a translation. */
+  const keys = Object.keys(dictionaries.en).sort()
+  assert.deepEqual(Object.keys(dictionaries.zh).sort(), keys, 'same key set in both languages')
+
+  const added = keys.filter((key) => key.startsWith('precision.') || key.startsWith('chip.'))
+  assert.ok(added.length >= 15, 'the chip keys are registered, not inlined')
+  for (const key of added) {
+    if (key === 'precision.short.full-width') continue
+    assert.match(dictionaries.zh[key], /[\u4e00-\u9fff]/, key + ' is not Chinese')
+    assert.notEqual(dictionaries.zh[key], dictionaries.en[key], key + ' is the English string again')
+  }
+  assert.equal(dictionaries.en['precision.short.full-width'], 'FP16+')
+  assert.equal(dictionaries.zh['precision.short.full-width'], 'FP16+')
+
+  /* The frozen short labels, exactly as the collapsed badge shows them. */
+  assert.equal(dictionaries.en['precision.short.no-four-bit'], '\u22656-bit')
+  assert.equal(dictionaries.en['precision.short.eight-bit-up'], '\u22658-bit')
+  assert.equal(dictionaries.en['chip.facet.tier'], 'Tier')
+  assert.equal(dictionaries.en['chip.facet.precision'], 'Precision')
+  assert.equal(dictionaries.en['precision.unknownAdmitted'], 'Unknown precision is admitted')
+})
+
+test('the root pane is two cells stating what the session runs on', () => {
+  /* The menu opens on the cells, never on a list. Each cell carries the value the trigger
+     badges — the preset label, and the floor's short label — plus the drill-in target. */
+  const view = (overrides) => ({
+    presetLabel: (id) => en('preset.' + id),
+    activePreset: 'cheapest',
+    switchingPreset: false,
+    floor: 'any',
+    ...(overrides || {}),
+  })
+
+  const cells = chipRootCells(en, view())
+  assert.equal(cells.length, 2, 'exactly two cells: Tier then Precision')
+  assert.deepEqual(cells.map((cell) => cell.facet), ['tier', 'precision'])
+  assert.deepEqual(cells.map((cell) => cell.label), ['Tier', 'Precision'])
+  assert.deepEqual(cells.map((cell) => cell.value), ['Cheapest', 'Any'])
+  assert.deepEqual(cells.map((cell) => cell.ariaLabel), ['Tier: Cheapest', 'Precision: Any'])
+  /* The cells drill into exactly the two drilled panes, and root is the pane they sit on. */
+  assert.deepEqual(cells.map((cell) => cell.facet), chipPanes.filter((pane) => pane !== chipPaneRoot))
+  assert.equal(chipPaneRoot, 'root')
+  assert.equal(chipPanes[0], chipPaneRoot, 'root is the pane the popover opens on')
+
+  /* The floor half reuses the badge's shorthand, not the row's long label. */
+  assert.equal(chipRootCells(en, view({ floor: 'eight-bit-up' }))[1].value, '\u22658-bit')
+  assert.equal(chipRootCells(en, view({ floor: 'no-four-bit' }))[1].value, '\u22656-bit')
+  assert.equal(chipRootCells(en, view({ floor: 'full-width' }))[1].value, 'FP16+')
+  assert.equal(chipRootCells(en, view({ floor: 'future-floor' }))[1].value, 'Any')
+  /* A Host that never answered reads as `any`, exactly like the badge. */
+  assert.equal(chipRootCells(en, view({ floor: null }))[1].value, 'Any')
+  /* A preset in flight says so, matching the trigger. */
+  assert.equal(
+    chipRootCells(en, view({ switchingPreset: true }))[0].value,
+    'Switching preset\u2026',
+  )
+  /* The Chinese cell names itself in Chinese. */
+  assert.equal(
+    chipRootCells(zh, view({ floor: 'eight-bit-up' }))[1].ariaLabel,
+    '\u7cbe\u5ea6\uff08\u5f53\u524d \u22658\u4f4d\uff09',
+  )
+})
+
+test('Escape and Shift+Tab leave a drilled pane before they close the popover', () => {
+  /* The model picker's ladder: the first press backs out of a list to the cell that opened
+     it, the second closes. Anything else leaves the pane alone. */
+  assert.equal(chipPaneAfterKey('tier', 'Escape', false), chipPaneRoot)
+  assert.equal(chipPaneAfterKey('precision', 'Escape', false), chipPaneRoot)
+  assert.equal(chipPaneAfterKey('tier', 'Tab', true), chipPaneRoot, 'Shift+Tab backs out too')
+  assert.equal(chipPaneAfterKey('precision', 'Tab', true), chipPaneRoot)
+  assert.equal(chipPaneAfterKey(chipPaneRoot, 'Escape', false), null, 'the second press closes')
+  assert.equal(chipPaneAfterKey(chipPaneRoot, 'Tab', true), null, 'Shift+Tab closes from root')
+  for (const key of ['ArrowDown', 'ArrowUp', 'Enter', ' ', 'Tab', 'a']) {
+    assert.equal(chipPaneAfterKey('precision', key, false), 'precision', key + ' stays drilled')
+  }
+  assert.equal(chipPaneAfterKey(chipPaneRoot, 'Tab', false), chipPaneRoot, 'Tab alone moves on')
+})
+
+test('the chip is one trigger over a two-level root-cell menu that drills in', async () => {
+  /* Structural pins for what a unit test cannot render: one composer control, a root pane
+     of menuitem cells over a real listbox, both control routes addressed, and a pick that
+     returns to the root cells without closing. The tab idiom is gone from the chip for good
+     (the usage dialog's own tabs are a different surface and stay). */
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  const chip = source.slice(
+    source.indexOf('function ChipOption'),
+    source.indexOf('/* ----------------------------------------- sidebar spend card'),
+  )
+  assert.ok(chip.includes('function TierChip'), 'the slice covers the chip and both row types')
+
+  assert.equal((source.match(/style: chipStyle\(/g) || []).length, 1, 'one chip, not a second control')
+  assert.match(chip, /'aria-haspopup': 'menu'/, 'the trigger opens a menu')
+  assert.match(chip, /'aria-expanded': open/)
+
+  /* The idle trigger prints both choices: the preset in the primary tone and the floor in the
+     caption tone, the way the model seat prints "model  effort". The floor span is conditional,
+     so `any` renders the first half alone and an unconfigured chip cannot grow a stray gap. */
+  assert.match(chip, /style: CHIP_TEXT_STYLE \}, badgeParts\.label/)
+  assert.match(chip, /style: CHIP_PRECISION_STYLE \}, badgeParts\.precision/)
+  assert.match(chip, /badgeParts\.precision === ''/)
+  assert.match(source, /caption: 'var\(--dsw-alias-label-caption/)
+
+  /* Root pane: a menu whose cells are buttons with label, current value and a chevron. */
+  assert.match(chip, /role: 'menu'/)
+  assert.match(chip, /role: 'menuitem'/)
+  assert.match(chip, /CHIP_CELL_LABEL_STYLE/)
+  assert.match(chip, /CHIP_CELL_VALUE_STYLE/)
+  assert.match(chip, /CHIP_CELL_CHEVRON_STYLE/)
+  assert.match(source, /function chipCellStyle/, 'the cell keeps the 34px full-width anatomy')
+
+  /* Drilled pane: still a real listbox of options. */
+  assert.match(chip, /role: 'listbox'/)
+  assert.match(chip, /role: 'option'/)
+  assert.equal(/role: 'tablist'/.test(chip), false, 'no tablist role')
+  assert.equal(/role: 'tab'/.test(chip), false, 'no tab role')
+  assert.equal(/role: 'tabpanel'/.test(chip), false, 'no tabpanel role')
+  assert.equal(/aria-controls/.test(chip), false, 'no tab wiring left behind')
+
+  /* Opening always lands on the root pane, and each cell drills into its own list. */
+  assert.match(chip, /useState\(CHIP_PANE_ROOT\)/)
+  assert.match(chip, /const drill = \(next\) => \{/)
+  assert.match(chip, /drill\('tier'\)/)
+  assert.match(chip, /drill\('precision'\)/)
+  assert.match(chip, /chipPaneAfterKey\(pane, event\.key/)
+  assert.match(chip, /pendingFocusRef\.current = from/, 'back hands focus to the opening cell')
+  assert.match(
+    chip,
+    /\[role="option"\]\[aria-selected="true"\]:not\(\[disabled\]\)/,
+    'a drill focuses the ticked row',
+  )
+
+  /* Both cells address the control API on this page origin, and neither writes config. */
+  assert.match(chip, /CONTROL_PREFIX \+ '\/precision\?session='/)
+  assert.match(chip, /postControl\('\/precision'/)
+  assert.match(chip, /postControl\('\/tier'/)
+
+  /* The switch handlers never close the popover; a pick returns to the root cells and
+     leaves it open, which is the one deliberate difference from the model picker. */
+  const sw = chip.slice(
+    chip.indexOf('const switchTier = async'),
+    chip.indexOf('/* The focusable items of the pane'),
+  )
+  assert.ok(sw.includes('const switchPrecision'), 'both switch handlers are in the slice')
+  assert.equal(sw.includes('setOpen(false)'), false, 'a pick never closes')
+
+  const pick = chip.slice(
+    chip.indexOf('const chooseRow'),
+    chip.indexOf('const menuStyle = Object.assign'),
+  )
+  assert.ok(pick.length > 0)
+  assert.match(pick, /setPane\(CHIP_PANE_ROOT\)/, 'a pick comes back to the root cells')
 })

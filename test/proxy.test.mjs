@@ -760,24 +760,114 @@ test('a bare target mount asks the resolver per Session and applies that recipe'
   assert.equal(seen[0].body.model, 'm', 'every other body field survives the rewrite')
 })
 
-test('normalizeRecipe() accepts a bare tier and keeps the three levers apart', () => {
-  assert.deepEqual(normalizeRecipe('flex'), { preset: 'flex', serviceTier: 'flex', sort: null, variant: null })
+test('normalizeRecipe() accepts a bare tier and keeps the levers apart', () => {
+  assert.deepEqual(normalizeRecipe('flex'), {
+    preset: 'flex',
+    serviceTier: 'flex',
+    sort: null,
+    variant: null,
+    precision: null,
+    quantizations: null,
+  })
   assert.equal(normalizeRecipe(''), null)
   assert.equal(normalizeRecipe(null), null)
-  assert.deepEqual(normalizeRecipe({ preset: 'none' }), { preset: 'none', serviceTier: null, sort: null, variant: null })
+  assert.deepEqual(normalizeRecipe({ preset: 'none' }), {
+    preset: 'none',
+    serviceTier: null,
+    sort: null,
+    variant: null,
+    precision: null,
+    quantizations: null,
+  })
   assert.deepEqual(normalizeRecipe({ serviceTier: 'PRIORITY' }), {
     preset: null,
     serviceTier: 'priority',
     sort: null,
     variant: null,
+    precision: null,
+    quantizations: null,
   })
   assert.deepEqual(normalizeRecipe({ sort: 'throughput', variant: 'floor', preset: 'x' }), {
     preset: 'x',
     serviceTier: null,
     sort: 'throughput',
     variant: 'floor',
+    precision: null,
+    quantizations: null,
   })
   assert.equal(normalizeRecipe({}), null, 'an empty recipe names nothing, so it is no recipe')
+})
+
+test('normalizeRecipe() carries the precision floor and its admitted include list', () => {
+  // The floor id and the wire list travel together but are not the same fact: the id is
+  // what the response header reports, the list is what may be written into the body.
+  assert.deepEqual(normalizeRecipe({ precision: 'Eight-Bit-Up', quantizations: ['FP8', 'fp8', 'fp16', ''] }), {
+    preset: null,
+    serviceTier: null,
+    sort: null,
+    variant: null,
+    precision: 'eight-bit-up',
+    quantizations: ['fp8', 'fp16'],
+  })
+  // A floor with no admitted list is still a recipe: that is the bypass state.
+  assert.deepEqual(normalizeRecipe({ precision: 'full-width' }), {
+    preset: null,
+    serviceTier: null,
+    sort: null,
+    variant: null,
+    precision: 'full-width',
+    quantizations: null,
+  })
+  // Garbage in the list is "no list", never an empty one: an empty include list would
+  // mean "no endpoint is eligible", which is a request this relay must never send.
+  assert.equal(normalizeRecipe({ quantizations: [] }), null)
+  assert.equal(normalizeRecipe({ quantizations: ['  '] }), null)
+  assert.equal(normalizeRecipe({ quantizations: 'fp8' }), null, 'a bare string is not an include list')
+  assert.deepEqual(normalizeRecipe({ quantizations: ['int8'] })?.quantizations, ['int8'])
+})
+
+test('applyRecipe() merges the quantization include list and never clobbers the caller`s provider block', () => {
+  const body = {
+    model: 'vendor/model',
+    provider: { only: ['deepinfra'], order: ['a', 'b'], allow_fallbacks: false },
+  }
+  const withFloor = normalizeRecipe({ precision: 'eight-bit-up', quantizations: ['fp8', 'fp16'] })
+
+  assert.equal(applyRecipe(body, withFloor), true)
+  assert.deepEqual(body.provider, {
+    only: ['deepinfra'],
+    order: ['a', 'b'],
+    allow_fallbacks: false,
+    quantizations: ['fp8', 'fp16'],
+  }, 'only/order/allow_fallbacks survive; the include list is merged in')
+  assert.equal(applyRecipe(body, withFloor), false, 'idempotent')
+  assert.equal(applyRecipe(body, normalizeRecipe({ quantizations: ['FP8', 'FP16'] })), false, 'case does not churn the body')
+
+  // The floor list is replaced as a whole when the Session's floor changes.
+  assert.equal(applyRecipe(body, normalizeRecipe({ quantizations: ['bf16'] })), true)
+  assert.deepEqual(body.provider.quantizations, ['bf16'])
+  assert.equal(body.provider.only.length, 1, 'the rest of the block is still the caller`s')
+
+  // A floor that was withheld (`null`) strips a list the caller pinned, mirroring the
+  // way `service_tier: null` strips a tier — the relay owns this field while it runs.
+  assert.equal(applyRecipe(body, normalizeRecipe({ preset: 'none' })), true)
+  assert.equal('quantizations' in body.provider, false)
+  assert.deepEqual(body.provider, { only: ['deepinfra'], order: ['a', 'b'], allow_fallbacks: false })
+  assert.equal(applyRecipe(body, normalizeRecipe({ preset: 'none' })), false, 'nothing left to strip')
+
+  // ...but it never creates a provider object just to delete from it.
+  const bare = { model: 'vendor/model' }
+  assert.equal(applyRecipe(bare, normalizeRecipe({ preset: 'none' })), false)
+  assert.equal('provider' in bare, false)
+  // A provider block with any other field is left alone by a null list.
+  const pinned = { provider: { data_collection: 'deny' } }
+  assert.equal(applyRecipe(pinned, normalizeRecipe({ preset: 'none' })), false)
+  assert.deepEqual(pinned.provider, { data_collection: 'deny' })
+
+  // Creating the provider block is the floor's job when there is none yet.
+  const fresh = { model: 'vendor/model' }
+  assert.equal(applyRecipe(fresh, withFloor), true)
+  assert.deepEqual(fresh.provider, { quantizations: ['fp8', 'fp16'] })
 })
 
 test('applyRecipe() merges provider fields and never clobbers the caller`s own', () => {
@@ -812,4 +902,106 @@ test('baseModelId() only strips the two relay-owned variants', () => {
   assert.equal(baseModelId('vendor/model:online'), 'vendor/model:online', 'a caller suffix survives')
   assert.equal(baseModelId('vendor/model:free'), 'vendor/model:free')
   assert.equal(baseModelId('vendor/model'), 'vendor/model')
+})
+
+test('x-oorp-precision reports the floor that was actually enforced', async () => {
+  /** @type {Array<Record<string, any>>} */
+  const bodies = []
+  const gateway = await startServer(async (req, res) => {
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  /** @type {string[]} */
+  const asked = []
+  const { address } = await startRelay(gateway.origin, { '/flex/v1': 'flex', '/v1': null }, {
+    resolveSessionRecipe: (session, model) => {
+      asked.push(`${session}:${model ?? 'null'}`)
+      // A floor that was admitted: the floor id goes on the header because a filter
+      // really was sent.
+      if (session === 'enforced') {
+        return { preset: 'none', serviceTier: null, sort: null, variant: null, precision: 'eight-bit-up', quantizations: ['fp8', 'fp16'] }
+      }
+      // A floor that was configured but withheld: the header must say so, because the
+      // body carries nothing and `any` would hide the case worth troubleshooting.
+      if (session === 'bypassed') {
+        return { preset: 'none', serviceTier: null, sort: null, variant: null, precision: 'full-width', quantizations: null }
+      }
+      if (session === 'any') {
+        return { preset: 'none', serviceTier: null, sort: null, variant: null, precision: 'any', quantizations: null }
+      }
+      // Tier-era caller: a bare string names no floor.
+      return 'flex'
+    },
+  })
+
+  const send = (path, session, body = { model: 'deepseek/deepseek-v3.2' }) => fetch(`${address.origin}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': session },
+    body: JSON.stringify(body),
+  })
+
+  const enforced = await send('/v1/chat/completions', 'enforced')
+  assert.equal(enforced.status, 200)
+  assert.equal(enforced.headers.get('x-oorp-precision'), 'eight-bit-up', 'the floor id when a filter went out')
+  assert.deepEqual(bodies[0].provider, { quantizations: ['fp8', 'fp16'] })
+
+  const bypassed = await send('/v1/chat/completions', 'bypassed')
+  assert.equal(bypassed.headers.get('x-oorp-precision'), 'bypass', 'a configured floor that was not sent')
+  assert.equal('provider' in bodies[1], false, 'a withheld floor sends nothing at all')
+
+  const any = await send('/v1/chat/completions', 'any')
+  assert.equal(any.headers.get('x-oorp-precision'), 'any')
+  assert.equal('provider' in bodies[2], false)
+
+  // A legacy recipe names no floor, so the header falls back to `any` rather than
+  // `bypass`: nothing was configured to withhold.
+  const legacy = await send('/v1/chat/completions', 'legacy')
+  assert.equal(legacy.headers.get('x-oorp-precision'), 'any')
+  assert.equal(bodies[3].service_tier, 'flex')
+
+  // The resolver is only consulted on a bare mount, so a pinned mount reports `any`.
+  const pinned = await send('/flex/v1/chat/completions', 'enforced')
+  assert.equal(pinned.headers.get('x-oorp-precision'), 'any')
+  assert.equal(bodies[4].service_tier, 'flex', 'the mount still wins over the Session recipe')
+
+  // The model travels with the Session: admission is per model, and the relay is the
+  // only party that knows which model this request asked for.
+  assert.deepEqual(asked, [
+    'enforced:deepseek/deepseek-v3.2',
+    'bypassed:deepseek/deepseek-v3.2',
+    'any:deepseek/deepseek-v3.2',
+    'legacy:deepseek/deepseek-v3.2',
+  ])
+  // A request that names no model passes null rather than inventing an id.
+  const anonymous = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'enforced' },
+    body: JSON.stringify({ messages: [] }),
+  })
+  assert.equal(anonymous.status, 200)
+  assert.equal(asked.at(-1), 'enforced:null')
+})
+
+test('a relay with no resolver adds no precision header value beyond any', async () => {
+  /** @type {string | undefined} */
+  let receivedBody
+  const gateway = await startServer(async (req, res) => {
+    receivedBody = (await readRequestBody(req)).toString('utf8')
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin)
+  const response = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'deepseek/deepseek-v3.2', messages: [] }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-oorp-precision'), 'any')
+  // Byte-identical to a pre-feature relay: no provider block, no floor.
+  assert.equal(receivedBody, JSON.stringify({ model: 'deepseek/deepseek-v3.2', messages: [] }))
 })

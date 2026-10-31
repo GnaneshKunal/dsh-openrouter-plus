@@ -111,6 +111,45 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The precision floors, in menu order. `any` is the behaviour this plugin shipped
+     * before the floor existed: it sends no `quantizations` field at all, which is why it
+     * is the default and why the chip hides its second half while it is set.
+     */
+    const PRECISION_FLOORS = Object.freeze(['any', 'no-four-bit', 'eight-bit-up', 'full-width']);
+
+    /** The wire levels each floor admits, in the order the relay materialises `allow`. */
+    const PRECISION_WIRE_LEVELS = Object.freeze({
+      any: Object.freeze([]),
+      'no-four-bit': Object.freeze(['int8', 'fp6', 'fp8', 'mxfp8', 'fp16', 'bf16', 'fp32']),
+      'eight-bit-up': Object.freeze(['int8', 'fp8', 'mxfp8', 'fp16', 'bf16', 'fp32']),
+      'full-width': Object.freeze(['fp16', 'bf16', 'fp32']),
+    });
+
+    /**
+     * The popover's panes, after the composer model picker: it opens on `root` — a pair
+     * of cells stating what the Session runs on — and a cell drills into the one list it
+     * names. `tier` and `precision` are the two drilled panes, in root-cell order.
+     */
+    const CHIP_PANE_ROOT = 'root';
+    const CHIP_PANES = Object.freeze([CHIP_PANE_ROOT, 'tier', 'precision']);
+
+    /**
+     * Whether each floor admits endpoints whose precision nobody declared. Mirrors the
+     * relay's own table (`lib/quantization.js` `INCLUDE_UNKNOWN_DEFAULT`): on for the two
+     * middle floors, off for `full-width` (which would contradict its own name) and for
+     * `any` (which sends no list, so the flag has nothing to append to).
+     */
+    const PRECISION_UNKNOWN_DEFAULT = Object.freeze({
+      any: false,
+      'no-four-bit': true,
+      'eight-bit-up': true,
+      'full-width': false,
+    });
+
+    /** What the chip badges while the Host has not (yet) told it a floor. */
+    const DEFAULT_PRECISION_CHOICE = Object.freeze({ floor: 'any', includeUnknown: false });
+
+    /**
      * Attaching writes our target table first, which makes the Loader re-apply this
      * plugin and restart the listener, so the HTTP response itself can be cut. These
      * are the gaps used while re-reading the truth; an attach whose target already
@@ -268,6 +307,27 @@ window.__ModuleLoader__.load({
       'tier.aria': 'Routing preset for {name}: {tier}',
       'tier.switching': 'Switching preset\u2026',
       'tier.error': 'Could not switch the preset: {message}',
+
+      /* The two-level menu: a root pane stating what the Session runs on, and one list
+         behind each cell. A floor is a constraint on which endpoints a preset may land on,
+         not a preset, so the two are set side by side. */
+      'chip.menuAria': 'Routing options',
+      'chip.cellAria': '{label}: {value}',
+      'chip.facet.tier': 'Tier',
+      'chip.facet.precision': 'Precision',
+      'precision.row.any': 'Any',
+      'precision.row.any.hint': 'No filter: every endpoint stays eligible.',
+      'precision.row.no-four-bit': 'No four-bit',
+      'precision.row.eight-bit-up': 'Eight-bit up',
+      'precision.row.full-width': 'Full width',
+      'precision.wireLevels': 'Admits {levels}',
+      'precision.unknownAdmitted': 'Unknown precision is admitted',
+      'precision.listAria': 'Precision floor for {name}',
+      /* Bit-width shorthand for the collapsed badge; `any` has none and is not looked up. */
+      'precision.short.no-four-bit': '\u22656-bit',
+      'precision.short.eight-bit-up': '\u22658-bit',
+      'precision.short.full-width': 'FP16+',
+      'precision.error': 'Could not set the precision floor: {message}',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -480,6 +540,26 @@ window.__ModuleLoader__.load({
       'tier.aria': '{name} 的路由预设：{tier}',
       'tier.switching': '正在切换预设\u2026',
       'tier.error': '无法切换预设：{message}',
+
+      /* 两层面板：第一层说明当前路由状态，第二层是各自的选项列表。精度下限不是预设，
+         而是对预设所能落到哪些端点的约束，所以两者并列设置。 */
+      'chip.menuAria': '路由选项',
+      'chip.cellAria': '{label}（当前 {value}）',
+      'chip.facet.tier': '预设',
+      'chip.facet.precision': '精度',
+      'precision.row.any': '不限',
+      'precision.row.any.hint': '不做筛选：所有端点都可被选中。',
+      'precision.row.no-four-bit': '不含四位',
+      'precision.row.eight-bit-up': '八位及以上',
+      'precision.row.full-width': '全精度',
+      'precision.wireLevels': '可用精度：{levels}',
+      'precision.unknownAdmitted': '未声明精度的端点同样可用',
+      'precision.listAria': '{name} 的精度下限',
+      /* 收起时徽标里的位宽简写，两种语言都保持技术缩写。 */
+      'precision.short.no-four-bit': '\u22656位',
+      'precision.short.eight-bit-up': '\u22658位',
+      'precision.short.full-width': 'FP16+',
+      'precision.error': '无法设置精度下限：{message}',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -844,6 +924,176 @@ window.__ModuleLoader__.load({
       const effective = presetFromLegacyTier(payload.preset ?? payload.tier) ?? 'none';
       return { chosen: chosen, default: fallback, preset: effective };
     }
+
+    /** A precision floor as the vocabulary spells it; anything else reads as `any`. */
+    function precisionFloorOf(value) {
+      const text = stringValue(value).trim().toLowerCase();
+      return PRECISION_FLOORS.includes(text) ? text : 'any';
+    }
+
+    /** The relay's unknown-precision default for a floor; see `PRECISION_UNKNOWN_DEFAULT`. */
+    function precisionIncludeUnknownDefault(floor) {
+      return PRECISION_UNKNOWN_DEFAULT[floor] === true;
+    }
+
+    /** `{ floor, includeUnknown }` from a menu row, a payload field or the bare floor id. */
+    function normalizePrecisionChoice(raw) {
+      const floor = precisionFloorOf(isPlainObject(raw) ? raw.floor : raw);
+      const declared = isPlainObject(raw) ? raw.includeUnknown : undefined;
+      return {
+        floor: floor,
+        includeUnknown:
+          typeof declared === 'boolean' ? declared : precisionIncludeUnknownDefault(floor),
+      };
+    }
+
+    /** `allow` is the materialised wire list; `null` for `any`, which is "sends nothing". */
+    function normalizePrecisionAllow(value) {
+      if (!Array.isArray(value)) return null;
+      const levels = value
+        .filter((level) => typeof level === 'string' && level.trim() !== '')
+        .map((level) => level.trim());
+      return levels.length === 0 ? null : levels;
+    }
+
+    /**
+     * `/precision` bodies, normalised: `floor` is the current choice, `includeUnknown`
+     * whether endpoints that declare nothing stay eligible, `allow` the wire list the relay
+     * would send (`null` on `any`). Null means the Host answered something that is not this
+     * API, and the chip then keeps the badge it shipped with instead of breaking.
+     */
+    function normalizePrecisionState(payload) {
+      if (!isPlainObject(payload)) return null;
+      if (payload.ok === false) return null;
+      if (!isPlainObject(payload.precision)) return null;
+      const choice = normalizePrecisionChoice(payload.precision);
+      return {
+        floor: choice.floor,
+        includeUnknown: choice.includeUnknown,
+        allow: normalizePrecisionAllow(payload.precision.allow),
+        inherited: payload.inherited === true,
+        source: payload.source === 'session' ? 'session' : 'default',
+      };
+    }
+
+    /**
+     * The POST body. A floor change carries that floor's own unknown-precision default:
+     * the popover has one power switch, not two, so the default is the honest value to
+     * send and the read-back settles whatever the profile prefers.
+     */
+    function precisionPostBody(sessionId, floor) {
+      const known = precisionFloorOf(floor);
+      return {
+        session: sessionId,
+        precision: { floor: known, includeUnknown: precisionIncludeUnknownDefault(known) },
+      };
+    }
+
+    /** The collapsed badge's second half; empty for `any`, which keeps the chip as released. */
+    function precisionShortLabel(t, floor) {
+      const known = precisionFloorOf(floor);
+      return known === 'any' ? '' : t('precision.short.' + known);
+    }
+
+    /** `<preset label> · <precision short label>`, or the preset label alone for `any`. */
+    function chipBadgeLabel(t, presetLabel, precision) {
+      const parts = chipBadgeParts(t, presetLabel, precision);
+      return parts.precision === '' ? parts.label : parts.label + ' ' + parts.precision;
+    }
+
+    /**
+     * The two halves of the collapsed trigger, kept apart so the renderer can paint the floor in
+     * the caption tone without re-parsing it out of a joined string: `Standard  ≥8-bit`, the way
+     * the model seat prints "model  effort". `any` yields no precision half at all, so an
+     * unconfigured chip still reads exactly as the preset label alone.
+     */
+    function chipBadgeParts(t, presetLabel, precision) {
+      return {
+        label: presetLabel,
+        precision: precisionShortLabel(t, isPlainObject(precision) ? precision.floor : 'any'),
+      };
+    }
+
+    /**
+     * One drilled pane's rows: the preset list, or the floor list. A pane is one listbox of
+     * options either way, which is why the two share a renderer and a row component.
+     */
+    function chipFacetRows(t, facet, view) {
+      if (facet === 'precision') {
+        return PRECISION_FLOORS.map((floor) => ({
+          value: floor,
+          key: floor,
+          label: t('precision.row.' + floor),
+          hint:
+            floor === 'any'
+              ? t('precision.row.any.hint')
+              : t('precision.wireLevels', {
+                  levels: PRECISION_WIRE_LEVELS[floor].join(', '),
+                }),
+          selected: floor === view.precisionFloor,
+        }));
+      }
+      return [
+        {
+          value: '',
+          key: 'inherit',
+          label: t('preset.inherit', { preset: view.presetLabel(view.profileDefault) }),
+          hint: '',
+          selected: view.chosenPreset === '',
+        },
+      ].concat(
+        PRESET_IDS.map((id) => ({
+          value: id,
+          key: id,
+          label: view.presetLabel(id),
+          hint: '',
+          selected: id === view.chosenPreset,
+        })),
+      );
+    }
+
+    /**
+     * The root pane's cells, in the frozen order: Tier first, Precision second. Each states
+     * what the Session currently runs on — the preset label, and the floor's short label
+     * (`Any` when nothing is filtered) — because the cell is the only place both values are
+     * visible before a drill-in.
+     *
+     * `view`: `{ presetLabel, activePreset, switchingPreset, floor }`.
+     */
+    function chipRootCells(t, view) {
+      const tierLabel = t('chip.facet.tier');
+      const precisionLabel = t('chip.facet.precision');
+      const tierValue =
+        view.switchingPreset === true ? t('tier.switching') : view.presetLabel(view.activePreset);
+      const floor = precisionFloorOf(view.floor);
+      const precisionValue =
+        floor === 'any' ? t('precision.row.any') : precisionShortLabel(t, floor);
+      return [
+        {
+          facet: 'tier',
+          label: tierLabel,
+          value: tierValue,
+          ariaLabel: t('chip.cellAria', { label: tierLabel, value: tierValue }),
+        },
+        {
+          facet: 'precision',
+          label: precisionLabel,
+          value: precisionValue,
+          ariaLabel: t('chip.cellAria', { label: precisionLabel, value: precisionValue }),
+        },
+      ];
+    }
+
+    /**
+     * The keyboard ladder of the two-level menu: Escape and Shift+Tab leave a drilled pane
+     * for the root one, and from the root pane they close the popover. Returns the pane to
+     * show, or null for "close"; every other key leaves the pane alone.
+     */
+    function chipPaneAfterKey(pane, key, shiftKey) {
+      if (key !== 'Escape' && !(key === 'Tab' && shiftKey === true)) return pane;
+      return pane === CHIP_PANE_ROOT ? null : CHIP_PANE_ROOT;
+    }
+
 
     /**
      * The preset table a picker renders. `/targets` carries `tier: { default, presets }`;
@@ -1380,6 +1630,9 @@ window.__ModuleLoader__.load({
       primary: 'var(--dsw-alias-label-primary, CanvasText)',
       secondary: 'var(--dsw-alias-label-secondary, GrayText)',
       tertiary: 'var(--dsw-alias-label-tertiary, GrayText)',
+      // The quieter tone the shell prints the second half of a compound control in: the composer's
+      // model seat writes its effort this way, so the routing chip writes its floor the same way.
+      caption: 'var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, GrayText))',
       border: 'var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.12))',
       borderStrong: 'var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.2))',
       layerTwo: 'var(--dsw-alias-bg-layer-2, ButtonFace)',
@@ -1798,6 +2051,21 @@ window.__ModuleLoader__.load({
       whiteSpace: 'nowrap',
     };
 
+    /**
+     * The floor half of the collapsed badge, in the shell's caption tone. The model seat prints
+     * its effort the same way (`_7KE1Ra_triggerEffort`), so the two composer chips read as one
+     * family. It gives up width before the preset name does, which is why it alone carries the
+     * large `flexShrink`; the trigger's own `gap: 4px` supplies the space between the halves.
+     */
+    const CHIP_PRECISION_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      flexShrink: 1000,
+      color: COLORS.caption,
+    };
+
     const CHIP_CARET_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
 
     const CHIP_HINT_STYLE = {
@@ -1810,9 +2078,12 @@ window.__ModuleLoader__.load({
     function chipOptionStyle(state) {
       const disabled = state.disabled === true;
       const selected = state.selected === true;
+      /* A precision row carries a second line, so it wraps; a preset row is one line and
+         must stay exactly as tall as it shipped. */
+      const wrapped = state.wrapped === true;
       return {
         display: 'flex',
-        alignItems: 'center',
+        alignItems: wrapped ? 'flex-start' : 'center',
         justifyContent: 'space-between',
         gap: '8px',
         margin: 0,
@@ -1831,7 +2102,7 @@ window.__ModuleLoader__.load({
         font: selected ? FONTS.smallStrong : FONTS.small,
         lineHeight: '18px',
         textAlign: 'left',
-        whiteSpace: 'nowrap',
+        whiteSpace: wrapped ? 'normal' : 'nowrap',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.55 : 1,
         outline: 'none',
@@ -1839,6 +2110,84 @@ window.__ModuleLoader__.load({
         WebkitAppearance: 'none',
       };
     }
+
+    /*
+     * The two-level menu, after the composer model picker: a root pane of full-width cells
+     * (label left, the current value in tertiary tone right, a chevron to the drill-in
+     * list), and one listbox pane below it. No tab strip: the cells are the navigation.
+     */
+    const CHIP_PANE_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: 0,
+    };
+    const CHIP_LIST_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: 0,
+    };
+
+    /** One root cell: 34px, full width, label then value then chevron, hover-tinted. */
+    function chipCellStyle(state) {
+      const active = state.hovered === true || state.focused === true;
+      return {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        boxSizing: 'border-box',
+        width: 'auto',
+        minWidth: '100%',
+        height: '34px',
+        margin: '0',
+        padding: '0 8px',
+        border: 'none',
+        borderRadius: 'var(--dsw-radius-md, 8px)',
+        background: active
+          ? 'var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06))'
+          : 'transparent',
+        color: COLORS.primary,
+        font: FONTS.small,
+        lineHeight: '20px',
+        textAlign: 'left',
+        cursor: 'pointer',
+        outline: 'none',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+      };
+    }
+
+    const CHIP_CELL_LABEL_STYLE = { flex: '0 0 auto', whiteSpace: 'nowrap' };
+
+    /* The current value, in the tertiary tone the model picker uses for it. */
+    const CHIP_CELL_VALUE_STYLE = {
+      flex: 'auto',
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      textAlign: 'right',
+      color: COLORS.tertiary,
+    };
+
+    const CHIP_CELL_CHEVRON_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
+
+    /* A precision row's second line: the wire levels it admits, so the trade is legible
+       before it is chosen rather than after a bill. */
+    const CHIP_OPTION_STACK_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '1px',
+      minWidth: 0,
+      textAlign: 'left',
+    };
+    const CHIP_OPTION_HINT_STYLE = {
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+      lineHeight: '15px',
+      whiteSpace: 'normal',
+    };
 
     function dotStyle(connection) {
       const color =
@@ -4271,25 +4620,43 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** One tier row inside the chip's menu. */
+    /** One row inside the chip's menu: a tier preset, or a precision floor. */
     function ChipOption(props) {
       const [hovered, setHovered] = React.useState(false);
       const selected = props.selected === true;
       const disabled = props.disabled === true;
+      /* A precision row names the wire levels it admits on a second line; a preset row is
+         one line and must render exactly as it did before the facet existed. */
+      const hint = stringValue(props.hint).trim();
+      const stacked = hint !== '';
+      const attrs = {
+        type: 'button',
+        role: 'option',
+        'aria-selected': selected,
+        disabled: disabled,
+        onMouseEnter: () => setHovered(true),
+        onMouseLeave: () => setHovered(false),
+        onClick: disabled ? undefined : props.onClick,
+        style: chipOptionStyle({
+          hovered: hovered,
+          selected: selected,
+          disabled: disabled,
+          wrapped: stacked,
+        }),
+      };
+      if (props.kind === 'precision') attrs['data-precision'] = props.value;
+      else attrs['data-preset'] = props.value;
       return h(
         'button',
-        {
-          type: 'button',
-          role: 'option',
-          'aria-selected': selected,
-          'data-preset': props.value,
-          disabled: disabled,
-          onMouseEnter: () => setHovered(true),
-          onMouseLeave: () => setHovered(false),
-          onClick: disabled ? undefined : props.onClick,
-          style: chipOptionStyle({ hovered: hovered, selected: selected, disabled: disabled }),
-        },
-        h('span', null, props.label),
+        attrs,
+        stacked
+          ? h(
+              'span',
+              { style: CHIP_OPTION_STACK_STYLE },
+              h('span', null, props.label),
+              h('span', { style: CHIP_OPTION_HINT_STYLE }, hint),
+            )
+          : h('span', null, props.label),
         selected
           ? h(
               'span',
@@ -4301,12 +4668,53 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The composer's preset chip. It changes the *Session*, not the provider row: the relay
-     * applies the preset to the request body on the way out, so switching is a runtime choice
-     * like `reasoningEffort` and never mints a provider route per preset. This chip
-     * talks to the Host's `/tier` API and nothing else; it writes no provider
-     * configuration, never touches the settings draft, and renders nothing unless the
-     * Session runs on a row mounted from one of our targets.
+     * One cell of the root pane: the label of what it sets on the left, the value the
+     * Session currently runs on in the tertiary tone on the right, and a chevron saying it
+     * opens a list. It is the whole navigation of the two-level menu — pressing it drills
+     * in, Escape comes back out.
+     */
+    function ChipCell(props) {
+      const [hovered, setHovered] = React.useState(false);
+      const [focused, setFocused] = React.useState(false);
+      return h(
+        'button',
+        {
+          type: 'button',
+          role: 'menuitem',
+          ref: props.cellRef,
+          'aria-label': props.ariaLabel,
+          onMouseEnter: () => setHovered(true),
+          onMouseLeave: () => setHovered(false),
+          onFocus: () => setFocused(true),
+          onBlur: () => setFocused(false),
+          onClick: props.onClick,
+          style: chipCellStyle({ hovered: hovered, focused: focused }),
+        },
+        h('span', { style: CHIP_CELL_LABEL_STYLE }, props.label),
+        h('span', { style: CHIP_CELL_VALUE_STYLE }, props.value),
+        h('span', { 'aria-hidden': 'true', style: CHIP_CELL_CHEVRON_STYLE }, '\u25b8'),
+      );
+    }
+
+    /**
+     * The composer's routing chip: one trigger, one two-level menu.
+     *
+     * It changes the *Session*, not the provider row: the relay applies the preset to the
+     * request body on the way out, so switching is a runtime choice like `reasoningEffort`
+     * and never mints a provider route per preset. The preset is an outcome; the precision
+     * floor is a constraint on which endpoints that outcome may land on, so both are set
+     * from one popover, shaped like the composer's model picker: the root pane is a pair of
+     * cells ("Tier — Cheapest ›", "Precision — ≥8-bit ›") and a cell drills into its own
+     * list. Escape and Shift+Tab step back out to the root before closing. There is still
+     * exactly one control in the composer.
+     *
+     * Unlike the model picker, a pick returns to the root pane and leaves the popover open,
+     * so both facets can be set in one visit; it closes on an outside press, Escape from the
+     * root pane, or the trigger itself.
+     *
+     * This chip talks to the Host's `/tier` and `/precision` APIs and nothing else; it
+     * writes no provider configuration, never touches the settings draft, and renders
+     * nothing unless the Session runs on a row mounted from one of our targets.
      *
      * A blank Session has no durable `modelSelection` yet (the projection stays
      * `{lastUsed: null, next: null}` until its first message), so keying the chip off the
@@ -4364,15 +4772,28 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false);
       const [hovered, setHovered] = React.useState(false);
       const [focused, setFocused] = React.useState(false);
+      /* Which pane the menu shows. It always opens on the root cells — never straight into
+         a list — and a cell drills into `tier` or `precision`; Escape/Shift+Tab come back. */
+      const [pane, setPane] = React.useState(CHIP_PANE_ROOT);
       const [pendingTier, setPendingTier] = React.useState(null);
+      const [pendingPrecision, setPendingPrecision] = React.useState(null);
       const [error, setError] = React.useState('');
       const [anchor, setAnchor] = React.useState(null);
       /* What the Host reports for this Session: `{ preset, chosen, default }`. `chosen` is
          empty until the Session picks a preset, and then it follows the profile default. */
       const [tierState, setTierState] = React.useState(null);
+      /* `{ floor, includeUnknown, allow, inherited }`, or null before (or instead of) an
+         answer. Null is not an error state: the chip then badges `any`, which hides the
+         second half, so a Host from before this feature looks exactly like the old chip. */
+      const [precisionState, setPrecisionState] = React.useState(null);
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
+      const tierCellRef = React.useRef(null);
+      const precisionCellRef = React.useRef(null);
+      /* Where the next render should put the keyboard: the cell that opened the drilled
+         pane, or the list of the pane just entered. The model picker works the same way. */
+      const pendingFocusRef = React.useRef(null);
       const aliveRef = React.useRef(true);
       const lifetimeRef = React.useRef(null);
       const actionRef = React.useRef(null);
@@ -4408,7 +4829,9 @@ window.__ModuleLoader__.load({
          effort and the failure, and re-measure on the next open. */
       React.useEffect(() => {
         setOpen(false);
+        setPane(CHIP_PANE_ROOT);
         setPendingTier(null);
+        setPendingPrecision(null);
         setError('');
         setAnchor(null);
       }, [providerKey]);
@@ -4439,6 +4862,42 @@ window.__ModuleLoader__.load({
           } catch (error) {
             /* A chip must never be the thing that breaks the composer: no answer simply
                leaves the badge on its "no tier" fallback. */
+          }
+        })();
+        return () => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+        };
+      }, [feedState.origin, sessionId]);
+
+      /*
+       * Read this Session's precision floor beside its preset, in a request of its own. The
+       * two are independent on purpose: a failed floor fetch leaves the preset badge (and
+       * the whole chip) exactly as released, and a failed preset fetch does not hide the
+       * floor. `null` here is the `any` fallback, never a rendering error.
+       */
+      React.useEffect(() => {
+        const origin = feedState.origin;
+        if (origin === null || typeof sessionId !== 'string' || sessionId === '') {
+          setPrecisionState(null);
+          return undefined;
+        }
+        const controller = new AbortController();
+        void (async () => {
+          try {
+            const response = await fetch(
+              origin + CONTROL_PREFIX + '/precision?session=' + encodeURIComponent(sessionId),
+              { method: 'GET', mode: 'cors', cache: 'no-store', headers: { accept: 'application/json' }, signal: controller.signal },
+            );
+            const payload = await readJsonSafe(response);
+            if (!response.ok) return;
+            const next = normalizePrecisionState(payload);
+            if (next !== null && aliveRef.current) setPrecisionState(next);
+          } catch (error) {
+            /* No answer leaves the badge on `any`: the chip still draws and still switches. */
           }
         })();
         return () => {
@@ -4489,6 +4948,40 @@ window.__ModuleLoader__.load({
         };
       }, [open]);
 
+      /* Focus follows the pane, like the model picker: a drill puts the keyboard on the
+         ticked row (or the first one), and coming back hands it to the cell that opened the
+         pane. The ref is consumed on the next render, once the new pane is in the DOM. */
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const intent = pendingFocusRef.current;
+        pendingFocusRef.current = null;
+        if (intent === null) return undefined;
+        if (intent !== 'row') {
+          const cell = intent === 'precision' ? precisionCellRef.current : tierCellRef.current;
+          if (cell !== null && cell !== undefined && typeof cell.focus === 'function') {
+            try {
+              cell.focus({ preventScroll: true });
+            } catch (error) {
+              /* an engine that only takes the argument-less form */
+            }
+          }
+          return undefined;
+        }
+        const menu = menuRef.current;
+        if (menu === null || menu === undefined || typeof menu.querySelector !== 'function') return undefined;
+        const ticked = menu.querySelector('[role="option"][aria-selected="true"]:not([disabled])');
+        const first = menu.querySelector('[role="option"]:not([disabled])');
+        const node = ticked !== null ? ticked : first;
+        if (node !== null && typeof node.focus === 'function') {
+          try {
+            node.focus({ preventScroll: true });
+          } catch (error) {
+            /* an engine that only takes the argument-less form */
+          }
+        }
+        return undefined;
+      }, [open, pane]);
+
       /* What this Session currently runs on. Nothing renders unless the feed is loaded,
          the Session has a selection, that selection's provider row exists, and the row is
          mounted from one of our targets (see `normalizeTargets`). */
@@ -4503,24 +4996,55 @@ window.__ModuleLoader__.load({
       if (stringValue(source.targetId).trim() === '') return null;
 
       const name = stringValue(source.displayName).trim() || providerKey;
-      const busy = pendingTier !== null;
+      /* One mutation at a time, whichever facet started it: both write the same Session. */
+      const busy = pendingTier !== null || pendingPrecision !== null;
       /* `chosen` is the preset this Session picked, empty while it follows the profile
          default; `preset` is what its next request will actually send. */
       const activePreset = tierState === null ? 'none' : tierState.preset;
       const chosenPreset = tierState === null || tierState.chosen === null ? '' : tierState.chosen;
       const profileDefault = tierState === null ? 'none' : tierState.default;
+      /* The floor the chip badges. A pending pick reads optimistically (`pendingPrecision`),
+         so the badge and the ticked row move on the press; the read-back then replaces it,
+         or reverts to the confirmed floor when the POST fails. */
+      const precisionChoice = precisionState === null ? DEFAULT_PRECISION_CHOICE : precisionState;
+      const shownFloor = pendingPrecision === null ? precisionChoice.floor : pendingPrecision;
+      const shownUnknown = pendingPrecision === null
+        ? precisionChoice.includeUnknown
+        : precisionIncludeUnknownDefault(pendingPrecision);
       /* Labels only. What each preset actually sends is explained once on the settings
          page; repeating it here would make every open menu a wall of text. */
       const presetLabel = (id) => t('preset.' + id);
-      const badge = busy ? t('tier.switching') : presetLabel(activePreset);
+      /* `<preset label>` + `<precision short label>`, or the preset label alone while the floor is
+         `any` — which is what keeps a chip nobody has configured pixel-identical to the one this
+         plugin already shipped. The two halves stay apart so the floor can be painted in the
+         caption tone, the way the model seat paints its effort. */
+      const badgeParts = pendingTier === null
+        ? chipBadgeParts(t, presetLabel(activePreset), { floor: shownFloor })
+        : { label: t('tier.switching'), precision: '' };
+      const badge = badgeParts.precision === ''
+        ? badgeParts.label
+        : badgeParts.label + ' ' + badgeParts.precision;
       const tierText = badge;
-      const options = [
-        { value: '', label: t('preset.inherit', { preset: presetLabel(profileDefault) }) },
-      ].concat(PRESET_IDS.map((id) => ({ value: id, label: presetLabel(id) })));
+      /* The root cells always exist; the rows only matter once a cell has been pressed. */
+      const cells = chipRootCells(t, {
+        presetLabel: presetLabel,
+        activePreset: activePreset,
+        switchingPreset: pendingTier !== null,
+        floor: shownFloor,
+      });
+      const rows = pane === CHIP_PANE_ROOT
+        ? []
+        : chipFacetRows(t, pane, {
+            presetLabel: presetLabel,
+            profileDefault: profileDefault,
+            chosenPreset: chosenPreset,
+            precisionFloor: shownFloor,
+          });
 
       /* One POST, no provider write: the Host records the choice for this Session and the
-         relay applies it to the request body on the way out. */
-      const postTier = async (preset) => {
+         relay applies it to the request body on the way out. Both facets share this
+         transport, so a timeout or a cut response is handled in exactly one place. */
+      const postControl = async (path, body) => {
         const origin = feedState.origin;
         if (origin === null) throw new Error(t('offline.noReason'));
         const controller = new AbortController();
@@ -4533,7 +5057,7 @@ window.__ModuleLoader__.load({
           }
         }, MUTATION_TIMEOUT_MS);
         try {
-          const response = await fetch(origin + CONTROL_PREFIX + '/tier', {
+          const response = await fetch(origin + CONTROL_PREFIX + path, {
             method: 'POST',
             mode: 'cors',
             cache: 'no-store',
@@ -4542,7 +5066,7 @@ window.__ModuleLoader__.load({
               'content-type': 'application/json',
               'x-oorp-client': CLIENT_HEADER,
             },
-            body: JSON.stringify({ session: sessionId, preset: preset === '' ? null : preset }),
+            body: JSON.stringify(body),
             signal: controller.signal,
           });
           const payload = await readJsonSafe(response);
@@ -4551,19 +5075,35 @@ window.__ModuleLoader__.load({
               controlErrorMessage(payload, t('error.http', { status: String(response.status) })),
             );
           }
-          const next = normalizePresetState(payload);
-          if (next === null) throw new Error(t('strip.stalled'));
-          return next;
+          return payload;
         } finally {
           clearTimeout(timer);
           if (actionRef.current === controller) actionRef.current = null;
         }
       };
 
+      const postTier = async (preset) => {
+        const payload = await postControl('/tier', {
+          session: sessionId,
+          preset: preset === '' ? null : preset,
+        });
+        const next = normalizePresetState(payload);
+        if (next === null) throw new Error(t('strip.stalled'));
+        return next;
+      };
+
+      /* The body names both halves of the floor; the wire list is materialised by the relay
+         on read, so the client never sends `allow` and never derives it itself. */
+      const postPrecision = async (floor) => {
+        const payload = await postControl('/precision', precisionPostBody(sessionId, floor));
+        const next = normalizePrecisionState(payload);
+        if (next === null) throw new Error(t('strip.stalled'));
+        return next;
+      };
+
       const switchTier = async (preset) => {
-        if (pendingTier !== null) return;
+        if (busy) return;
         if (preset === chosenPreset) {
-          setOpen(false);
           setError('');
           return;
         }
@@ -4585,17 +5125,137 @@ window.__ModuleLoader__.load({
           return;
         }
         setTierState(next);
+        /* The popover stays open: the root cells are one press away, and a pick that closed
+           it made "Cheapest · ≥8-bit" a two-visit round trip. */
+      };
+
+      const switchPrecision = async (floor) => {
+        if (busy) return;
+        const target = precisionFloorOf(floor);
+        if (target === precisionChoice.floor) {
+          setError('');
+          return;
+        }
+        setPendingPrecision(target);
+        setError('');
+
+        let next = null;
+        let failure = '';
+        try {
+          next = await postPrecision(target);
+        } catch (exception) {
+          failure = unknownOutcomeMessage(t, exception);
+        }
+
+        if (!aliveRef.current) return;
+        setPendingPrecision(null);
+        if (next === null) {
+          setError(
+            t('precision.error', { message: failure === '' ? t('offline.noReason') : failure }),
+          );
+          return;
+        }
+        setPrecisionState(next);
+      };
+
+      /* The focusable items of the pane that is showing: the two root cells, or the rows. */
+      const paneItems = () => {
+        const menu = menuRef.current;
+        if (menu === null || menu === undefined || typeof menu.querySelectorAll !== 'function') return [];
+        const selector = pane === CHIP_PANE_ROOT
+          ? '[role="menuitem"]:not([disabled])'
+          : '[role="option"]:not([disabled])';
+        return Array.prototype.slice.call(menu.querySelectorAll(selector));
+      };
+
+      /* ↑/↓ walk the cells on the root pane and the rows inside a list, as they do in the
+         model picker; nothing else here moves focus. */
+      const moveFocus = (offset) => {
+        const items = paneItems();
+        if (items.length === 0) return;
+        const focusedIndex = items.indexOf(
+          typeof document === 'undefined' ? null : document.activeElement,
+        );
+        const at = focusedIndex === -1
+          ? offset > 0
+            ? 0
+            : items.length - 1
+          : (focusedIndex + offset + items.length) % items.length;
+        const node = items[at];
+        if (node !== null && node !== undefined && typeof node.focus === 'function') node.focus();
+      };
+
+      /** Drill into one list: the next render puts the keyboard on its ticked row. */
+      const drill = (next) => {
+        pendingFocusRef.current = 'row';
+        /* A stale failure belongs to the pane it happened in, not to this one. */
+        setError('');
+        setPane(next);
+      };
+
+      /** Leave a drilled pane for the root cells, handing the keyboard back to its cell. */
+      const back = () => {
+        const from = pane === 'precision' ? 'precision' : 'tier';
+        pendingFocusRef.current = from;
+        setPane(CHIP_PANE_ROOT);
+      };
+
+      const closeMenu = (restoreFocus) => {
         setOpen(false);
+        setPane(CHIP_PANE_ROOT);
+        pendingFocusRef.current = null;
+        setError('');
+        if (restoreFocus !== true) return;
+        queueMicrotask(() => {
+          const node = chipRef.current;
+          if (node !== null && node !== undefined && typeof node.focus === 'function') {
+            try {
+              node.focus({ preventScroll: true });
+            } catch (error) {
+              /* an engine that only takes the argument-less form */
+            }
+          }
+        });
+      };
+
+      /* Escape and Shift+Tab leave a drilled pane first and only close from the root, which
+         is the ladder the model picker uses. The handler sits on the chip wrapper so it sees
+         keys from the trigger and from the popover alike. */
+      const onChipKeyDown = (event) => {
+        if (!open) return;
+        if (event.key === 'Escape' || (event.key === 'Tab' && event.shiftKey === true)) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (chipPaneAfterKey(pane, event.key, event.shiftKey === true) === null) closeMenu(true);
+          else back();
+          return;
+        }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveFocus(event.key === 'ArrowDown' ? 1 : -1);
+        }
+      };
+
+      /* A pick always returns to the root cells, and the popover stays open: that is the
+         one deliberate difference from the model picker, which closes on selection. */
+      const chooseRow = (row) => {
+        const from = pane;
+        if (pane === 'precision') void switchPrecision(row.value);
+        else void switchTier(row.value);
+        pendingFocusRef.current = from === 'precision' ? 'precision' : 'tier';
+        setPane(CHIP_PANE_ROOT);
+        setError('');
       };
 
       const openMenu = () => {
         if (busy) return;
         if (open) {
-          setOpen(false);
-          setError('');
+          closeMenu(false);
           return;
         }
         setError('');
+        pendingFocusRef.current = null;
+        setPane(CHIP_PANE_ROOT);
         setOpen(true);
       };
 
@@ -4623,18 +5283,97 @@ window.__ModuleLoader__.load({
       const errorLine =
         error === '' ? null : h('p', { role: 'alert', style: Object.assign({}, ALERT_STYLE, { margin: '4px 4px 0' }) }, error);
 
+      const activeRows = rows.map((row) =>
+        h(ChipOption, {
+          key: row.key,
+          value: row.value,
+          label: row.label,
+          hint: row.hint,
+          kind: pane === 'precision' ? 'precision' : 'preset',
+          selected: row.selected,
+          disabled: busy,
+          onClick: () => {
+            chooseRow(row);
+          },
+        }),
+      );
+
+      /* The root pane: exactly two cells, saying what the Session runs on and opening the
+         list behind each. The values are the same ones the trigger badges. */
+      const rootPane = h(
+        'div',
+        { role: 'menu', 'aria-label': t('chip.menuAria'), style: CHIP_PANE_STYLE },
+        h(ChipCell, {
+          cellRef: tierCellRef,
+          label: cells[0].label,
+          value: cells[0].value,
+          ariaLabel: cells[0].ariaLabel,
+          onClick: () => {
+            drill('tier');
+          },
+        }),
+        h(ChipCell, {
+          cellRef: precisionCellRef,
+          label: cells[1].label,
+          value: cells[1].value,
+          ariaLabel: cells[1].ariaLabel,
+          onClick: () => {
+            drill('precision');
+          },
+        }),
+      );
+
+      /* The drilled pane: the listbox the pressed cell names, with the hint that belongs to
+         it. Selecting a row comes back here, to the root cells. */
+      const drilledPane = h(
+        'div',
+        { style: CHIP_PANE_STYLE },
+        h(
+          'div',
+          {
+            role: 'listbox',
+            'aria-label': pane === 'precision' ? t('precision.listAria', { name: name }) : t('strip.tierAria', { name: name }),
+            style: CHIP_LIST_STYLE,
+          },
+          activeRows,
+        ),
+        pane === 'precision'
+          ? shownUnknown
+            ? h('p', { style: CHIP_HINT_STYLE }, t('precision.unknownAdmitted'))
+            : null
+          : h('p', { style: CHIP_HINT_STYLE }, t('preset.hint')),
+      );
+
+      /* Errors sit below whichever pane is showing, so a failed pick is still readable after
+         it has returned to the root cells. */
+      const popover = open
+        ? h(
+            'div',
+            {
+              ref: menuRef,
+              style: menuStyle,
+              'aria-busy': busy ? 'true' : undefined,
+            },
+            pane === CHIP_PANE_ROOT ? rootPane : drilledPane,
+            errorLine,
+          )
+        : null;
+
       return h(
         'div',
-        { style: { position: 'relative', display: 'inline-flex', minWidth: 0 } },
+        {
+          style: { position: 'relative', display: 'inline-flex', minWidth: 0 },
+          onKeyDown: onChipKeyDown,
+        },
         h(
           'button',
           {
             type: 'button',
             ref: chipRef,
-            'aria-haspopup': 'listbox',
+            'aria-haspopup': 'menu',
             'aria-expanded': open,
             'aria-busy': busy ? 'true' : undefined,
-            'aria-label': t('tier.aria', { name: name, tier: busy ? t('tier.switching') : tierText }),
+            'aria-label': t('tier.aria', { name: name, tier: tierText }),
             title: t('strip.tierAria', { name: name }),
             disabled: busy,
             onMouseDown: (event) => event.preventDefault(),
@@ -4645,34 +5384,13 @@ window.__ModuleLoader__.load({
             onClick: openMenu,
             style: chipStyle({ open: open, hovered: hovered, focused: focused, disabled: busy }),
           },
-          h('span', { style: CHIP_TEXT_STYLE }, badge),
+          h('span', { style: CHIP_TEXT_STYLE }, badgeParts.label),
+          badgeParts.precision === ''
+            ? null
+            : h('span', { style: CHIP_PRECISION_STYLE }, badgeParts.precision),
           h('span', { 'aria-hidden': 'true', style: CHIP_CARET_STYLE }, open ? '\u25b4' : '\u25be'),
         ),
-        open
-          ? h(
-              'div',
-              {
-                role: 'listbox',
-                ref: menuRef,
-                'aria-label': t('strip.tierAria', { name: name }),
-                style: menuStyle,
-              },
-              options.map((option) =>
-                h(ChipOption, {
-                  key: option.value === '' ? 'inherit' : option.value,
-                  value: option.value,
-                  label: option.label,
-                  selected: option.value === chosenPreset,
-                  disabled: busy,
-                  onClick: () => {
-                    void switchTier(option.value);
-                  },
-                }),
-              ),
-              h('p', { style: CHIP_HINT_STYLE }, t('preset.hint')),
-              errorLine,
-            )
-          : null,
+        popover,
       );
     }
 
@@ -5484,6 +6202,26 @@ window.__ModuleLoader__.load({
         pageChrome,
         controlUrl,
         controlBase: CONTROL_BASE,
+        /* The chip's two facets are mostly view state, so the pieces a test can hold still
+           are the payload readers, the badge text and the row lists they feed. */
+        normalizePrecisionState,
+        normalizePrecisionChoice,
+        precisionFloorOf,
+        precisionPostBody,
+        precisionShortLabel,
+        chipBadgeLabel,
+        chipFacetRows,
+        /* The root pane and the pane ladder are the two-level menu's whole behaviour, so
+           they are exported as plain data/decisions rather than pinned through a DOM. */
+        chipRootCells,
+        chipPaneAfterKey,
+        chipPaneRoot: CHIP_PANE_ROOT,
+        chipPanes: CHIP_PANES,
+        precisionFloors: PRECISION_FLOORS,
+        precisionWireLevels: PRECISION_WIRE_LEVELS,
+        /* Both dictionaries, so a new key cannot land in one language only: the zh one
+           must be real Chinese, and a key that is not registered renders its own name. */
+        dictionaries: { en: en, zh: zh },
       },
       apply(ctx) {
         /* Dictionary registration is owned by the plugin context and disposed with it. */

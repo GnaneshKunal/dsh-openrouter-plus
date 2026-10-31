@@ -62,6 +62,8 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/reasoning.js` | config-bridge | `fillReasoning(route, { evidence, fallback }) -> { route, filled, unresolved }`; pure, no I/O |
 | `lib/auto-repair.js` | index.js | `createAutoRepair({ repair, onPatched, onError, delayMs })`; debounce + serialise one repair pass, injectable timers, pure |
 | `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
+| `lib/quantization.js` | relay-core | `normalizePrecision(raw) -> { floor, includeUnknown, allow }`, `precisionLabel(value)`, `PRECISION_IDS`, `QUANTIZATION_LEVELS`; the twelve-value enum materialised into the allowlist `provider.quantizations` accepts. Pure, no I/O |
+| `lib/endpoints.js` | relay-core | `parseEndpoints(payload, maxBytes)`, `levelsFrom(endpoints)`, `survives(allow, levels)`, `fetchEndpoints(upstream, model, { fetch })`; per-endpoint precision for admission control. Injected fetch, no network in tests |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
@@ -82,7 +84,7 @@ dispatch call, not a second implementation.
 | Method + path | Body | Response |
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
-| `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
+| `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, precision: { default, floorBypassed: { count, byModel } }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
 | `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, reasoning: { fill, levels } }` | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
@@ -95,6 +97,9 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/tier?session=<id>` | — | `{ ok, session, preset, wire: { serviceTier, sort, variant }, chosen, default, presets }` — what that Session applies *now* |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` (or a tier-era `tier`) | the same body; `preset: null`/absent clears. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` (or `tier`) | `{ ok, default, presets }`; one config write, because it is a preference. An absent preset means `none` |
+| `GET /__openrouter-plus/precision?session=<id>` | — | `{ ok, session, precision: { floor, includeUnknown, allow }, inherited, source: 'session' | 'default', chosen, default, floors }` — what that Session applies *now*; `allow` is `null` for `any` |
+| `POST /__openrouter-plus/precision` | `{ session, precision: { floor, includeUnknown } }` | the same body; a Session choice, **memory only**, cleared by an absent/null `precision` |
+| `POST /__openrouter-plus/precision/default` | `{ precision }` | `{ ok, default, floors }`; one config write on the `precisionFloor` key |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` | `{ ok: true, usageWidget: { enabled } }`; one config write — the sidebar card's preference (`usageWidget` on the plugin row). A non-boolean `enabled` is a `400` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
@@ -179,16 +184,20 @@ Target mounts (alongside the legacy tier mounts):
 - `createRelay({ …, resolveTarget })`, `resolveTarget(targetId) -> { upstream, tier } | null` (a
   promise is awaited). The relay reads only those two fields and never touches config. The mount
   shape decides *whether* a pinned tier is written; the resolver's `tier` supplies the value.
-- `resolveSessionRecipe(session) -> { preset, serviceTier, sort, variant } | string | null` (a
+- `resolveSessionRecipe(session, model) -> { preset, serviceTier, sort, variant, precision, quantizations } | string | null` (a
   promise is awaited) is the per-Session seam, and it is asked **after** the mount shape and pins
-  nothing itself: a recipe whose three levers are all `null` is the pass-through preset, and it is an
-  answer, not a missing one.
+  nothing itself: a recipe whose levers are all `null` and whose `quantizations` is `null` is the
+  pass-through preset, and it is an answer, not a missing one. The `model` argument exists for the
+  precision floor: whether a filter may be sent at all depends on that model's endpoint pool, so the
+  resolver cannot answer without it.
 - Rejections happen before any upstream call: unknown target → `404` in the legacy unknown-mount
   shape; unusable upstream (missing, non-`http(s)`, carrying credentials) → `400`; a target pointing
   back at this listener → `400` "refusing to proxy it to itself".
 - Responses carry `x-oorp-target: <id>` on target mounts only; `x-oorp-upstream` reports the origin
   (never the configured path) and `x-oorp-tier` keeps its existing meaning (`passthrough` when
-  nothing is pinned).
+  nothing is pinned). `x-oorp-precision` is always present and reports the floor: its id when
+  `provider.quantizations` was written, `bypass` when a floor was configured but could not be
+  admitted for that model, `any` otherwise.
 
 
 ```js
@@ -200,8 +209,9 @@ Target mounts (alongside the legacy tier mounts):
  * @param {string} options.upstream      e.g. 'https://openrouter.ai/api/v1' (no trailing slash)
  * @param {Record<string,string|null>} options.routes
  *        map of mount path -> tier, e.g. { '/flex/v1': 'flex', '/v1': null }
- * @param {(session: string) => object|string|null} [options.resolveSessionRecipe]
- *        per-Session preset; applied after the mount shape, on any mount
+ * @param {(session: string, model: string|null) => object|string|null} [options.resolveSessionRecipe]
+ *        per-Session preset and precision floor, applied after the mount shape on any mount.
+ *        `model` is the body's model id: a floor may only be admitted per model pool.
  * @param {(session: string) => string|null} [options.resolveSessionTier]
  *        tier-era spelling of the same seam: a bare tier string
  * @param {Record<string, (req,res)=>Promise<void>|void>} [options.control]
@@ -213,6 +223,25 @@ Target mounts (alongside the legacy tier mounts):
  */
 export function createRelay(options)
 ```
+
+### The precision floor, and why the relay does not decide it
+
+`applyRecipe` owns `provider.quantizations` the way it owns `service_tier`: the key is merged into the
+caller's `provider` object, which is never replaced, so `only`, `order`, `allow_fallbacks` and
+`ignore` survive a floor exactly as they survive a preset switch. A `null` list strips the key and
+never creates `provider` on its own.
+
+Whether a filter is safe to send is **not** the relay's decision. Excluding every provider is a hard
+upstream failure (`404`), and a floor like `full-width` leaves some models with no eligible endpoint
+at all — DeepSeek V3.2 is one, with no `fp16`/`bf16` endpoint to its name. So `index.js` answers that
+question in `resolveSessionRecipe(session, model)` after reading the public listing
+`GET /models/{author}/{slug}/endpoints`. That listing is cached for ten minutes (cap 200 models,
+single-flight, and a failed or `404` read is cached as empty for the same window), and it is **never
+awaited on the request path**: on a cold cache the request goes out unfiltered, the cache warms in the
+background, and `precision.floorBypassed` in `/status` records it per model. A floor is a quality
+preference, not a correctness requirement, so a miss costs one unfiltered request instead of a failed
+turn. The `any` floor reads nothing and writes nothing, which is what keeps an unconfigured profile
+byte-identical to one that predates the feature.
 
 Returned object:
 

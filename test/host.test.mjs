@@ -11,7 +11,7 @@ import http from 'node:http'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
 
-import { apply, normalizeConfig, normalizeRoutes, normalizeUsageWidget } from '../index.js'
+import { apply, normalizeConfig, normalizeRoutes, normalizeSessionPrecisions, normalizeUsageWidget } from '../index.js'
 
 /* Every boot in this file writes the usage snapshot under `$DSH_HOME`. Point that at a
    throwaway directory so a test run can neither read nor overwrite the real one. */
@@ -146,6 +146,28 @@ async function waitFor(probe, timeoutMs = 2_000) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error('timed out waiting for the relay')
+}
+
+/** Drain a request body; the relay forwards JSON and the fake upstreams read it back. */
+async function readRequestBody(req) {
+  /** @type {Buffer[]} */
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
+}
+
+/** One `/models/<author>/<slug>/endpoints` answer for a set of precisions. */
+function endpointListing(levels) {
+  return {
+    data: {
+      endpoints: levels.map((quantization, index) => ({
+        provider_name: `provider-${index}`,
+        tag: `provider-${index}/${quantization}`,
+        quantization,
+        status: 'active',
+      })),
+    },
+  }
 }
 
 test('normalizeConfig applies defaults and rejects nonsense', () => {
@@ -905,4 +927,370 @@ test('an add steps out of the HMR transaction before writing', async (t) => {
   })
   assert.equal(response.status, 200)
   assert.ok(exits > 0, 'the write left the loader transaction before editing config')
+})
+
+// ---- precision floor ------------------------------------------------------
+
+test('a precision floor is config, and the Session table is bounded and typo-proof', () => {
+  // Absent means `any`: the profile behaves exactly as it did before the feature.
+  const defaults = normalizeConfig(undefined)
+  assert.deepEqual(defaults.precisionFloor, { floor: 'any', includeUnknown: false, allow: null })
+  assert.deepEqual(defaults.sessionPrecisions, {})
+
+  // A bare string is the whole setting (it is what the patched row ships), and the
+  // middle floors admit `unknown` by default.
+  const bare = normalizeConfig({ precisionFloor: 'eight-bit-up' })
+  assert.deepEqual(bare.precisionFloor, {
+    floor: 'eight-bit-up',
+    includeUnknown: true,
+    allow: ['int8', 'fp8', 'mxfp8', 'fp16', 'bf16', 'fp32', 'unknown'],
+  })
+  // The boxed form can turn the flag off, and `full-width` starts there anyway.
+  assert.deepEqual(normalizeConfig({ precisionFloor: { floor: 'no-four-bit', includeUnknown: false } }).precisionFloor.allow, [
+    'int8',
+    'fp6',
+    'fp8',
+    'mxfp8',
+    'fp16',
+    'bf16',
+    'fp32',
+  ])
+  assert.deepEqual(normalizeConfig({ precisionFloor: 'full-width' }).precisionFloor.allow, ['fp16', 'bf16', 'fp32'])
+  // A misspelled floor degrades to `any` rather than refusing to boot the relay.
+  assert.equal(normalizeConfig({ precisionFloor: 'turbo' }).precisionFloor.floor, 'any')
+
+  // The per-Session table mirrors the preset table: objects with a stamp, a bare string
+  // accepted, an unknown floor dropped (a typo must not silently disable the floor) and
+  // `any` kept (opting out of a stricter default is a real choice).
+  const table = normalizeConfig({
+    sessionPrecisions: {
+      chosen: { floor: 'Full-Width', includeUnknown: true, at: 20 },
+      bare: 'no-four-bit',
+      optedOut: { floor: 'any', at: 10 },
+      typo: { floor: 'turbo', at: 30 },
+      '': { floor: 'fp16', at: 40 },
+    },
+  })
+  assert.deepEqual(table.sessionPrecisions.chosen, { floor: 'full-width', includeUnknown: true })
+  assert.deepEqual(table.sessionPrecisions.bare, { floor: 'no-four-bit', includeUnknown: true })
+  assert.deepEqual(table.sessionPrecisions.optedOut, { floor: 'any', includeUnknown: false })
+  assert.equal('typo' in table.sessionPrecisions, false)
+  assert.equal('' in table.sessionPrecisions, false)
+  assert.equal(table.sessionPrecisionStamp.chosen, 20)
+
+  // Bounded: the oldest choices are dropped past 200, so a long-lived Host cannot grow
+  // a row for every Session it ever ran.
+  const many = {}
+  for (let index = 0; index < 205; index += 1) many[`s-${index}`] = { floor: 'eight-bit-up', at: index }
+  const bounded = normalizeSessionPrecisions(many)
+  assert.equal(Object.keys(bounded.precisions).length, 200)
+  assert.equal('s-0' in bounded.precisions, false, 'the oldest choice is the one dropped')
+  assert.equal('s-204' in bounded.precisions, true)
+  assert.deepEqual(normalizeSessionPrecisions(null), { precisions: {}, stamp: {} })
+})
+
+test('the precision control API reports, sets and persists the floor', async (t) => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const precisionUrl = `${origin}/__openrouter-plus/precision`
+
+  // 1. The default read. `allow: null` is the wire answer for "sends nothing", and
+  //    `inherited` is how the chip tells a choice from an inheritance.
+  const fresh = await (await fetch(`${precisionUrl}?session=s1`)).json()
+  assert.equal(fresh.ok, true)
+  assert.deepEqual(fresh.precision, { floor: 'any', includeUnknown: false, allow: null })
+  assert.equal(fresh.inherited, true)
+  assert.equal(fresh.source, 'default')
+  assert.equal(fresh.chosen, null)
+  assert.deepEqual(fresh.floors, ['any', 'no-four-bit', 'eight-bit-up', 'full-width'])
+
+  // /status carries the default and the bypass counter the page shows.
+  const status = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.deepEqual(status.precision.default, { floor: 'any', includeUnknown: false, allow: null })
+  assert.deepEqual(status.precision.floorBypassed, { count: 0, byModel: [] })
+
+  // 2. Every write carries the guard header, like every other control POST.
+  assert.equal((await fetch(precisionUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session: 's1', precision: { floor: 'eight-bit-up' } }),
+  })).status, 403)
+
+  // 3. A Session's floor is memory only: no config write, and it composes with any tier.
+  const chosen = await postJson(precisionUrl, { session: 's1', precision: { floor: 'eight-bit-up' } })
+  assert.equal(chosen.status, 200)
+  const chosenBody = await chosen.json()
+  assert.deepEqual(chosenBody.precision, {
+    floor: 'eight-bit-up',
+    includeUnknown: true,
+    allow: ['int8', 'fp8', 'mxfp8', 'fp16', 'bf16', 'fp32', 'unknown'],
+  })
+  assert.equal(chosenBody.inherited, false)
+  assert.equal(chosenBody.source, 'session')
+  assert.deepEqual(chosenBody.chosen, { floor: 'eight-bit-up', includeUnknown: true })
+  assert.equal(editor.writes.length, 0, 'a floor switch must not write the config')
+
+  const readBack = await (await fetch(`${precisionUrl}?session=s1`)).json()
+  assert.equal(readBack.precision.floor, 'eight-bit-up')
+  assert.equal(readBack.inherited, false)
+  // Another Session is untouched and still inherits.
+  assert.equal((await (await fetch(`${precisionUrl}?session=s2`)).json()).inherited, true)
+  assert.equal(editor.writes.length, 0)
+
+  // A bare floor id is accepted too, because a curl is not the picker.
+  const bare = await postJson(precisionUrl, { session: 's1', precision: 'full-width' })
+  assert.equal(bare.status, 200)
+  assert.equal((await bare.json()).precision.floor, 'full-width')
+
+  // 4. Refusals are client errors and write nothing: a typo must not become `any`.
+  for (const body of [
+    { session: 's1', precision: { floor: 'turbo' } },
+    { session: 's1', precision: { floor: 'full-width', includeUnknown: 'yes' } },
+    { session: 's1', precision: { includeUnknown: true } },
+    { precision: { floor: 'full-width' } },
+    { session: 'x'.repeat(129), precision: { floor: 'full-width' } },
+  ]) {
+    assert.equal((await postJson(precisionUrl, body)).status, 400, `${JSON.stringify(body)} is a bad request`)
+  }
+  assert.equal(editor.writes.length, 0)
+
+  // 5. An absent/null precision clears the choice and hands the Session back.
+  const cleared = await (await postJson(precisionUrl, { session: 's1' })).json()
+  assert.equal(cleared.inherited, true)
+  assert.equal(cleared.source, 'default')
+  assert.deepEqual(cleared.precision, { floor: 'any', includeUnknown: false, allow: null })
+
+  // `any` is a real choice, not a clear: it must survive as `chosen`.
+  assert.equal((await postJson(precisionUrl, { session: 's1', precision: 'any' })).status, 200)
+  const optedOut = await (await fetch(`${precisionUrl}?session=s1`)).json()
+  assert.equal(optedOut.inherited, false)
+  assert.deepEqual(optedOut.chosen, { floor: 'any', includeUnknown: false })
+
+  // 6. The profile default is a preference, so it is the one precision write that
+  //    lands on the plugin's own row — the same path `/tier/default` takes.
+  const defaulted = await postJson(`${origin}/__openrouter-plus/precision/default`, {
+    precision: { floor: 'no-four-bit' },
+  })
+  assert.equal(defaulted.status, 200)
+  const defaultBody = await defaulted.json()
+  assert.equal(defaultBody.default.floor, 'no-four-bit')
+  assert.equal(defaultBody.default.allow.includes('unknown'), true)
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].entry, editor.rows[0].entry, 'the plugin row is the only row written')
+  assert.deepEqual(editor.writes[0].next.precisionFloor, { floor: 'no-four-bit', includeUnknown: true })
+  // The next boot reads it back as the normalised shape.
+  assert.deepEqual(normalizeConfig(editor.writes[0].next).precisionFloor, defaultBody.default)
+
+  const refused = await postJson(`${origin}/__openrouter-plus/precision/default`, { precision: { floor: 'turbo' } })
+  assert.equal(refused.status, 400)
+  assert.equal(editor.writes.length, 1, 'a refused default writes nothing')
+
+  // Clearing the default is a legitimate write: `any` is the answer, not null.
+  const reset = await postJson(`${origin}/__openrouter-plus/precision/default`, {})
+  assert.equal(reset.status, 200)
+  assert.equal((await reset.json()).default.floor, 'any')
+  assert.equal(editor.writes.length, 2)
+  assert.deepEqual(editor.writes[1].next.precisionFloor, { floor: 'any', includeUnknown: false })
+})
+
+test('the floor is only sent once a model is known to have an endpoint above it', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+
+  /* A stand-in OpenRouter. The listings carry the real distribution: V3.2 has fp8 and
+     fp4 providers, `tiny/fp4-only` has nothing above four bit, and `ghost/model` is a
+     name the endpoint API does not know. */
+  const fixtures = {
+    'deepseek/deepseek-v3.2': endpointListing(['fp8', 'fp8', 'fp8', 'fp8', 'fp4', 'unknown', 'unknown', 'unknown', 'unknown']),
+    'tiny/fp4-only': endpointListing(['fp4', 'int4']),
+  }
+  /** @type {string[]} */
+  const endpointHits = []
+  /** @type {Array<Record<string, any>>} */
+  const bodies = []
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.startsWith('/v1/models/') && url.endsWith('/endpoints')) {
+      const model = url.slice('/v1/models/'.length, -'/endpoints'.length)
+      endpointHits.push(model)
+      const payload = fixtures[model]
+      res.writeHead(payload === undefined ? 404 : 200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload ?? { error: 'not found' }))
+      return
+    }
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const { ctx, logs, dispose } = createFakeContext()
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+
+  apply(ctx, {
+    port,
+    portFallback: false,
+    upstream: `http://127.0.0.1:${upstreamPort}/v1`,
+    precisionFloor: 'eight-bit-up',
+  })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const chat = (model, session = 'sess-1') => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': session },
+    body: JSON.stringify({ model, messages: [] }),
+  })
+  const status = async () => (await fetch(`${origin}/__openrouter-plus/status`)).json()
+
+  // 1. Cold: the listing has never been read, so the floor is withheld, the request goes
+  //    out exactly as written, and the cache warms behind it. The read is never awaited.
+  const cold = await chat('deepseek/deepseek-v3.2')
+  assert.equal(cold.status, 200)
+  assert.equal(cold.headers.get('x-oorp-precision'), 'bypass')
+  assert.equal('provider' in bodies[0], false, 'a floor that was not admitted is never sent')
+  await waitFor(() => endpointHits.includes('deepseek/deepseek-v3.2'))
+
+  // The bypass is counted per model and exposed on /status, so a floor that is not
+  // being honoured shows up instead of quietly doing nothing.
+  const coldStatus = await status()
+  assert.equal(coldStatus.precision.default.floor, 'eight-bit-up')
+  assert.equal(coldStatus.precision.floorBypassed.count, 1)
+  assert.deepEqual(coldStatus.precision.floorBypassed.byModel, [{ model: 'deepseek/deepseek-v3.2', count: 1 }])
+  // A cold bypass is logged once per model per TTL, so the unfiltered request is
+  // visible in the log and not only in a counter nobody reads.
+  assert.equal(
+    logs.filter((line) => line.includes('precision floor withheld while the endpoint listing is read')).length,
+    1,
+  )
+
+  // 2. Warm: the same model now carries the include list, and it is the only new field.
+  const warm = await chat('deepseek/deepseek-v3.2')
+  assert.equal(warm.headers.get('x-oorp-precision'), 'eight-bit-up')
+  assert.deepEqual(bodies[1], {
+    model: 'deepseek/deepseek-v3.2',
+    messages: [],
+    provider: { quantizations: coldStatus.precision.default.allow },
+  })
+  assert.equal((await status()).precision.floorBypassed.count, 1, 'an enforced floor is not a bypass')
+  assert.equal(
+    endpointHits.filter((model) => model === 'deepseek/deepseek-v3.2').length,
+    1,
+    'one public read per model per TTL, not one per request',
+  )
+
+  // 3. Every endpoint below the floor: the turn still completes, unfiltered and counted.
+  assert.equal((await chat('tiny/fp4-only')).headers.get('x-oorp-precision'), 'bypass')
+  await waitFor(() => endpointHits.includes('tiny/fp4-only'))
+  const below = await chat('tiny/fp4-only')
+  assert.equal(below.status, 200)
+  assert.equal(below.headers.get('x-oorp-precision'), 'bypass')
+  assert.equal('provider' in bodies[3], false, 'sending that list would exclude every provider')
+  const belowStatus = await status()
+  assert.equal(belowStatus.precision.floorBypassed.count, 3)
+  assert.deepEqual(
+    belowStatus.precision.floorBypassed.byModel.find((row) => row.model === 'tiny/fp4-only'),
+    { model: 'tiny/fp4-only', count: 2 },
+  )
+
+  // 4. A model with no listing is remembered as unknown for the TTL, so two requests
+  //    are one read — a 404 must not become a fetch per turn.
+  assert.equal((await chat('ghost/model')).status, 200)
+  await waitFor(() => endpointHits.includes('ghost/model'))
+  assert.equal((await chat('ghost/model')).status, 200)
+  assert.equal(endpointHits.filter((model) => model === 'ghost/model').length, 1)
+  assert.ok(
+    logs.some((line) => line.includes('could not read the endpoint listing')),
+    'the failure is logged instead of being swallowed',
+  )
+  assert.equal('provider' in bodies[5], false)
+})
+
+test('an `any` floor reads no listings and leaves the request body byte-identical', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+
+  /** @type {string[]} */
+  const endpointHits = []
+  /** @type {string[]} */
+  const bodies = []
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.includes('/endpoints')) {
+      endpointHits.push(url)
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end('{"error":"not found"}')
+      return
+    }
+    bodies.push((await readRequestBody(req)).toString('utf8'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const { ctx, dispose } = createFakeContext()
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+
+  // No precisionFloor key at all: the pre-feature profile.
+  apply(ctx, { port, portFallback: false, upstream: `http://127.0.0.1:${upstreamPort}/v1` })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const send = (model) => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'sess-1' },
+    body: JSON.stringify({ model, messages: [] }),
+  })
+
+  const response = await send('deepseek/deepseek-v3.2')
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('x-oorp-precision'), 'any')
+  assert.equal((await send('openai/gpt-4o')).status, 200)
+  // Give any stray background read time to show up, then prove there was none.
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  assert.deepEqual(endpointHits, [], '`any` must not cost a single public read')
+  assert.deepEqual(bodies, [
+    JSON.stringify({ model: 'deepseek/deepseek-v3.2', messages: [] }),
+    JSON.stringify({ model: 'openai/gpt-4o', messages: [] }),
+  ], 'the body is exactly what the client wrote')
+
+  const status = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.deepEqual(status.precision.default, { floor: 'any', includeUnknown: false, allow: null })
+  assert.deepEqual(status.precision.floorBypassed, { count: 0, byModel: [] })
 })

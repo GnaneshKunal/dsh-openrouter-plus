@@ -16,10 +16,12 @@
  * keeps a copy only for `curl` and for compositions with no web GUI. That split is
  * what makes Settings → OpenRouter Plus work behind Tailscale.
  */
+import { fetchEndpoints, survives } from './lib/endpoints.js'
 import { createMetrics } from './lib/metrics.js'
-import { createRelay } from './lib/proxy.js'
+import { baseModelId, createRelay } from './lib/proxy.js'
 import { createConfigBridge } from './lib/config-bridge.js'
 import { MODEL_LISTING_MAX_BYTES, annotateLive, readLiveModels } from './lib/models-sync.js'
+import { PRECISION_IDS, normalizePrecision, precisionLabel } from './lib/quantization.js'
 import { normalizeReasoningEfforts } from './lib/reasoning.js'
 import { createAutoRepair } from './lib/auto-repair.js'
 import { readUsageStoreSync, usageStorePath, writeUsageStore, writeUsageStoreSync } from './lib/usage-store.js'
@@ -103,7 +105,9 @@ const LEGACY_TIER_PRESET = Object.freeze({
   scale: 'none',
 })
 
-const VERSION = '0.3.0'
+/* Kept equal to package.json's version: `/health` reports it and a release commit is the
+   one moment this literal and the manifest must agree. */
+const VERSION = '0.4.0'
 
 /**
  * How long a burst of relayed calls is coalesced before the usage snapshot is written.
@@ -126,6 +130,9 @@ const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
  *   autoRepairReasoning: boolean, defaultPreset: string|null,
  *   sessionPresets: Record<string, string>, sessionPresetStamp: Record<string, number>,
+ *   precisionFloor: { floor: string, includeUnknown: boolean, allow: string[]|null },
+ *   sessionPrecisions: Record<string, { floor: string, includeUnknown: boolean }>,
+ *   sessionPrecisionStamp: Record<string, number>,
  *   usageWidget: { enabled: boolean },
  * }}
  */
@@ -135,6 +142,7 @@ export function normalizeConfig(raw) {
     ? config.upstream.trim().replace(/\/+$/, '')
     : DEFAULT_UPSTREAM
   const sessionPresets = normalizeSessionPresets(config.sessionPresets)
+  const sessionPrecisions = normalizeSessionPrecisions(config.sessionPrecisions)
   return {
     enabled: config.enabled !== false,
     host: typeof config.host === 'string' && config.host.trim() ? config.host.trim() : '127.0.0.1',
@@ -161,6 +169,12 @@ export function normalizeConfig(raw) {
     defaultPreset: normalizePresetId(config.defaultPreset ?? config.defaultTier),
     sessionPresets: sessionPresets.presets,
     sessionPresetStamp: sessionPresets.stamp,
+    // The precision floor every unchosen Session inherits. Absent means `any`, which
+    // sends nothing at all — a profile that predates this feature reads exactly as it
+    // did before, which is the whole compatibility promise.
+    precisionFloor: normalizePrecision(config.precisionFloor),
+    sessionPrecisions: sessionPrecisions.precisions,
+    sessionPrecisionStamp: sessionPrecisions.stamp,
     // Whether the sidebar card is drawn. The flag hides the card, never the numbers:
     // the settings page shows the same spend whether or not the card is on.
     usageWidget: { enabled: normalizeUsageWidget(config.usageWidget) },
@@ -241,6 +255,56 @@ export function normalizeSessionPresets(raw) {
     stamp[id] = at
   }
   return { presets, stamp }
+}
+
+/**
+ * How many Sessions keep a chosen precision before the oldest choices are dropped.
+ * Same bound as the preset table: both are runtime state keyed by Session id.
+ */
+export const SESSION_PRECISION_LIMIT = 200
+
+/**
+ * Normalise the per-Session precision table. Entries are `{ floor, includeUnknown, at }`
+ * objects written by the control API; a bare floor string is accepted too so a
+ * hand-edited config still works. Oldest entries are dropped past
+ * {@link SESSION_PRECISION_LIMIT}, exactly like the preset table, because a long-lived
+ * Host would otherwise grow a row for every Session it ever ran.
+ *
+ * A floor this build does not know is *dropped* rather than normalised to `any`: a typo
+ * must not silently turn a strict floor off, and an absent row simply means the Session
+ * inherits the profile default. `any` is a real choice and is kept — it is how a Session
+ * opts out of a stricter default.
+ *
+ * @param {unknown} raw
+ * @returns {{
+ *   precisions: Record<string, { floor: string, includeUnknown: boolean }>,
+ *   stamp: Record<string, number>,
+ * }}
+ */
+export function normalizeSessionPrecisions(raw) {
+  if (!isPlainObject(raw)) return { precisions: {}, stamp: {} }
+  /** @type {Array<[string, { floor: string, includeUnknown: boolean }, number]>} */
+  const kept = []
+  for (const [rawId, value] of Object.entries(raw)) {
+    const id = typeof rawId === 'string' ? rawId.trim() : ''
+    if (!id || id.length > 128) continue
+    const object = isPlainObject(value) ? value : { floor: value }
+    const floor = typeof object.floor === 'string' ? object.floor.trim().toLowerCase() : ''
+    if (!PRECISION_IDS.includes(floor)) continue
+    const precision = normalizePrecision(object)
+    const at = Number.isFinite(object.at) ? Number(object.at) : 0
+    kept.push([id, { floor: precision.floor, includeUnknown: precision.includeUnknown }, at])
+  }
+  kept.sort((a, b) => b[2] - a[2])
+  /** @type {Record<string, { floor: string, includeUnknown: boolean }>} */
+  const precisions = {}
+  /** @type {Record<string, number>} */
+  const stamp = {}
+  for (const [id, precision, at] of kept.slice(0, SESSION_PRECISION_LIMIT)) {
+    precisions[id] = precision
+    stamp[id] = at
+  }
+  return { precisions, stamp }
 }
 
 /**
@@ -985,12 +1049,27 @@ export function apply(ctx, rawConfig) {
    * There is no "no answer" case: the pass-through preset is an answer, and it is what
    * keeps a tier pinned by the client from surviving the picker.
    *
+   * The precision floor rides the same answer, because it is decided from the same two
+   * facts — which Session, which model — and the relay applies both in one pass. The
+   * floor id is always reported; `quantizations` is the include list that may actually
+   * be sent, which is `null` until admission control has confirmed the model still has
+   * an endpoint inside it.
+   *
    * @param {unknown} session
+   * @param {unknown} model  the model the request named, if it named one
    */
-  function recipeForSession(session) {
+  function recipeForSession(session, model) {
     const preset = presetForSession(session)
     const wire = PRESET_WIRE[preset] ?? PRESET_WIRE.none
-    return { preset, serviceTier: wire.serviceTier, sort: wire.sort, variant: wire.variant }
+    const precision = precisionForSession(session)
+    return {
+      preset,
+      serviceTier: wire.serviceTier,
+      sort: wire.sort,
+      variant: wire.variant,
+      precision: precision.floor,
+      quantizations: admittedQuantizations(precision, model),
+    }
   }
 
   /**
@@ -1022,6 +1101,233 @@ export function apply(ctx, rawConfig) {
         sessionPresetStamp.delete(key)
       }
     }
+  }
+
+  /**
+   * The precision floor each Session chose, mirroring the preset table above: memory
+   * only, because it is a runtime choice like `reasoningEffort`, and a config write per
+   * switch would reload this plugin mid-conversation.
+   *
+   * @type {Map<string, { floor: string, includeUnknown: boolean }>}
+   */
+  const sessionPrecisions = new Map(Object.entries(config.sessionPrecisions ?? {}))
+
+  /** When each choice was made, for bounded eviction. @type {Map<string, number>} */
+  const sessionPrecisionStamp = new Map(Object.entries(config.sessionPrecisionStamp ?? {}))
+
+  /** The floor a Session runs on when it has chosen nothing. */
+  function defaultPrecision() {
+    return normalizePrecision(config.precisionFloor)
+  }
+
+  /**
+   * The precision one Session runs on: its own choice, else the configured default.
+   * An unknown/blank Session gets the default — a proxy hop with no Session is still
+   * the correct answer, never an error.
+   *
+   * @param {unknown} session
+   * @returns {{ floor: string, includeUnknown: boolean, allow: string[] | null }}
+   */
+  function precisionForSession(session) {
+    const key = typeof session === 'string' ? session.trim() : ''
+    if (key !== '') {
+      const chosen = sessionPrecisions.get(key)
+      if (chosen !== undefined) return normalizePrecision(chosen)
+    }
+    return defaultPrecision()
+  }
+
+  /**
+   * Record one Session's floor — or clear it, which hands that Session back to the
+   * configured default. `null` is a clear, not a floor: `any` is how a Session says
+   * "no floor for me", and it must stay distinguishable from "no choice".
+   *
+   * @param {string} session
+   * @param {{ floor: string, includeUnknown: boolean } | null} precision
+   */
+  function writeSessionPrecision(session, precision) {
+    if (precision === null) {
+      sessionPrecisions.delete(session)
+      sessionPrecisionStamp.delete(session)
+      return
+    }
+    sessionPrecisions.set(session, { floor: precision.floor, includeUnknown: precision.includeUnknown })
+    sessionPrecisionStamp.set(session, Date.now())
+    if (sessionPrecisions.size > SESSION_PRECISION_LIMIT) {
+      const ordered = [...sessionPrecisionStamp.entries()].sort((a, b) => a[1] - b[1])
+      for (const [key] of ordered.slice(0, sessionPrecisions.size - SESSION_PRECISION_LIMIT)) {
+        sessionPrecisions.delete(key)
+        sessionPrecisionStamp.delete(key)
+      }
+    }
+  }
+
+  // ── precision admission control ──────────────────────────────────────────
+  // The one rule that makes a floor safe to ship: `provider.quantizations` is a hard
+  // include list, so if no endpoint of the model matches it the request *fails*
+  // upstream instead of falling back. A floor is therefore only attached once this
+  // process has seen that at least one endpoint survives it, which it learns from the
+  // public, keyless endpoint listing (lib/endpoints.js).
+  //
+  // The lookup never runs on the request path. A miss sends the request unfiltered,
+  // counts a bypass and warms the cache for the next one: one unfiltered turn per
+  // model per TTL is cheaper than stalling every turn on a public API, and much
+  // cheaper than a 404. `any` reads nothing and counts nothing, so an untouched
+  // profile behaves exactly as it did before this feature existed.
+
+  /** How long one endpoint listing is trusted before it is read again. */
+  const ENDPOINTS_TTL_MS = 10 * 60 * 1000
+
+  /** How many models keep a listing. Same order of magnitude as the Session tables. */
+  const ENDPOINTS_CACHE_LIMIT = 200
+
+  /** How many models the bypass table reports; a client can name any model id at all. */
+  const FLOOR_BYPASS_MODEL_LIMIT = 40
+
+  /**
+   * What the last endpoint listing said about one model, and when it was read.
+   * An empty `levels` is a real, cached answer ("no listing", or no endpoints) so a
+   * model that cannot be filtered is not re-read on every single request.
+   *
+   * @type {Map<string, { at: number, levels: Set<string> }>}
+   */
+  const endpointLevels = new Map()
+
+  /** In-flight reads, keyed by model: one public GET per model at a time. @type {Map<string, Promise<void>>} */
+  const endpointReads = new Map()
+
+  /** Requests a floor was configured for but no filter was sent, process-wide. */
+  let floorBypassed = 0
+
+  /** The same count per model, bounded. @type {Map<string, number>} */
+  const floorBypassedByModel = new Map()
+
+  /**
+   * Remember one model's precisions, with bounded eviction. The timestamp is what makes
+   * this a TTL cache rather than a permanent claim about a model: OpenRouter adds and
+   * removes endpoints, and a stale listing is the difference between routing correctly
+   * and excluding every provider.
+   *
+   * @param {string} model
+   * @param {Set<string>} levels
+   */
+  function rememberEndpoints(model, levels) {
+    endpointLevels.set(model, { at: Date.now(), levels })
+    if (endpointLevels.size > ENDPOINTS_CACHE_LIMIT) {
+      const ordered = [...endpointLevels.entries()].sort((a, b) => a[1].at - b[1].at)
+      for (const [key] of ordered.slice(0, endpointLevels.size - ENDPOINTS_CACHE_LIMIT)) {
+        endpointLevels.delete(key)
+      }
+    }
+  }
+
+  /**
+   * Count one request whose floor was not sent. The per-model table is bounded because
+   * the model id is client-supplied: without a cap a script could grow this Map without
+   * end, and the counter is only useful for the handful of models a Session actually
+   * runs on.
+   *
+   * @param {string} model
+   */
+  function noteFloorBypassed(model) {
+    floorBypassed += 1
+    if (model === '') return
+    floorBypassedByModel.set(model, (floorBypassedByModel.get(model) ?? 0) + 1)
+    if (floorBypassedByModel.size > FLOOR_BYPASS_MODEL_LIMIT) {
+      const ordered = [...floorBypassedByModel.entries()].sort((a, b) => a[1] - b[1])
+      for (const [key] of ordered.slice(0, floorBypassedByModel.size - FLOOR_BYPASS_MODEL_LIMIT)) {
+        floorBypassedByModel.delete(key)
+      }
+    }
+  }
+
+  /** The `/status` copy of the bypass counter, busiest model first. */
+  function floorBypassedSnapshot() {
+    return {
+      count: floorBypassed,
+      byModel: [...floorBypassedByModel.entries()]
+        .map(([model, count]) => ({ model, count }))
+        .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model)),
+    }
+  }
+
+  /**
+   * Read one model's endpoint listing in the background.
+   *
+   * Single-flight per model: a burst of requests for the same uncached model must not
+   * become a burst of public GETs. A failed read is remembered as "no known levels" for
+   * the same TTL instead of being retried on every request — a model that has no
+   * listing (another provider's namespace, a name OpenRouter does not route) must not
+   * turn every turn into a fetch.
+   *
+   * @param {string} model
+   */
+  function warmEndpoints(model) {
+    if (endpointReads.has(model)) return
+    // Exactly one line per model per TTL: this only runs on a miss (a fresh cache never
+    // gets here), and the single-flight guard above keeps a burst to one read. Without
+    // it a cold bypass is invisible — the body simply goes out unfiltered.
+    log('info', 'precision floor withheld while the endpoint listing is read', { model })
+    const read = fetchEndpoints(config.upstream, model)
+      .then((listing) => {
+        rememberEndpoints(model, listing.levels)
+      })
+      .catch((error) => {
+        rememberEndpoints(model, new Set())
+        log(
+          'warn',
+          'could not read the endpoint listing; the precision floor is bypassed for this model',
+          { model, reason: error instanceof Error ? error.message : String(error) },
+        )
+      })
+      .finally(() => {
+        endpointReads.delete(model)
+      })
+    endpointReads.set(model, read)
+  }
+
+  /**
+   * The include list this request may send, or `null` when it must send none.
+   *
+   * This *is* the safety rule of the feature, so it is worth reading as one sentence:
+   * a floor is sent only if the cached listing says an endpoint survives it. Everything
+   * else — a floor of `any`, an unknown model, an unread or stale listing, a model whose
+   * endpoints all sit below the floor — resolves to `null`, which makes the request go
+   * out exactly as the client wrote it. The function is synchronous on purpose: the
+   * relay awaits whatever the resolver returns, and the request path must never wait on
+   * this fetch.
+   *
+   * @param {{ floor: string, allow: string[] | null }} precision
+   * @param {unknown} model
+   * @returns {string[] | null}
+   */
+  function admittedQuantizations(precision, model) {
+    // `any` is not a floor: no read, no filter, and nothing to report as bypassed.
+    if (precision.allow === null) return null
+    const wanted = typeof model === 'string' ? baseModelId(model).trim() : ''
+    // Without a model there is nothing to admit against; a body with no model is not a
+    // completion request, so it is not counted either.
+    if (wanted === '') return null
+    // Every model this plugin can filter is `<author>/<slug>`. Anything else (a
+    // single-segment id on another provider's upstream) has no OpenRouter listing to
+    // read, so the floor stays bypassed without warming anything.
+    if (!wanted.includes('/')) {
+      noteFloorBypassed(wanted)
+      return null
+    }
+
+    const cached = endpointLevels.get(wanted)
+    if (cached !== undefined && Date.now() - cached.at < ENDPOINTS_TTL_MS) {
+      if (survives(precision.allow, cached.levels)) return precision.allow
+      // Known, and nothing in it survives: sending the list would exclude every
+      // provider, so this request goes out unfiltered on purpose.
+      noteFloorBypassed(wanted)
+      return null
+    }
+
+    noteFloorBypassed(wanted)
+    warmEndpoints(wanted)
+    return null
   }
 
   /**
@@ -1221,6 +1527,49 @@ export function apply(ctx, rawConfig) {
     return targetId(`${slug}-${suffix}`) ?? `target-${suffix}`
   }
 
+  /**
+   * Validate and normalise a floor a caller asked to set.
+   *
+   * A typo is refused instead of being normalised: {@link normalizePrecision} falls
+   * back to `any`, which would turn "no 4-bit" into "no filter" and report success —
+   * the one failure mode this feature must not have. Boot-time config keeps the
+   * tolerant behaviour on purpose, because refusing to start the relay over a stale key
+   * is worse than ignoring it.
+   *
+   * @param {unknown} raw a bare floor id, or `{ floor, includeUnknown }`
+   * @returns {{ floor: string, includeUnknown: boolean, allow: string[] | null }}
+   */
+  function precisionInput(raw) {
+    const object = isPlainObject(raw) ? raw : { floor: raw }
+    const floor = typeof object.floor === 'string' ? object.floor.trim().toLowerCase() : ''
+    if (!PRECISION_IDS.includes(floor)) {
+      throw badRequest(`unknown precision floor ${JSON.stringify(floor)}; use one of ${PRECISION_IDS.join(', ')}`)
+    }
+    if (object.includeUnknown !== undefined && typeof object.includeUnknown !== 'boolean') {
+      throw badRequest('includeUnknown must be a boolean')
+    }
+    return normalizePrecision(
+      typeof object.includeUnknown === 'boolean' ? { floor, includeUnknown: object.includeUnknown } : { floor },
+    )
+  }
+
+  /**
+   * Persist the precision floor every unchosen Session inherits.
+   *
+   * Written into this plugin's own row for the same reason the default preset is: it is
+   * a preference, not a request property, so the next request reads it straight from the
+   * reloaded config instead of from memory that dies with the process.
+   *
+   * @param {{ floor: string, includeUnknown: boolean }} precision
+   */
+  async function writeDefaultPrecision(precision) {
+    const { editor, entry, current } = ownRow()
+    await editor.edit(entry, (currentConfig) => ({
+      ...(isPlainObject(currentConfig) ? currentConfig : current),
+      precisionFloor: { floor: precision.floor, includeUnknown: precision.includeUnknown },
+    }))
+  }
+
   const control = {
     [`${CONTROL_PREFIX}/health`]: controlRoute((req, res) => {
       if (!requireMethod(req, res, 'GET')) return
@@ -1253,6 +1602,14 @@ export function apply(ctx, rawConfig) {
         // The flag the sidebar card reads. It is part of /status rather than a separate
         // round trip because the card already polls this endpoint.
         usageWidget: config.usageWidget,
+        // What the composer chip and the settings page read for the precision floor:
+        // the default every unchosen Session inherits, and whether any request went out
+        // with a configured floor withheld. A floor that is never honoured must be
+        // visible somewhere, or it looks like it works.
+        precision: {
+          default: defaultPrecision(),
+          floorBypassed: floorBypassedSnapshot(),
+        },
         metrics: await usageSnapshot(),
       })
     }),
@@ -1382,6 +1739,76 @@ export function apply(ctx, rawConfig) {
       await outsideHmrTransaction(ctx, () => writeDefaultPreset(preset))
       log('info', 'chose the default service tier preset', { preset })
       sendJson(res, 200, { ok: true, default: preset, presets: PRESET_IDS })
+    }),
+
+    // The floor an unchosen Session inherits. A preference, so it is the one precision
+    // setting that writes the profile row — the same path `/tier/default` takes.
+    [`${CONTROL_PREFIX}/precision/default`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const precision = body.precision === undefined || body.precision === null
+        ? normalizePrecision('any')
+        : precisionInput(body.precision)
+      await outsideHmrTransaction(ctx, () => writeDefaultPrecision(precision))
+      log('info', 'chose the default precision floor', { precision: precisionLabel(precision.floor) })
+      sendJson(res, 200, { ok: true, default: precision, floors: PRECISION_IDS })
+    }),
+
+    /**
+     * The precision floor one Session runs on.
+     *
+     * A sibling of `/tier` rather than a field of it: a preset is an outcome (a tier, a
+     * comparator, a slug) while a floor constrains which endpoints that outcome may pick
+     * from, so the chip sets them independently and either one alone is a meaningful
+     * request. `GET ?session=<id>` reports the floor in force — `inherited` says whether
+     * it came from this Session or the profile — and `POST { session, precision }`
+     * chooses it, with an absent or `null` precision handing the Session back to the
+     * default. Memory only, like `/tier`: a switch must not reload the plugin
+     * mid-conversation.
+     */
+    [`${CONTROL_PREFIX}/precision`]: controlRoute(async (req, res) => {
+      const answer = (session) => {
+        const chosen = sessionPrecisions.get(session)
+        return {
+          ok: true,
+          session,
+          // `allow` is the materialised wire list, null for `any`: "sends nothing" is a
+          // value the page renders, not a missing field.
+          precision: precisionForSession(session),
+          inherited: chosen === undefined,
+          source: chosen === undefined ? 'default' : 'session',
+          chosen: chosen ?? null,
+          default: defaultPrecision(),
+          floors: PRECISION_IDS,
+        }
+      }
+      if (req.method === 'GET') {
+        const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
+        sendJson(res, 200, answer((query.get('session') ?? '').trim()))
+        return
+      }
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const session = typeof body.session === 'string' ? body.session.trim() : ''
+      if (!session) {
+        sendJson(res, 400, { error: { message: 'session is required: the Session whose precision floor is being set' } })
+        return
+      }
+      if (session.length > 128) {
+        sendJson(res, 400, { error: { message: 'session must be at most 128 characters' } })
+        return
+      }
+      // Absent/null clears the choice; a bare floor id is accepted too, because a curl
+      // is not the picker. No config write and no transaction escape: memory only.
+      const precision = body.precision === undefined || body.precision === null
+        ? null
+        : precisionInput(body.precision)
+      writeSessionPrecision(session, precision)
+      log('info', 'chose a precision floor for session', {
+        session,
+        precision: precision === null ? null : precisionLabel(precision.floor),
+      })
+      sendJson(res, 200, answer(session))
     }),
 
     // The sidebar card is a preference, not traffic state: one config key, and the
@@ -1760,9 +2187,10 @@ export function apply(ctx, rawConfig) {
     log,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
     resolveTarget,
-    // The tier a bare mount should use for the Session carrying the request. The
-    // relay only asks; every choice lives here, in this plugin's own config.
-    resolveSessionRecipe: (session) => recipeForSession(session),
+    // The tier and precision a bare mount should apply for the Session carrying the
+    // request. The relay only asks; every choice, and the admission decision behind the
+    // precision filter, lives here in the plugin.
+    resolveSessionRecipe: (session, model) => recipeForSession(session, model),
     onRecord: (entry) => {
       metrics.record(entry)
       scheduleUsageWrite()

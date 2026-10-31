@@ -96,3 +96,12 @@
         # the same numbers, and the relay keeps recording them either way.
         usageWidget:
           enabled: true
+
+        # The precision floor every Session inherits until it picks its own in the
+        # composer chip. `any` sends nothing at all, so this default is byte-identical
+        # to a profile that predates the feature. The other three name a pool
+        # constraint: no-four-bit, eight-bit-up or full-width — see docs/PRECISION.md.
+        # The relay only attaches the filter after confirming that at least one
+        # endpoint of that model survives it, because an empty pool is a hard failure
+        # upstream, not a silent fallback.
+        precisionFloor: any
