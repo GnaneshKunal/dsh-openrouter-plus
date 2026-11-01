@@ -43,9 +43,11 @@ const {
   normalizeUsageStatus,
   pinnedMounts,
   presetFromLegacyTier,
-  /* The chip's second facet: the readers behind it, and the two dictionaries a new key
+  /* The chip's three facets: the readers behind them, and the two dictionaries a new key
      has to land in together. */
+  baseModelId,
   chipBadgeLabel,
+  chipBadgeParts,
   chipFacetRows,
   chipPaneAfterKey,
   chipPaneRoot,
@@ -53,11 +55,19 @@ const {
   chipRootCells,
   dictionaries,
   normalizePrecisionState,
+  normalizeProviderList,
+  normalizeProviderPin,
+  normalizeProviderState,
+  pinnedProviderLabel,
   precisionFloorOf,
   precisionFloors,
   precisionPostBody,
   precisionShortLabel,
   precisionWireLevels,
+  providerHint,
+  providerPinForModel,
+  providerPrecisions,
+  providerTiers,
 } = module.__test
 
 /**
@@ -549,7 +559,10 @@ test('both dictionaries carry every key, and the Chinese copy is Chinese', () =>
   const keys = Object.keys(dictionaries.en).sort()
   assert.deepEqual(Object.keys(dictionaries.zh).sort(), keys, 'same key set in both languages')
 
-  const added = keys.filter((key) => key.startsWith('precision.') || key.startsWith('chip.'))
+  const added = keys.filter(
+    (key) =>
+      key.startsWith('precision.') || key.startsWith('chip.') || key.startsWith('provider.'),
+  )
   assert.ok(added.length >= 15, 'the chip keys are registered, not inlined')
   for (const key of added) {
     if (key === 'precision.short.full-width') continue
@@ -559,6 +572,14 @@ test('both dictionaries carry every key, and the Chinese copy is Chinese', () =>
   assert.equal(dictionaries.en['precision.short.full-width'], 'FP16+')
   assert.equal(dictionaries.zh['precision.short.full-width'], 'FP16+')
 
+  /* The provider facet's frozen copy. The cell says `Auto`, the row it opens names what
+     that means, and the badge uses the same two halves as the cell. */
+  assert.equal(dictionaries.en['chip.facet.provider'], 'Provider')
+  assert.equal(dictionaries.zh['chip.facet.provider'], '\u63d0\u4f9b\u5546')
+  assert.equal(dictionaries.en['provider.auto'], 'Auto')
+  assert.equal(dictionaries.zh['provider.auto'], '\u81ea\u52a8')
+  assert.equal(dictionaries.en['provider.autoRow'], 'Auto (OpenRouter routing)')
+
   /* The frozen short labels, exactly as the collapsed badge shows them. */
   assert.equal(dictionaries.en['precision.short.no-four-bit'], '\u22656-bit')
   assert.equal(dictionaries.en['precision.short.eight-bit-up'], '\u22658-bit')
@@ -567,24 +588,42 @@ test('both dictionaries carry every key, and the Chinese copy is Chinese', () =>
   assert.equal(dictionaries.en['precision.unknownAdmitted'], 'Unknown precision is admitted')
 })
 
-test('the root pane is two cells stating what the session runs on', () => {
+/** The endpoint row a pinned Session carries, as `/provider` reports it. */
+const PIN = {
+  tag: 'relace/fp4',
+  name: 'Relace',
+  tier: 'standard',
+  precision: 'fp4',
+}
+
+test('the root pane is three cells, and a pin owns the pair it overrides', () => {
   /* The menu opens on the cells, never on a list. Each cell carries the value the trigger
-     badges — the preset label, and the floor's short label — plus the drill-in target. */
+     badges — the preset label, the floor's short label, the endpoint — plus the drill-in
+     target. A pinned endpoint decides its own tier and precision, so those two cells state
+     the endpoint's values and are disabled; the Provider cell stays open, because it is the
+     one that can undo the pin. */
   const view = (overrides) => ({
     presetLabel: (id) => en('preset.' + id),
     activePreset: 'cheapest',
     switchingPreset: false,
     floor: 'any',
+    provider: null,
     ...(overrides || {}),
   })
 
   const cells = chipRootCells(en, view())
-  assert.equal(cells.length, 2, 'exactly two cells: Tier then Precision')
-  assert.deepEqual(cells.map((cell) => cell.facet), ['tier', 'precision'])
-  assert.deepEqual(cells.map((cell) => cell.label), ['Tier', 'Precision'])
-  assert.deepEqual(cells.map((cell) => cell.value), ['Cheapest', 'Any'])
-  assert.deepEqual(cells.map((cell) => cell.ariaLabel), ['Tier: Cheapest', 'Precision: Any'])
-  /* The cells drill into exactly the two drilled panes, and root is the pane they sit on. */
+  assert.equal(cells.length, 3, 'Tier, Precision then Provider')
+  assert.deepEqual(cells.map((cell) => cell.facet), ['tier', 'precision', 'provider'])
+  assert.deepEqual(cells.map((cell) => cell.label), ['Tier', 'Precision', 'Provider'])
+  assert.deepEqual(cells.map((cell) => cell.value), ['Cheapest', 'Any', 'Auto'])
+  assert.deepEqual(cells.map((cell) => cell.ariaLabel), [
+    'Tier: Cheapest',
+    'Precision: Any',
+    'Provider: Auto',
+  ])
+  /* Nothing pinned: nothing is disabled, so the released chip still offers both lists. */
+  assert.deepEqual(cells.map((cell) => cell.disabled === true), [false, false, false])
+  /* The cells drill into exactly the drilled panes, and root is the pane they sit on. */
   assert.deepEqual(cells.map((cell) => cell.facet), chipPanes.filter((pane) => pane !== chipPaneRoot))
   assert.equal(chipPaneRoot, 'root')
   assert.equal(chipPanes[0], chipPaneRoot, 'root is the pane the popover opens on')
@@ -601,11 +640,340 @@ test('the root pane is two cells stating what the session runs on', () => {
     chipRootCells(en, view({ switchingPreset: true }))[0].value,
     'Switching preset\u2026',
   )
+
+  /* Pinned: the endpoint's own tier and precision stand in, both cells are disabled, and
+     the Provider cell is the one control left. */
+  const pinned = chipRootCells(en, view({ provider: PIN }))
+  assert.deepEqual(pinned.map((cell) => cell.value), ['Standard', 'fp4', 'Relace \u00b7 fp4'])
+  assert.deepEqual(pinned.map((cell) => cell.disabled === true), [true, true, false])
+  /* A pin whose row declared nothing still states something, rather than an empty cell. */
+  const bare = chipRootCells(en, view({ provider: { tag: 'x/y' } }))
+  assert.deepEqual(bare.map((cell) => cell.value), ['\u2014', 'unknown', 'x/y \u00b7 unknown'])
+  assert.deepEqual(bare.map((cell) => cell.disabled === true), [true, true, false])
+  /* A body without a tag is not a pin: the released cells come back. */
+  assert.deepEqual(
+    chipRootCells(en, view({ provider: { name: 'Relace' } })).map((cell) => cell.value),
+    ['Cheapest', 'Any', 'Auto'],
+  )
+
   /* The Chinese cell names itself in Chinese. */
   assert.equal(
     chipRootCells(zh, view({ floor: 'eight-bit-up' }))[1].ariaLabel,
     '\u7cbe\u5ea6\uff08\u5f53\u524d \u22658\u4f4d\uff09',
   )
+  assert.equal(chipRootCells(zh, view())[2].label, '\u63d0\u4f9b\u5546')
+  assert.equal(chipRootCells(zh, view({ provider: PIN }))[2].value, 'Relace \u00b7 fp4')
+})
+
+test('a pinned endpoint badges as the endpoint, and the released badge is untouched', () => {
+  /* One trigger, so the badge is the only place the three choices meet. Pinned, the
+     endpoint replaces both halves — it outranks the tier and the floor — and keeps a
+     separator the released badge does not have. Unpinned, the composition is byte-for-byte
+     the string the chip shipped with, which is what keeps an unconfigured chip identical. */
+  const preset = 'Cheapest'
+  assert.deepEqual(chipBadgeParts(en, preset, { floor: 'eight-bit-up' }), {
+    label: 'Cheapest',
+    precision: '\u22658-bit',
+  })
+  assert.deepEqual(chipBadgeParts(en, preset, { floor: 'any' }), {
+    label: 'Cheapest',
+    precision: '',
+  })
+  assert.equal(chipBadgeLabel(en, preset, { floor: 'any' }), 'Cheapest', 'no separator crept in')
+
+  assert.deepEqual(chipBadgeParts(en, preset, { floor: 'eight-bit-up' }, PIN), {
+    label: 'Relace',
+    precision: '\u00b7 fp4',
+  })
+  assert.equal(chipBadgeLabel(en, preset, { floor: 'eight-bit-up' }, PIN), 'Relace \u00b7 fp4')
+  /* A pin stands even when the Host never reported a preset or a floor. */
+  assert.equal(chipBadgeLabel(en, preset, null, PIN), 'Relace \u00b7 fp4')
+  /* The precision is a shorthand, so it is never translated; `unknown` is a word. */
+  assert.equal(chipBadgeLabel(en, preset, null, { tag: 'x/y', precision: 'bf16' }), 'x/y \u00b7 bf16')
+  assert.equal(chipBadgeLabel(en, preset, null, { tag: 'x/y' }), 'x/y \u00b7 unknown')
+  assert.equal(chipBadgeLabel(zh, preset, null, { tag: 'x/y' }), 'x/y \u00b7 \u672a\u77e5')
+  /* Not a tag, not a pin: the ordinary badge is what renders. */
+  assert.equal(chipBadgeLabel(en, preset, { floor: 'any' }, { name: 'Relace' }), preset)
+  assert.equal(chipBadgeLabel(en, preset, { floor: 'any' }, null), preset)
+
+  /* The Provider cell states exactly what the pinned badge states. */
+  assert.equal(pinnedProviderLabel(en, PIN), 'Relace \u00b7 fp4')
+  assert.equal(pinnedProviderLabel(en, null), 'Auto')
+  assert.equal(pinnedProviderLabel(en, { name: 'Relace' }), 'Auto', 'a body without a tag is no pin')
+})
+
+/** A `/providers` body with everything the pane has to place: groups, duplicates, junk. */
+const PROVIDER_PAYLOAD = {
+  ok: true,
+  model: 'deepseek/deepseek-v4',
+  fetchedAt: 1_700_000_000_000,
+  cached: true,
+  providers: [
+    {
+      tag: 'relace/fp4',
+      name: 'Relace',
+      tier: 'standard',
+      precision: 'fp4',
+      inputPrice: 0.035,
+      outputPrice: 0.5,
+      uptime1d: 100,
+      status: 0,
+    },
+    {
+      tag: 'deepinfra/bf16',
+      name: 'DeepInfra',
+      tier: 'standard',
+      precision: 'bf16',
+      inputPrice: 0.27,
+      outputPrice: 1.1,
+      uptime1d: 99.5,
+      status: 0,
+    },
+    {
+      tag: 'slowco/fp8',
+      name: 'Slowco',
+      tier: 'flex',
+      precision: 'fp8',
+      inputPrice: 0.1,
+      outputPrice: 0.2,
+      uptime1d: null,
+      /* The Host read a zeroed uptime and said so. `status` rides along and is never
+         promoted to availability: a negative health code is common on endpoints that
+         serve most of a model's traffic. */
+      available: false,
+      status: 3,
+    },
+    { tag: 'loose/mxfp4', name: 'Loose', tier: 'priority', precision: 'mxfp4', status: 0 },
+    { tag: 'stray/fp16', name: 'Stray', tier: 'standard', precision: 'fp16' },
+    { tag: '   ', name: 'No tag' },
+  ],
+  groups: [
+    { id: 'standard', tags: ['relace/fp4', 'deepinfra/bf16', 'not-listed/fp8'] },
+    { id: 'flex', tags: ['deepinfra/bf16'] },
+    { id: 'unavailable', tags: ['slowco/fp8'] },
+    { id: 'free', tags: ['loose/mxfp4'] },
+  ],
+}
+
+test('the endpoint pane lists the clear row, then every group the host ordered', () => {
+  /* One flat list: a heading row per group the Host declared, the endpoints under it, and
+     anything the Host did not place appended at the end. Nothing is dropped — a hidden
+     endpoint is a pin nobody can clear — and an endpoint outside standard routing is drawn
+     quiet rather than withheld. */
+  const list = normalizeProviderList(PROVIDER_PAYLOAD)
+  const view = (overrides) => ({ providerList: list, pinnedTag: '', ...(overrides || {}) })
+
+  const rows = chipFacetRows(en, 'provider', view({ pinnedTag: 'relace/fp4' }))
+  assert.deepEqual(
+    rows.map((row) => (row.header === true ? '#' + row.label : row.label)),
+    [
+      'Auto (OpenRouter routing)',
+      '#Standard',
+      'Relace',
+      'DeepInfra',
+      '#Unavailable',
+      'Slowco',
+      'Loose',
+      'Stray',
+    ],
+    'the clear row first, then the Host order, then whatever no group claimed',
+  )
+  /* The headings are labels, not options: they carry no value and cannot be picked. */
+  assert.deepEqual(
+    rows.filter((row) => row.header === true).map((row) => row.value),
+    ['', ''],
+  )
+  assert.equal(rows[0].value, '', 'the clear row posts the empty tag, as the API expects')
+  /* Only the pinned tag is ticked, and the clear row is not. */
+  assert.deepEqual(rows.filter((row) => row.selected === true).map((row) => row.value), [
+    'relace/fp4',
+  ])
+
+  /* A row names its trade: precision, price per million and the day's uptime. A field the
+     Host did not report is left out rather than printed as a dash. */
+  const relace = rows.find((row) => row.value === 'relace/fp4')
+  assert.equal(relace.hint, 'fp4 \u00b7 $0.035/$0.5 per M \u00b7 100%')
+  assert.equal(rows.find((row) => row.value === 'slowco/fp8').hint, 'fp8 \u00b7 $0.1/$0.2 per M')
+  assert.equal(rows.find((row) => row.value === 'loose/mxfp4').hint, 'mxfp4')
+  assert.equal(relace.unavailable, false)
+  assert.equal(rows.find((row) => row.value === 'slowco/fp8').unavailable, true, 'the Host reported it as not answering')
+  assert.equal(rows.find((row) => row.value === 'stray/fp16').unavailable, false)
+
+  /* No pin: the clear row is the ticked one. */
+  assert.deepEqual(
+    chipFacetRows(en, 'provider', view()).filter((row) => row.selected === true).map((row) => row.value),
+    [''],
+  )
+
+  /* A Host that 404s the route holds exactly one row — the one that clears a pin — and
+     still renders: the menu never depends on a route that may not exist. */
+  const empty = chipFacetRows(en, 'provider', { providerList: normalizeProviderList(null) })
+  assert.equal(empty.length, 1)
+  assert.equal(empty[0].label, 'Auto (OpenRouter routing)')
+  assert.equal(empty[0].selected, true)
+  /* A view without any list at all is the same pane, not a crash. */
+  assert.equal(chipFacetRows(en, 'provider', {}).length, 1)
+  /* A pin the Host no longer lists leaves nothing ticked, and the clear row is still there
+     to undo it — the chip never invents an endpoint row it cannot verify. */
+  const stale = chipFacetRows(en, 'provider', {
+    providerList: normalizeProviderList(null),
+    pinnedTag: 'relace/fp4',
+  })
+  assert.deepEqual(stale.filter((row) => row.selected === true), [])
+  assert.equal(stale[0].label, 'Auto (OpenRouter routing)')
+
+  /* The headings are translated: the tier words are the preset table's, and the last one
+     is the facet's own. */
+  const zhRows = chipFacetRows(zh, 'provider', view())
+  assert.deepEqual(
+    zhRows.filter((row) => row.header === true).map((row) => row.label),
+    ['\u6807\u51c6', '\u4e0d\u53ef\u7528'],
+  )
+  assert.equal(zhRows[0].label, '\u81ea\u52a8\uff08OpenRouter \u8def\u7531\uff09')
+})
+
+test('the endpoint readers absorb an older host instead of throwing', () => {
+  /* Every refusal — a 404 from a Host that predates the route, the route's own 502, a body
+     that is not this API — has to read as "nothing listed", because the Provider cell then
+     says `Auto` and the pane keeps its clear row. */
+  const empty = {
+    model: '',
+    fetchedAt: null,
+    cached: false,
+    providers: [],
+    groups: [],
+  }
+  for (const junk of [
+    null,
+    undefined,
+    'x',
+    42,
+    [],
+    {},
+    { ok: false },
+    { error: 'not found' },
+    { providers: 'nope', groups: 'nope' },
+    { providers: [null, 'x', { tag: '   ' }] },
+  ]) {
+    assert.deepEqual(normalizeProviderList(junk), empty, 'a non-answer is an empty list')
+  }
+
+  const list = normalizeProviderList(PROVIDER_PAYLOAD)
+  assert.equal(list.model, 'deepseek/deepseek-v4')
+  assert.equal(list.providers.length, 5, 'a row that cannot name a tag is not a row')
+  assert.deepEqual(list.providers.map((row) => row.tag), [
+    'relace/fp4',
+    'deepinfra/bf16',
+    'slowco/fp8',
+    'loose/mxfp4',
+    'stray/fp16',
+  ])
+  /* Group order is the Host's; a tag listed twice stays under its first group, a tag the
+     list does not carry is dropped, and a tag no group claimed gets a group of its own so
+     it renders instead of vanishing. */
+  assert.deepEqual(list.groups, [
+    { id: 'standard', tags: ['relace/fp4', 'deepinfra/bf16'] },
+    { id: 'unavailable', tags: ['slowco/fp8'] },
+    { id: 'free', tags: ['loose/mxfp4'] },
+    { id: '', tags: ['stray/fp16'] },
+  ])
+  assert.equal(list.fetchedAt, 1_700_000_000_000)
+  assert.equal(list.cached, true)
+
+  /* Availability is the Host's answer, derived from uptime. `status` is never promoted to
+     it — the real DeepSeek V4.1 Flash listing reports -5 on the endpoint carrying a third
+     of that model's tokens — and an absent `available` is treated as alive rather than dead. */
+  assert.equal(list.providers[0].available, true)
+  assert.equal(list.providers[2].available, false)
+  assert.equal(normalizeProviderList({ providers: [{ tag: 'a/b', available: false }] }).providers[0].available, false)
+  assert.equal(normalizeProviderList({ providers: [{ tag: 'a/b', status: -5 }] }).providers[0].available, true, 'a health code is not a verdict')
+  assert.equal(normalizeProviderList({ providers: [{ tag: 'a/b', status: 0 }] }).providers[0].available, true)
+  /* An unrecognised precision is its own value, not the loss of one. */
+  assert.equal(normalizeProviderList({ providers: [{ tag: 'a/b', precision: 'fp17' }] }).providers[0].precision, 'unknown')
+  assert.equal(normalizeProviderList({ providers: [{ tag: 'a/b', name: '  ' }] }).providers[0].name, 'a/b')
+
+  /* `/provider`: a Session pin, a clear, and a body that is not this API. */
+  for (const junk of [null, undefined, 'x', 42, [], {}, { ok: false }]) {
+    assert.equal(normalizeProviderState(junk), null)
+  }
+  assert.equal(
+    normalizeProviderState(PROVIDER_PAYLOAD),
+    null,
+    'a `/providers` body is not a pin answer',
+  )
+  assert.deepEqual(
+    normalizeProviderState({
+      ok: true,
+      session: 'sess-1',
+      provider: { tag: 'relace/fp4', name: 'Relace', tier: 'standard', precision: 'fp4' },
+      chosen: 'relace/fp4',
+      model: 'deepseek/deepseek-v4',
+      available: true,
+    }),
+    {
+      provider: { tag: 'relace/fp4', name: 'Relace', tier: 'standard', precision: 'fp4' },
+      chosen: 'relace/fp4',
+      model: 'deepseek/deepseek-v4',
+      available: true,
+    },
+  )
+  assert.deepEqual(normalizeProviderState({ ok: true, provider: null, chosen: null, model: null }), {
+    provider: null,
+    chosen: null,
+    model: null,
+    available: true,
+  })
+  assert.equal(normalizeProviderState({ ok: true, provider: null }).available, true)
+  assert.equal(
+    normalizeProviderState({ ok: true, provider: null, available: false }).available,
+    false,
+  )
+  assert.equal(normalizeProviderPin({ name: 'Relace' }), null, 'a pin is its tag')
+  assert.equal(normalizeProviderPin('relace/fp4'), null)
+})
+
+test('the endpoint list is asked for per model, not per preset variant', () => {
+  /* `:floor` and `:nitro` are levers the relay applies itself: every variant of one model
+     lands on the same endpoints, so a variant inside the id would mint one fetch and one
+     cache row per preset the Session ever tried. Any other suffix is part of the id. */
+  assert.equal(baseModelId('deepseek/deepseek-v4:floor'), 'deepseek/deepseek-v4')
+  assert.equal(baseModelId('deepseek/deepseek-v4:nitro'), 'deepseek/deepseek-v4')
+  assert.equal(baseModelId(' deepseek/deepseek-v4:floor '), 'deepseek/deepseek-v4')
+  assert.equal(baseModelId('deepseek/deepseek-v4'), 'deepseek/deepseek-v4')
+  assert.equal(baseModelId('openai/gpt-5:online'), 'openai/gpt-5:online', 'only price variants are stripped')
+  assert.equal(baseModelId(':floor'), ':floor', 'a bare suffix is not a variant of a model')
+  assert.equal(baseModelId(null), '')
+  assert.equal(baseModelId(undefined), '')
+
+  /* The vocabularies the cells and the rows are read against. */
+  assert.deepEqual([...providerTiers], ['standard', 'flex', 'priority'])
+  assert.deepEqual([...providerPrecisions], ['fp4', 'fp8', 'mxfp4', 'bf16', 'unknown'])
+  /* A row's hint never invents a fact: what is missing is missing. */
+  assert.equal(providerHint(en, { precision: 'unknown' }), 'unknown')
+  assert.equal(providerHint(en, null), '')
+
+  /* A pin belongs to the model it was pinned for: the Host reports the id, so a pin left
+     over from another model is not this model's endpoint. A missing id is trusted. */
+  const pinned = { ok: true, provider: PIN, chosen: PIN.tag, model: 'deepseek/deepseek-v4' }
+  assert.deepEqual(providerPinForModel(pinned, 'deepseek/deepseek-v4'), PIN)
+  assert.deepEqual(
+    providerPinForModel(pinned, 'deepseek/deepseek-v4:floor'),
+    PIN,
+    'a variant is the same model: the id is compared without its suffix',
+  )
+  assert.deepEqual(
+    providerPinForModel({ ...pinned, model: 'deepseek/deepseek-v4:floor' }, 'deepseek/deepseek-v4'),
+    PIN,
+  )
+  assert.equal(
+    providerPinForModel(pinned, 'deepseek/deepseek-v5'),
+    null,
+    "another model's pin is not this chip's endpoint",
+  )
+  assert.deepEqual(providerPinForModel({ ...pinned, model: null }, 'deepseek/deepseek-v4'), PIN)
+  assert.equal(providerPinForModel({ ok: true, provider: null }, 'deepseek/deepseek-v4'), null)
+  assert.equal(providerPinForModel(null, 'deepseek/deepseek-v4'), null)
+  assert.equal(providerPinForModel({ provider: { name: 'Relace' } }, 'deepseek/deepseek-v4'), null)
 })
 
 test('Escape and Shift+Tab leave a drilled pane before they close the popover', () => {
@@ -615,10 +983,13 @@ test('Escape and Shift+Tab leave a drilled pane before they close the popover', 
   assert.equal(chipPaneAfterKey('precision', 'Escape', false), chipPaneRoot)
   assert.equal(chipPaneAfterKey('tier', 'Tab', true), chipPaneRoot, 'Shift+Tab backs out too')
   assert.equal(chipPaneAfterKey('precision', 'Tab', true), chipPaneRoot)
+  assert.equal(chipPaneAfterKey('provider', 'Escape', false), chipPaneRoot)
+  assert.equal(chipPaneAfterKey('provider', 'Tab', true), chipPaneRoot)
   assert.equal(chipPaneAfterKey(chipPaneRoot, 'Escape', false), null, 'the second press closes')
   assert.equal(chipPaneAfterKey(chipPaneRoot, 'Tab', true), null, 'Shift+Tab closes from root')
   for (const key of ['ArrowDown', 'ArrowUp', 'Enter', ' ', 'Tab', 'a']) {
     assert.equal(chipPaneAfterKey('precision', key, false), 'precision', key + ' stays drilled')
+    assert.equal(chipPaneAfterKey('provider', key, false), 'provider', key + ' stays drilled')
   }
   assert.equal(chipPaneAfterKey(chipPaneRoot, 'Tab', false), chipPaneRoot, 'Tab alone moves on')
 })
@@ -681,6 +1052,26 @@ test('the chip is one trigger over a two-level root-cell menu that drills in', a
   assert.match(chip, /CONTROL_PREFIX \+ '\/precision\?session='/)
   assert.match(chip, /postControl\('\/precision'/)
   assert.match(chip, /postControl\('\/tier'/)
+
+  /* The endpoint facet addresses both of its routes, asks for the base model id, and joins
+     the same one-mutation guard: a pin and a floor can never be written at once. */
+  assert.match(chip, /CONTROL_PREFIX \+ '\/providers\?model='/)
+  assert.match(chip, /CONTROL_PREFIX \+ '\/provider\?session='/)
+  assert.match(chip, /postControl\('\/provider'/)
+  assert.match(chip, /baseModelId\(modelKey\)/)
+  assert.match(
+    chip,
+    /const busy = pendingTier !== null \|\| pendingPrecision !== null \|\| pendingProvider !== null;/,
+  )
+  /* A cell a pin owns launches no list, and the render says so in the same place the
+     keyboard's `:not([disabled])` walk does. */
+  assert.match(chip, /cell !== undefined && cell\.disabled === true/)
+  assert.match(chip, /disabled: cells\[0\]\.disabled/)
+  assert.match(chip, /disabled: cells\[1\]\.disabled/)
+  assert.match(chip, /disabled: cells\[2\]\.disabled/)
+  assert.match(chip, /value: cells\[2\]\.value/, 'the third cell is rendered')
+  /* The endpoint pane's headings are labels the arrow keys must not land on. */
+  assert.match(chip, /role: 'presentation'/)
 
   /* The switch handlers never close the popover; a pick returns to the root cells and
      leaves it open, which is the one deliberate difference from the model picker. */

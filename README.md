@@ -55,6 +55,12 @@ switching never mints a provider, a route or a model list.
 - **One provider row, any preset.** A routed provider keeps its key, protocol and models and gains
   one thing: a composable **preset** that the relay applies to each request. No per-preset provider
   copies, no sibling route per preset, no model list duplicated nine times.
+- **Pin one endpoint, not just a tier.** A fourth thing the chip can set: a specific upstream
+  endpoint (`relace/fp4`, `deepinfra/fp8/priority`) read from the model's live listing. A pin is a
+  *hard* pin — `provider.only` plus `allow_fallbacks: false` — so a request goes to that endpoint or
+  surfaces the upstream error, instead of quietly landing somewhere else. Picking one **disables**
+  the Tier and Precision cells and shows the endpoint's own values, because the endpoint already
+  decided both.
 - **Pinned base URLs** for what a chip cannot cover — `/v1` (no pin), `/default/v1` (Standard),
   `/flex/v1` (Flex), `/priority/v1` (Priority), `/ultrafast/v1` (Ultra). Paste one into an
   OpenAI-compatible provider route and that preset applies to *every* Session on the route,
@@ -90,7 +96,25 @@ switching never mints a provider, a route or a model list.
 
 The relay reports the **billed amount**, not a token count multiplied by a price list. Each response
 carries `usage.cost` (plus `cost_details` for BYOK's upstream charge and server tools), and the relay
-copies it out of a bounded head/tail while forwarding the bytes untouched. That amount already
+copies it out of a bounded head/tail while forwarding the bytes untouched.
+
+When the response does not describe itself, the relay asks OpenRouter. A Responses-API body
+names no provider anywhere — not in the body, not in a header — so for those routes the relay
+reconciles the request against `GET /api/v1/generation?id=<genId>`, using the caller's own
+`Authorization` for that call and storing nothing. The record is eventually consistent — it 404s for
+roughly the first five seconds — so the lookup retries a few times over about eight seconds, after
+the response has already reached the caller. That single lookup fills the Provider
+column and any field the stream left unreported (a cut-short stream, or a final event too large
+for the tail buffer). It only ever fills *missing* fields — a number the stream reported is what
+the caller saw, so it wins. Turn it off with `generationLookup: false`.
+
+Both wire shapes are read, because a route can be configured with either: Chat Completions puts the
+bill at the top level of the final chunk (`prompt_tokens` / `completion_tokens`), while the Responses
+API wraps every event as `{ type, response: { … } }` and spells the same numbers
+`input_tokens` / `output_tokens`. Two facts only ever arrive as **response headers** — `X-Provider-Name`
+and `X-Generation-Id`, which OpenRouter lists in `access-control-expose-headers` — because a Responses
+body names no provider at all; the relay reads the body first and falls back to the headers, which is
+what fills the Provider column and the generation id. That amount already
 reflects *which endpoint served the request* — flex at half price, priority/ultrafast at a premium,
 a `:floor` variant, or a fallback that answered with another model — which is exactly the
 information a price table cannot reconstruct afterwards.
@@ -365,7 +389,7 @@ So the two cheapest presets buy a compressed endpoint *and* switch off the platf
 ordering. That is a legitimate trade; it should just not be a silent one — which is why the precision
 floor exists, and why the settings page says it next to the picker.
 
-### From the composer (the Tier · Precision chip)
+### From the composer (the Tier · Precision · Provider chip)
 
 Once a provider row is routed, a compact chip appears in the composer next to the model selector,
 showing the preset the next request will apply — and, once you have chosen one, a precision floor:
@@ -373,19 +397,29 @@ showing the preset the next request will apply — and, once you have chosen one
 provider: the Host records the choice for this Session in memory, and the relay applies it to the
 request body on the way out.
 
-The chip opens the same two-level menu the composer's own model picker uses for **Model** and
-**Effort**: two rows, each showing its current value and opening its own list when pressed.
+The chip opens the same menu the composer's own model picker uses for **Model** and **Effort**: one
+row per facet, each showing its current value and opening its own list when pressed.
 
 - **Tier** — the presets: `Fastest · any price`, `Cheapest`, `Flex`, `Priority`, … The first entry,
   **Profile default (…)**, stops choosing for this Session and shows which preset it will inherit.
 - **Precision** — `Any`, `No four-bit`, `Eight-bit up`, `Full width`, each naming the wire levels it
   admits. `Any` is the default and sends nothing, so until you pick one the badge reads exactly
   `Cheapest`, the way it always did.
+- **Provider** — `Auto`, or one endpoint from the model's listing: `Relace · fp4`. Each row carries
+  what the endpoint costs and how often it answers. An endpoint whose uptime is reported as zero is
+  drawn quiet rather than hidden, because pinning a struggling endpoint by hand is a legitimate
+  thing to want.
+
+A pin owns the other two. Pick `deepinfra/fp8/priority` and **Tier** changes to `Priority` and
+**Precision** to `fp8` — both `disabled`, neither reachable from the keyboard — because that
+endpoint already is the priority lane at that precision. Offering a lever that contradicted it would
+only produce a request the router has to reject. Clearing the pin (**Auto**) hands the Session back
+to whatever Tier and Precision it had before.
 
 The menu carries labels only; the long explanation of what each entry sends lives on the settings page
 and in [docs/PRECISION.md](docs/PRECISION.md), where it is read once. Escape (or Shift+Tab) backs out
-of a list to the two rows, and again closes the popover. Picking anything returns you to the rows and
-leaves the menu open, so both can be set in one visit without reopening it.
+of a list to the rows, and again closes the popover. Picking anything returns you to the rows and
+leaves the menu open, so all three can be set in one visit without reopening it.
 
 That is why it is per session: two conversations can be on `Flex` and `Priority` at the same time,
 neither of them rewrites the other's provider row, and the reasoning effort you selected survives
@@ -399,6 +433,54 @@ for new sessions** or point a provider at a pinned mount by hand (`/flex/v1`).
 The chip only appears when the Session's current provider is routed through a mount
 (`/t/<targetId>/…`). Elsewhere the Models-page switch is the control: it is the one that moves the
 provider itself.
+
+## Providers: pinning one endpoint
+
+A tier answers *which pool*. A precision answers *which quality*. Neither answers *which company* —
+and for a model served by many endpoints (42 for DeepSeek V4.1 Flash 1017 at the time of writing)
+that is often the question that matters: `relace/fp4` bills $0.035/$0.50 per million,
+`particle-ai` $0.05/$0.50, and `fireworks/us` $0.45/$1.80 for the same weights.
+
+The model page's **Providers** tab is that list, and the API behind it is public and keyless:
+
+```
+GET https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints
+```
+
+Each entry carries the `tag` a request names in `provider.only` — the pin's identity — beside
+`provider_name`, `quantization`, `service_tier`, `pricing` and the uptime windows. Latency and
+throughput are *not* in the public answer (they come back `null`), so the menu shows price and
+uptime and leaves speed to the model page.
+
+**What a pin sends.** One `provider` object, and nothing else:
+
+```json
+{ "model": "deepseek/deepseek-v4.1-flash-1017",
+  "provider": { "only": ["relace/fp4"], "allow_fallbacks": false } }
+```
+
+`only` is what makes the slug a decision rather than a preference, and `allow_fallbacks: false` is
+what stops the router from quietly serving a different company when Relace is unavailable. Together
+they are the pair OpenRouter documents as *use this endpoint directly*.
+
+**What it removes.** A pin *subsumes* the other levers instead of combining with them, so the relay
+deletes whatever would contradict it: `service_tier` (the endpoint is already in a pool),
+`provider.quantizations` (a floor of `fp8` beside a pinned `fp4` endpoint would exclude the endpoint
+that was asked for), `provider.ignore`, and a `:floor`/`:nitro` model variant (both route *across* a
+pool). `sort` and `order` are left exactly as the caller wrote them: over a one-element allowlist
+they are inert, and the relay does not police fields it did not write.
+
+**A pin that cannot be honoured is withheld, never sent.** `only` is an allowlist, so a slug the
+model no longer lists would exclude every endpoint and fail the request outright. The Host checks the
+cached listing first and attaches the pin only when that endpoint is still there; otherwise the
+request goes out on the Session's own preset and `x-oorp-pin: bypass` says so. The menu says it too:
+a pinned endpoint missing from a fresh listing reads as stale.
+
+**Reading the list costs one GET per model per ten minutes.** Opening the Provider facet reads it,
+and that one read also seeds the precision floor's admission cache — so the first request after a pin
+is already pinned, and turning on a floor does not cost an unfiltered turn. A failed read answers
+with an empty list rather than an error: the facet then says "no providers", which is something an
+operator can act on.
 
 ## Control API
 
@@ -418,6 +500,9 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
+| `GET /__openrouter-plus/providers?model=<id>` | that model's endpoints — `providers` rows (`tag`, `name`, `tier`, `precision`, prices, uptime, `available`) plus `groups` in display order, and `cached` |
+| `GET /__openrouter-plus/provider?session=<id>&model=<id>` | the endpoint that Session pinned (`{ tag, name, tier, precision }`, or `null`), and whether the model still lists it |
+| `POST /__openrouter-plus/provider` | `{ session, provider, model? }` — pin one endpoint slug; `provider: null` clears it. A slug the model does not list answers `404`. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` — show/hide the sidebar spend card; a config write |
 | `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
@@ -468,6 +553,8 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `upstream` | `https://openrouter.ai/api/v1` | where requests are forwarded, no trailing slash |
 | `routes` | tier mounts | mount path → tier, for pinned URLs (`/flex/v1`); `null` tier is a pure passthrough. Accepted names are `default`, `flex`, `priority`, `ultrafast`, and the aliases `auto`/`scale` (both mean *no pin*) and `fast` (= `priority`). The per-session design needs only `/v1` |
 | `upstreamTimeoutMs` | `0` | `0` disables the upstream timeout (long SSE completions) |
+| `controlDiagnostics` | `false` | record control-API call timings and log each call that takes ≥1 s or fails. Off by default: the ring is 20 entries in memory and no disk either way, but this plugin also runs where RAM and metered I/O matter. On, `/status` gains `control: { slowMs, recent }` |
+| `generationLookup` | `true` | reconcile a response that did not name its provider or its bill against OpenRouter's generation record — one authenticated GET per affected request, after the response has been sent. `false` disables it |
 | `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
 | `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
@@ -494,7 +581,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Card says *OpenRouter Plus is not answering* | The Host row is not loaded, or the request was refused by the GUI's fence. Check the Host log for `[openrouter-plus]`; reload the page after a Host update. |
+| Card says *OpenRouter Plus is not answering* | Usually a busy Host, not a broken one: `/status` is served by the same process that streams completions. The page needs three failed polls in a row before it says so. Turning on `controlDiagnostics` adds `control.recent` to `/status` — the last slow or failed control calls with their duration. The Host log has a `[openrouter-plus] control API call was slow` line for each. If `control.recent` is empty and the page still refuses, the exact match is that the Host row is not loaded or the GUI's fence refused the request. |
 | The relay is down but the page still answers | That is the split working: the control API reports `bound: false` plus the bind error from `/status`, instead of looking like a dead plugin. Check the port range or `enabled: false`; set a fixed `port`. |
 | Settings → OpenRouter Plus works on the desktop but not on another machine or a phone | Should not happen any more: the page calls its own origin. If it does, the Host is too old to mount the API on the web server — update it, or reach the loopback copy on the relay port. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |

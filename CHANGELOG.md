@@ -5,6 +5,177 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.5.4] — 2026-11-01
+
+**The diagnostics are opt-in.** 0.5.3 added control-API timings to `/status` and a log line per
+slow call, on by default. That is the wrong default for the hosts this plugin also runs on —
+metered, memory-tight, where a diagnostic that costs nothing on a laptop is still cost with no
+upside, and the failure it explains ("not answering" while the Host is merely busy) is one an
+operator opts into debugging.
+
+### Changed
+
+- **`controlDiagnostics` (default `false`).** Off, the control layer attaches no `finish`
+  listener, keeps no ring, emits no log line, and `/status` carries no `control` block — the
+  whole diagnostic is one boolean test per request. Turned on, behaviour is exactly what 0.5.3
+  shipped: a 20-entry in-memory ring (still no disk, still no timers) and one `[openrouter-plus]`
+  line per slow or failed call.
+- Nothing else about logging changed. The plugin has never written to a file; its lines go to the
+  Host's own logger, which in a default install is the terminal the Host was started from.
+
+## [0.5.3] — 2026-11-01
+
+**"Not answering" was a false alarm, and it was undiagnosable.** The settings page timed out on
+`/status` after 2.5 s and flipped to a red "OpenRouter Plus is not answering — the control API did
+not answer within 2.5 s" banner. The relay was fine: idle it answered in 1–86 ms, and the same
+endpoint blew the budget only while a turn was streaming. The browser log showed the truth —
+`GET /__openrouter-plus/status [net::ERR_ABORTED]`, over and over, exactly during turns.
+
+### Fixed
+
+- **`/status` no longer waits unboundedly on session titles.** It resolved a title for every session
+  in the last 50 requests, each a Host service round trip — the busiest calls in the process while a
+  turn is running. Cached titles are used immediately and the rest now get one 600 ms window; a title
+  that misses arrives on the next poll. Titles are decoration, the counters are the answer.
+- **The page needs three consecutive failures before it says anything.** A single slow poll, a
+  plugin reload or a route edit all used to blank the page into the error state while the last good
+  numbers were still true.
+- **The status poll's own timeout is 12 s, not 2.5 s.** It is a background refresh; nothing is
+  waiting on it.
+
+### Added
+
+- **`control` on `/status`** — `{ slowMs, recent: [{ at, path, ms, status }] }`, the last 20 control
+  calls that took ≥1 s or failed. This is what turns "not answering" into "these calls were slow,
+  and here is how slow".
+- **A log line for every slow or failed control call** (`[openrouter-plus] control API call was
+  slow/failed` with the path, duration and method), so the Host log answers the question without
+  opening DevTools.
+
+## [0.5.2] — 2026-11-01
+
+**The Provider column, for real this time.** 0.5.1 taught the reader the Responses-API envelope,
+which fixed cost and tokens — but the provider stayed `—`, because the Responses API does not name
+it anywhere: not in the body, and not in a header (`X-Provider-Name` is advertised in
+`access-control-expose-headers` and then not sent on a streaming response). The only per-request
+source is OpenRouter's own generation record.
+
+### Added
+
+- **`generationLookup`** (default `true`): when a response did not name its provider, or reported
+  no bill, the relay reconciles it against `GET <upstream>/generation?id=<genId>` — the id it
+  already captures from the body or `X-Generation-Id`. One authenticated GET per affected request,
+  issued after the response has been fully sent, eight in flight at most, silent on failure. The
+  caller's `Authorization` is used for that call and stored nowhere.
+- **The lookup retries, because the record is eventually consistent.** `GET /generation` answers
+  `404` for roughly the first five seconds after a completion and `200` from about seven — measured
+  on this account. A single attempt would miss nearly every request, which is exactly how a lookup
+  that works from `curl` a minute later still fills nothing in practice. Five attempts over ~8 s,
+  cumulative, all after the caller has their response.
+- **Only missing fields are filled.** A number the stream reported is what the caller saw, so it
+  wins; the lookup supplies `provider_name`, and `total_cost` / `native_tokens_*` when the stream
+  produced none. That also rescues a stream whose final event was too large for the tail buffer,
+  which is why some long completions showed "not reported" while short ones were billed.
+
+### Changed
+
+- **The Session column leads with the name.** It used to print a truncated session id as the cell's
+  text and demote the title to a caption, so every row read `session-a1c2e594-…` with the actual
+  conversation name underneath. The name is the primary text now, the short id is the caption, and
+  a Session the Host has no title for (a subagent, a sweep) still shows its id rather than nothing.
+
+## [0.5.1] — 2026-11-01
+
+**The Requests tab was blind on `api: openai-responses` routes.** Every row read "not reported" for
+cost and tokens and `—` for provider, while OpenRouter had billed the request correctly. The bug was
+one level of nesting: the relay's usage reader looked for `usage` on the event envelope, and the
+Responses API puts it at `response.usage`.
+
+### Fixed
+
+- **The Responses API envelope is unwrapped before reading usage.** A route configured with
+  `api: openai-responses` streams events shaped `{ type, response: { … usage … } }`; reading only
+  `envelope.usage` found nothing, so every such request was recorded with a null bill and null
+  token counts. Both shapes are now read through one function, since one route may use either.
+- **The Responses API's field names are understood.** `input_tokens` / `output_tokens`,
+  `input_tokens_details.cached_tokens`, `output_tokens_details.reasoning_tokens`, and the
+  `upstream_inference_input_cost` / `upstream_inference_output_cost` halves of `cost_details` are
+  read alongside their Chat Completions spellings.
+- **`X-Provider-Name` and `X-Generation-Id` are read as fallbacks.** OpenRouter exposes both on the
+  response headers (advertising them in `access-control-expose-headers`) and a Responses body repeats
+  neither, so a proxy is the only consumer that can carry them into the record. This is what fills the
+  Provider column and gives an aborted stream a generation id to reconcile later.
+
+### Notes
+
+- Records written before this release keep their nulls; the ring buffer is process-local, so a Host
+  restart is also what clears them.
+- The relay already forwarded both headers to the caller untouched — only the record was missing them.
+
+## [0.5.0] — 2026-11-01
+
+**A fourth lever, and it outranks the other three.** A tier picks a pool and a floor picks a
+precision; neither picks the *company*. On a model served by 42 endpoints — DeepSeek V4.1 Flash 1017
+is one — "which endpoint" is a real choice with a real price spread ($0.035 against $0.45 per million
+input for the same weights), and the only lever that expressed it was editing the request body by
+hand, which a provider profile cannot do.
+
+This release adds a **Provider** facet to the composer chip, read from the model's own public
+listing, and sends it as a *hard* pin.
+
+### Added
+
+- **A Provider facet in the chip.** The menu is now three cells — Tier, Precision, Provider — and the
+  Provider one lists the model's live endpoints with what each costs and how often it answers. An
+  endpoint the listing reports with no uptime is drawn quiet rather than hidden: pinning a
+  struggling endpoint by hand is a legitimate thing to want.
+- **A pin disables the pair it decides.** Choosing `deepinfra/fp8/priority` changes the Tier cell to
+  `Priority` and the Precision cell to `fp8`, and disables both — the endpoint already *is* that
+  lane at that precision, so offering the levers could only build a request the router rejects.
+  They leave the keyboard walk and refuse a drill; clearing the pin (**Auto**) restores the Session's
+  previous Tier and Precision untouched.
+- **`lib/providers.js`**, the listing read for display: token prices normalised to dollars per
+  million with the rounding that keeps `$0.035` from printing as `$0.034999…`, tier and region
+  derived from the tag, `status` read as availability, grouping in the model page's own order
+  (standard, flex, priority, unavailable), and `precisionLevels()`/`tagsOf()` so one read can answer
+  admission too.
+- **`GET /__openrouter-plus/providers?model=<id>`** and **`GET|POST /__openrouter-plus/provider`**,
+  the control-API surface behind the facet. The pin routes are memory-only, like `/tier` and
+  `/precision`; a slug the model does not list is refused with `404` while the operator can still
+  see the list they picked from.
+- **`x-oorp-pin`** on every relayed response: the slug that was routed to, `bypass` when a pin was
+  configured but withheld because the listing no longer backs it, `none` when nobody pinned anything.
+
+### Changed
+
+- **A pin subsumes the other levers rather than joining them.** The relay writes `provider.only` and
+  `allow_fallbacks: false`, and *removes* the fields that would contradict the choice:
+  `service_tier`, `provider.quantizations`, `provider.ignore`, and a `:floor`/`:nitro` model variant.
+  A floor of `fp8` beside a pinned `fp4` endpoint is not a narrower request, it is an empty one.
+  `sort` and `order` are left as the caller wrote them — inert over a one-element allowlist.
+- **The precision floor is reported as `any`, not `bypass`, while a pin is in force.** The pin did
+  not withhold the floor, it superseded it; calling that a bypass would report a healthy pin as a
+  broken floor.
+- **One provider listing now seeds both caches.** The facet's read and the floor's admission read the
+  same URL, so the wider read fills the four-field cache as well. Two effects: one public GET per
+  model per TTL instead of two, and the first request after a pin is already pinned — without it,
+  admission would still consider the listing unread and that turn would go out unpinned.
+- **`parseProviders()` never reaches the request path.** Admission stays synchronous and reads the
+  four-field cache; the fat, lazy listing is touched only by the control API.
+
+### Notes
+
+- The public endpoints API returns `latency_last_30m` and `throughput_last_30m` as `null` for every
+  model tested. The facet therefore shows price, precision and uptime, and leaves speed to the model
+  page rather than printing a placeholder that reads as zero.
+- **`status` is read but not interpreted.** It looked like a "routed / not routed" flag and is not
+  one: `deepseek/deepseek-v4.1-flash-1017` reports `status: -5` on the endpoint that carries a third
+  of its tokens. Availability is derived from the uptime windows instead — every reported window at
+  zero is the only positive evidence of a dead endpoint — so a non-zero code can never quiet the
+  model's busiest provider.
+- A pin is Session state, not model state: it survives a model switch, and the relay withholds it
+  for any model whose listing does not offer that slug. The facet says so once a listing arrives.
+
 ## [0.4.0] — 2026-10-31
 
 **A precision floor, and the truth about Exacto.** The cheapest endpoint is usually the most

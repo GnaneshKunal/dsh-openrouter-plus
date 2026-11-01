@@ -36,7 +36,18 @@ window.__ModuleLoader__.load({
      */
     const CONTROL_BASE = '';
     const POLL_INTERVAL_MS = 3000;
-    const STATUS_TIMEOUT_MS = 2500;
+    /* Long enough to survive a Host that is busy with a turn. The poll is a background
+       refresh, not a request anyone is waiting on, so timing it out at 2.5 s only produced
+       a scary "not answering" banner on a Host that was busy, not broken. */
+    const STATUS_TIMEOUT_MS = 12000;
+    /**
+     * How many status polls must fail in a row before the page says so.
+     *
+     * One slow poll is not evidence of anything: the relay is a loopback HTTP server
+     * sharing a process with the model stream, and the warning is alarming enough that it
+     * should be true. The last good snapshot stays on screen throughout.
+     */
+    const CONNECT_FAIL_THRESHOLD = 3;
     const PROBE_TIMEOUT_MS = 900;
     const COPY_FEEDBACK_MS = 1600;
     const NOTICE_MS = 5000;
@@ -126,12 +137,12 @@ window.__ModuleLoader__.load({
     });
 
     /**
-     * The popover's panes, after the composer model picker: it opens on `root` — a pair
+     * The popover's panes, after the composer model picker: it opens on `root` — a row
      * of cells stating what the Session runs on — and a cell drills into the one list it
-     * names. `tier` and `precision` are the two drilled panes, in root-cell order.
+     * names. `tier`, `precision` and `provider` are the drilled panes, in root-cell order.
      */
     const CHIP_PANE_ROOT = 'root';
-    const CHIP_PANES = Object.freeze([CHIP_PANE_ROOT, 'tier', 'precision']);
+    const CHIP_PANES = Object.freeze([CHIP_PANE_ROOT, 'tier', 'precision', 'provider']);
 
     /**
      * Whether each floor admits endpoints whose precision nobody declared. Mirrors the
@@ -148,6 +159,46 @@ window.__ModuleLoader__.load({
 
     /** What the chip badges while the Host has not (yet) told it a floor. */
     const DEFAULT_PRECISION_CHOICE = Object.freeze({ floor: 'any', includeUnknown: false });
+
+    /**
+     * The upstream tiers an endpoint row may declare. The words are the preset table's own
+     * (`preset.standard` …), because an endpoint's tier is the vocabulary the relay pins:
+     * one table, two readers, so a pinned `standard` endpoint and the `Standard` preset
+     * cannot drift apart in either language.
+     */
+    const PROVIDER_TIERS = Object.freeze(['standard', 'flex', 'priority']);
+
+    /**
+     * The precisions an endpoint row may declare, in the shorthand its tag wears
+     * (`relace/fp4` → `fp4`). Any other value reads as `unknown`, which is a value of its
+     * own: an endpoint that declares nothing is not an endpoint that declares fp4.
+     */
+    const PROVIDER_PRECISIONS = Object.freeze(['fp4', 'fp8', 'mxfp4', 'bf16', 'unknown']);
+
+    /** The one group id whose rows the pane draws quiet rather than as routing candidates. */
+    const PROVIDER_GROUP_UNAVAILABLE = 'unavailable';
+
+    /**
+     * What the chip holds while the Host has not (yet) listed this model's endpoints. An
+     * older Host 404s `/providers`, which is a normal answer: the Provider cell reads
+     * `Auto` and the pane keeps the row that clears a pin, so the menu never depends on a
+     * route that may not exist yet.
+     */
+    const EMPTY_PROVIDER_LIST = Object.freeze({
+      model: '',
+      fetchedAt: null,
+      cached: false,
+      providers: Object.freeze([]),
+      groups: Object.freeze([]),
+    });
+
+    /**
+     * The model suffix an endpoint list does not depend on. `:floor` and `:nitro` are price
+     * levers the relay applies before the request leaves it, so `author/model:floor` lands
+     * on the same endpoints as `author/model`; asking per variant would mint one cache row
+     * and one fetch per preset the Session ever tried.
+     */
+    const MODEL_VARIANT_SUFFIXES = Object.freeze([':floor', ':nitro']);
 
     /**
      * Attaching writes our target table first, which makes the Loader re-apply this
@@ -328,6 +379,27 @@ window.__ModuleLoader__.load({
       'precision.short.eight-bit-up': '\u22658-bit',
       'precision.short.full-width': 'FP16+',
       'precision.error': 'Could not set the precision floor: {message}',
+
+      /* The third facet: one OpenRouter endpoint pinned by hand, ahead of and instead of the
+         tier and the floor the relay would otherwise choose. While a pin stands, those two
+         cells are the endpoint's own, so they go read-only rather than state a choice the
+         relay is not going to honour. */
+      'chip.facet.provider': 'Provider',
+      'provider.auto': 'Auto',
+      'provider.autoRow': 'Auto (OpenRouter routing)',
+      'provider.auto.hint': 'No endpoint is pinned: OpenRouter routes this model itself.',
+      'provider.listAria': 'Upstream endpoints for {name}',
+      'provider.group.unavailable': 'Unavailable',
+      /* Dollars per million tokens, and the day's share of successful answers: the two
+         numbers that make one endpoint worth pinning over another. The percentage is a bare
+         number in English and names itself in the translation, the way a table header does. */
+      'provider.price': '${input}/${output} per M',
+      'provider.uptime': '{percent}%',
+      'provider.hint':
+        'A pinned endpoint bypasses OpenRouter routing for this Session only; its precision and price are fixed.',
+      'provider.empty': 'This Host did not list any endpoint for the model.',
+      'provider.stale': 'The pinned endpoint is no longer listed for this model.',
+      'provider.error': 'Could not pin the endpoint: {message}',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -560,6 +632,21 @@ window.__ModuleLoader__.load({
       'precision.short.eight-bit-up': '\u22658位',
       'precision.short.full-width': 'FP16+',
       'precision.error': '无法设置精度下限：{message}',
+
+      /* 第三个分面：手动固定一个 OpenRouter 上游端点，优先于中继本来会选的等级与精度下限。
+         固定期间这两项由端点自身决定，因此两个单元格改为只读，而不是显示中继不会采用的选择。 */
+      'chip.facet.provider': '提供商',
+      'provider.auto': '自动',
+      'provider.autoRow': '自动（OpenRouter 路由）',
+      'provider.auto.hint': '没有固定端点：由 OpenRouter 自行路由该模型。',
+      'provider.listAria': '{name} 的上游端点',
+      'provider.group.unavailable': '不可用',
+      'provider.price': '${input}/${output} 每百万 token',
+      'provider.uptime': '可用率 {percent}%',
+      'provider.hint': '固定端点只对当前会话生效，并跳过 OpenRouter 的路由；其精度与价格随之固定。',
+      'provider.empty': 'Host 未列出该模型的任何端点。',
+      'provider.stale': '已固定的端点不再出现在该模型的列表中。',
+      'provider.error': '无法固定端点：{message}',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -995,9 +1082,348 @@ window.__ModuleLoader__.load({
       return known === 'any' ? '' : t('precision.short.' + known);
     }
 
+    /*
+     * The provider facet's readers. Everything here is pure: the chip's shape, the menu's
+     * rows and the badge text are decided from the payload alone, so a Host that predates
+     * the route and a Host that lists forty endpoints take exactly the same code path and
+     * differ only in what the list contains.
+     */
+
+    /**
+     * The model an endpoint list belongs to, without the route variant: `:floor`/`:nitro`
+     * are price levers, so every variant of one model asks about the same endpoints. The
+     * Host tolerates the suffix too; sending the base id keeps one cache row per model
+     * instead of one per preset the Session ever tried.
+     */
+    function baseModelId(modelKey) {
+      const text = stringValue(modelKey).trim();
+      const at = text.lastIndexOf(':');
+      if (at <= 0) return text;
+      const suffix = text.slice(at).toLowerCase();
+      return MODEL_VARIANT_SUFFIXES.includes(suffix) ? text.slice(0, at).trim() : text;
+    }
+
+    /** An endpoint's tier as the vocabulary spells it; '' when it declares none. */
+    function providerTierOf(value) {
+      const text = stringValue(value).trim().toLowerCase();
+      return PROVIDER_TIERS.includes(text) ? text : '';
+    }
+
+    /** An endpoint's precision as its tag spells it; anything unrecognised is `unknown`. */
+    function providerPrecisionOf(value) {
+      const text = stringValue(value).trim().toLowerCase();
+      return PROVIDER_PRECISIONS.includes(text) ? text : 'unknown';
+    }
+
+    /** The tier word a cell shows; a row that declared none says so rather than guessing. */
+    function providerTierLabel(t, value) {
+      const tier = providerTierOf(value);
+      return tier === '' ? t('common.notAvailable') : t('preset.' + tier);
+    }
+
+    /** `fp4` is a shorthand, not copy, so it is never translated; `unknown` is a word. */
+    function providerPrecisionLabel(t, value) {
+      const precision = providerPrecisionOf(value);
+      return precision === 'unknown' ? t('common.unknown') : precision;
+    }
+
+    /** One `/providers` row, normalised; null when it cannot name an endpoint to pin. */
+    function normalizeProviderRow(raw) {
+      if (!isPlainObject(raw)) return null;
+      const tag = stringValue(raw.tag).trim();
+      if (tag === '') return null;
+      const status = finiteNumber(raw.status);
+      return {
+        tag,
+        /* The tag is the pin, so a row without a display name still has to be readable. */
+        name: stringValue(raw.name).trim() || tag,
+        tier: providerTierOf(raw.tier),
+        precision: providerPrecisionOf(raw.precision),
+        inputPrice: finiteNumber(raw.inputPrice),
+        outputPrice: finiteNumber(raw.outputPrice),
+        cacheReadPrice: finiteNumber(raw.cacheReadPrice),
+        discount: finiteNumber(raw.discount),
+        contextLength: finiteNumber(raw.contextLength),
+        maxCompletionTokens: finiteNumber(raw.maxCompletionTokens),
+        uptime1d: finiteNumber(raw.uptime1d),
+        uptime5m: finiteNumber(raw.uptime5m),
+        uptime30m: finiteNumber(raw.uptime30m),
+        /* `status` is carried for transparency but never decides anything: it is a health
+           code the API leaves unexplained, and on DeepSeek V4.1 Flash the endpoint serving
+           a third of the traffic reports `-5`. Availability is the Host's answer, read from
+           uptime, and this row trusts it — a client that re-derived it would disagree. */
+        status,
+        available: raw.available !== false,
+        region: stringValue(raw.region).trim() || null,
+        supportedParameters: Array.isArray(raw.supportedParameters)
+          ? raw.supportedParameters.filter(
+              (name) => typeof name === 'string' && name.trim() !== '',
+            )
+          : [],
+      };
+    }
+
+    /**
+     * `/providers` bodies, normalised to `{ model, fetchedAt, cached, providers, groups }`.
+     * Every refusal — a 404 from a Host that predates the route, the route's own 502, a
+     * body that is not this API — reads as the empty list, because the Provider cell then
+     * says `Auto` and the pane still holds the row that clears a pin.
+     */
+    function normalizeProviderList(payload) {
+      if (!isPlainObject(payload) || payload.ok === false) return EMPTY_PROVIDER_LIST;
+      const providers = (Array.isArray(payload.providers) ? payload.providers : [])
+        .map(normalizeProviderRow)
+        .filter((row) => row !== null);
+      const byTag = new Map(providers.map((row) => [row.tag, row]));
+      const seen = new Set();
+      const groups = [];
+      for (const raw of Array.isArray(payload.groups) ? payload.groups : []) {
+        if (!isPlainObject(raw)) continue;
+        const tags = [];
+        for (const tag of Array.isArray(raw.tags) ? raw.tags : []) {
+          const text = stringValue(tag).trim();
+          /* One row per tag: the headers are in the Host's display order, and a tag listed
+             twice would be a duplicate key in a list React renders by tag. */
+          if (text === '' || !byTag.has(text) || seen.has(text)) continue;
+          seen.add(text);
+          tags.push(text);
+        }
+        if (tags.length > 0) groups.push({ id: stringValue(raw.id).trim(), tags });
+      }
+      /* A row no group claimed is still an endpoint a Session could pin: it goes last and
+         unheaded rather than disappearing, because a hidden pin is a pin nobody can clear. */
+      const loose = [];
+      for (const row of providers) {
+        if (seen.has(row.tag)) continue;
+        seen.add(row.tag);
+        loose.push(row.tag);
+      }
+      if (loose.length > 0) groups.push({ id: '', tags: loose });
+      return {
+        model: stringValue(payload.model).trim(),
+        fetchedAt: finiteNumber(payload.fetchedAt),
+        cached: payload.cached === true,
+        providers,
+        groups,
+      };
+    }
+
+    /** The pin a Session carries: `{ tag, name, tier, precision }`, or null for none. */
+    function normalizeProviderPin(raw) {
+      if (!isPlainObject(raw)) return null;
+      const tag = stringValue(raw.tag).trim();
+      if (tag === '') return null;
+      return {
+        tag,
+        name: stringValue(raw.name).trim() || tag,
+        tier: providerTierOf(raw.tier),
+        precision: providerPrecisionOf(raw.precision),
+      };
+    }
+
+    /**
+     * `/provider` bodies, normalised: `provider` is the endpoint this Session pins (null for
+     * none), `chosen` the tag the Session picked, `model` the id it was pinned for. Null
+     * means the Host answered something that is not this API, and the chip then keeps the
+     * badge it shipped with — the same posture as a failed `/precision` read.
+     */
+    function normalizeProviderState(payload) {
+      if (!isPlainObject(payload) || payload.ok === false) return null;
+      /* The two fields this API is defined by; anything else is another route's body. */
+      if (!hasOwn(payload, 'provider') && !hasOwn(payload, 'chosen')) return null;
+      const chosen = stringValue(payload.chosen).trim();
+      return {
+        provider: normalizeProviderPin(payload.provider),
+        chosen: chosen === '' ? null : chosen,
+        model: stringValue(payload.model).trim() || null,
+        available: payload.available !== false,
+      };
+    }
+
+    /** The list's own row for one tag, or null; a pin is always one of these tags. */
+    function providerRowOf(list, tag) {
+      const text = stringValue(tag).trim();
+      if (text === '') return null;
+      const providers = isPlainObject(list) && Array.isArray(list.providers) ? list.providers : [];
+      for (const row of providers) {
+        if (row.tag === text) return row;
+      }
+      return null;
+    }
+
+    /**
+     * A pin as the row it names, so a pending pick can state its endpoint before the Host
+     * has answered. A tag the list does not carry is still its own name, which is the only
+     * thing known about it and enough to show.
+     */
+    function providerPinFromList(list, tag) {
+      const row = providerRowOf(list, tag);
+      if (row !== null) {
+        return { tag: row.tag, name: row.name, tier: row.tier, precision: row.precision };
+      }
+      const text = stringValue(tag).trim();
+      return text === '' ? null : { tag: text, name: text, tier: '', precision: 'unknown' };
+    }
+
+    /**
+     * The pin in force for one model. A pin belongs to the model it was made for — the Host
+     * reports the id it was pinned under — so one left over from another model reads as no
+     * pin here rather than as an endpoint this model may not even have. A Host that omits
+     * the id is trusted: the pin is Session state, and the Session is the truth either way.
+     */
+    function providerPinForModel(state, modelKey) {
+      if (!isPlainObject(state)) return null;
+      const pinnedFor = state.model === null || state.model === undefined
+        ? ''
+        : baseModelId(state.model);
+      if (pinnedFor !== '' && pinnedFor !== baseModelId(modelKey)) return null;
+      return normalizeProviderPin(state.provider);
+    }
+
+    /**
+     * `${name} · ${precision}`: the string the Provider cell and the trigger share, so a
+     * pinned Session states the same endpoint wherever it is read. Unpinned reads `Auto`,
+     * which is this cell's name for "OpenRouter decides".
+     */
+    function pinnedProviderLabel(t, rawPin) {
+      const pin = normalizeProviderPin(rawPin);
+      if (pin === null) return t('provider.auto');
+      return pin.name + ' \u00b7 ' + providerPrecisionLabel(t, pin.precision);
+    }
+
+    /** A group heading; '' for an id this client has no word for, which loses only the header. */
+    function providerGroupLabel(t, id) {
+      const known = stringValue(id).trim().toLowerCase();
+      if (PROVIDER_TIERS.includes(known)) return t('preset.' + known);
+      if (known === PROVIDER_GROUP_UNAVAILABLE) return t('provider.group.unavailable');
+      return '';
+    }
+
+    /**
+     * A number as one server-reported row prints it — a price per million tokens, or a
+     * percentage — trimmed of the zeros a price never needs. '' when it was not reported,
+     * so the caller can drop the fact instead of printing a placeholder for it.
+     */
+    function numberText(value) {
+      const number = finiteNumber(value);
+      if (number === null) return '';
+      return String(Math.round(number * 10000) / 10000);
+    }
+
+    /**
+     * A provider row's second line: what the endpoint is, what it costs and how often it
+     * answers. A field the Host did not report is dropped rather than printed as a dash —
+     * this line is already two facts denser than a preset row's, and a dash reads as zero.
+     */
+    function providerRowHint(t, row) {
+      if (!isPlainObject(row)) return '';
+      const parts = [providerPrecisionLabel(t, row.precision)];
+      const input = numberText(row.inputPrice);
+      const output = numberText(row.outputPrice);
+      if (input !== '' && output !== '') {
+        parts.push(t('provider.price', { input: input, output: output }));
+      }
+      const uptime = numberText(row.uptime1d);
+      if (uptime !== '') parts.push(t('provider.uptime', { percent: uptime }));
+      return parts.join(' \u00b7 ');
+    }
+
+    /**
+     * The Provider pane: the row that clears a pin first, then one list per group the Host
+     * declared. A group heading is a row of its own (`header: true`) so the pane stays the
+     * one flat list the renderer and the keyboard walk in order; an endpoint OpenRouter
+     * reports no uptime is drawn quiet, never dropped — pinning it by hand is
+     * the whole point of the facet.
+     */
+    function providerFacetRows(t, view) {
+      const list = isPlainObject(view) && isPlainObject(view.providerList) ? view.providerList : null;
+      const providers = list !== null && Array.isArray(list.providers) ? list.providers : [];
+      const groups = list !== null && Array.isArray(list.groups) ? list.groups : [];
+      const pinnedTag = stringValue(isPlainObject(view) ? view.pinnedTag : '').trim();
+      const rows = [
+        {
+          value: '',
+          key: 'provider:auto',
+          label: t('provider.autoRow'),
+          hint: t('provider.auto.hint'),
+          selected: pinnedTag === '',
+          header: false,
+          kind: 'provider',
+          unavailable: false,
+        },
+      ];
+      const emit = (row) => {
+        rows.push({
+          value: row.tag,
+          key: 'provider:' + row.tag,
+          label: row.name,
+          hint: providerRowHint(t, row),
+          selected: row.tag === pinnedTag,
+          header: false,
+          kind: 'provider',
+          unavailable: row.available !== true,
+        });
+      };
+      const byTag = new Map(providers.map((row) => [row.tag, row]));
+      const placed = new Set();
+      for (const group of groups) {
+        if (!isPlainObject(group)) continue;
+        const tags = (Array.isArray(group.tags) ? group.tags : []).filter(
+          (tag) => byTag.has(tag) && !placed.has(tag),
+        );
+        if (tags.length === 0) continue;
+        const label = providerGroupLabel(t, group.id);
+        if (label !== '') {
+          rows.push({
+            value: '',
+            key: 'group:' + stringValue(group.id),
+            label,
+            hint: '',
+            selected: false,
+            header: true,
+            kind: 'provider',
+            unavailable: false,
+          });
+        }
+        for (const tag of tags) {
+          placed.add(tag);
+          emit(byTag.get(tag));
+        }
+      }
+      for (const row of providers) {
+        if (placed.has(row.tag)) continue;
+        placed.add(row.tag);
+        emit(row);
+      }
+      return rows;
+    }
+
+    /**
+     * The one line under the endpoint list: why a pin matters while none is set, that the
+     * list is missing while the Host has not listed it, and that a set pin has outlived it.
+     */
+    function providerPaneHint(t, list, pinnedTag) {
+      const providers = isPlainObject(list) && Array.isArray(list.providers) ? list.providers : [];
+      if (providers.length === 0) return t('provider.empty');
+      if (stringValue(pinnedTag).trim() !== '' && providerRowOf(list, pinnedTag) === null) {
+        return t('provider.stale');
+      }
+      return t('provider.hint');
+    }
+
+    /**
+     * The endpoint list per model, for the life of this page. The composer remounts the chip
+     * on every provider and Session switch, so a menu reopened ten times must not mean ten
+     * lists. It is keyed by origin as well as model: a rebind puts the page in front of a
+     * different Host, whose list is not this one's. A refusal is deliberately not cached, so
+     * a Host upgraded (or an upstream that came back) mid-page is picked up on the next
+     * mount instead of never.
+     */
+    const providerListCache = new Map();
+
     /** `<preset label> · <precision short label>`, or the preset label alone for `any`. */
-    function chipBadgeLabel(t, presetLabel, precision) {
-      const parts = chipBadgeParts(t, presetLabel, precision);
+    function chipBadgeLabel(t, presetLabel, precision, provider) {
+      const parts = chipBadgeParts(t, presetLabel, precision, provider);
       return parts.precision === '' ? parts.label : parts.label + ' ' + parts.precision;
     }
 
@@ -1006,8 +1432,20 @@ window.__ModuleLoader__.load({
      * the caption tone without re-parsing it out of a joined string: `Standard  ≥8-bit`, the way
      * the model seat prints "model  effort". `any` yields no precision half at all, so an
      * unconfigured chip still reads exactly as the preset label alone.
+     *
+     * A pinned endpoint replaces both halves: the Session is going to run on one endpoint and
+     * nothing else, so the badge names it (`Relace · fp4`) instead of the tier and floor it
+     * would otherwise have chosen. Only the pinned form carries a separator, which is how the
+     * released chip stays byte-for-byte the string it shipped with.
      */
-    function chipBadgeParts(t, presetLabel, precision) {
+    function chipBadgeParts(t, presetLabel, precision, provider) {
+      const pin = normalizeProviderPin(provider);
+      if (pin !== null) {
+        return {
+          label: pin.name,
+          precision: '\u00b7 ' + providerPrecisionLabel(t, pin.precision),
+        };
+      }
       return {
         label: presetLabel,
         precision: precisionShortLabel(t, isPlainObject(precision) ? precision.floor : 'any'),
@@ -1015,10 +1453,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One drilled pane's rows: the preset list, or the floor list. A pane is one listbox of
-     * options either way, which is why the two share a renderer and a row component.
+     * One drilled pane's rows: the preset list, the floor list, or the endpoint list. A pane
+     * is one listbox of options either way, which is why the three share a renderer and a row
+     * component; the endpoint pane adds heading rows, which are labels rather than options.
      */
     function chipFacetRows(t, facet, view) {
+      if (facet === 'provider') return providerFacetRows(t, view);
       if (facet === 'precision') {
         return PRECISION_FLOORS.map((floor) => ({
           value: floor,
@@ -1053,33 +1493,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The root pane's cells, in the frozen order: Tier first, Precision second. Each states
-     * what the Session currently runs on — the preset label, and the floor's short label
-     * (`Any` when nothing is filtered) — because the cell is the only place both values are
-     * visible before a drill-in.
+     * The root pane's cells, in the frozen order: Tier, Precision, Provider. Each states
+     * what the Session currently runs on — the preset label, the floor's short label
+     * (`Any` when nothing is filtered), and the endpoint (`Auto` until one is pinned) —
+     * because the cell is the only place all three values are visible before a drill-in.
      *
-     * `view`: `{ presetLabel, activePreset, switchingPreset, floor }`.
+     * A pin owns the first two: the endpoint decides its own tier and precision, so those
+     * cells state the endpoint's values and are `disabled`, which both refuses the drill
+     * and drops them from the keyboard's `:not([disabled])` walk. The Provider cell is the
+     * one that can still be opened, because it is the one that can undo the pin.
+     *
+     * `view`: `{ presetLabel, activePreset, switchingPreset, floor, provider }`, where
+     * `provider` is the pin the Session carries (`{ tag, name, tier, precision }`) or null.
      */
     function chipRootCells(t, view) {
+      const known = isPlainObject(view) ? view : {};
       const tierLabel = t('chip.facet.tier');
       const precisionLabel = t('chip.facet.precision');
-      const tierValue =
-        view.switchingPreset === true ? t('tier.switching') : view.presetLabel(view.activePreset);
-      const floor = precisionFloorOf(view.floor);
-      const precisionValue =
-        floor === 'any' ? t('precision.row.any') : precisionShortLabel(t, floor);
+      const providerLabel = t('chip.facet.provider');
+      const pin = normalizeProviderPin(known.provider);
+      const pinned = pin !== null;
+      const tierValue = pinned
+        ? providerTierLabel(t, pin.tier)
+        : known.switchingPreset === true
+          ? t('tier.switching')
+          : known.presetLabel(known.activePreset);
+      const floor = precisionFloorOf(known.floor);
+      const precisionValue = pinned
+        ? providerPrecisionLabel(t, pin.precision)
+        : floor === 'any'
+          ? t('precision.row.any')
+          : precisionShortLabel(t, floor);
+      const providerValue = pinnedProviderLabel(t, pin);
       return [
         {
           facet: 'tier',
           label: tierLabel,
           value: tierValue,
+          disabled: pinned,
           ariaLabel: t('chip.cellAria', { label: tierLabel, value: tierValue }),
         },
         {
           facet: 'precision',
           label: precisionLabel,
           value: precisionValue,
+          disabled: pinned,
           ariaLabel: t('chip.cellAria', { label: precisionLabel, value: precisionValue }),
+        },
+        {
+          facet: 'provider',
+          label: providerLabel,
+          value: providerValue,
+          disabled: false,
+          ariaLabel: t('chip.cellAria', { label: providerLabel, value: providerValue }),
         },
       ];
     }
@@ -2081,6 +2547,9 @@ window.__ModuleLoader__.load({
       /* A precision row carries a second line, so it wraps; a preset row is one line and
          must stay exactly as tall as it shipped. */
       const wrapped = state.wrapped === true;
+      /* An endpoint reporting no uptime: still pinnable, so it is drawn
+         quieter rather than disabled — hiding the row would hide the only way to pin it. */
+      const quiet = state.quiet === true;
       return {
         display: 'flex',
         alignItems: wrapped ? 'flex-start' : 'center',
@@ -2098,13 +2567,13 @@ window.__ModuleLoader__.load({
             : selected
               ? COLORS.fill
               : 'transparent',
-        color: COLORS.primary,
+        color: quiet ? COLORS.secondary : COLORS.primary,
         font: selected ? FONTS.smallStrong : FONTS.small,
         lineHeight: '18px',
         textAlign: 'left',
         whiteSpace: wrapped ? 'normal' : 'nowrap',
         cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.55 : 1,
+        opacity: disabled ? 0.55 : quiet ? 0.7 : 1,
         outline: 'none',
         appearance: 'none',
         WebkitAppearance: 'none',
@@ -2129,9 +2598,15 @@ window.__ModuleLoader__.load({
       minWidth: 0,
     };
 
-    /** One root cell: 34px, full width, label then value then chevron, hover-tinted. */
+    /**
+     * One root cell: 34px, full width, label then value then chevron, hover-tinted. A cell a
+     * pin owns keeps its height and its anatomy and loses only the affordances — no hover
+     * tint, no pointer, a quieter ink — so the row still reads as a value rather than as a
+     * control that broke.
+     */
     function chipCellStyle(state) {
-      const active = state.hovered === true || state.focused === true;
+      const disabled = state.disabled === true;
+      const active = !disabled && (state.hovered === true || state.focused === true);
       return {
         display: 'flex',
         alignItems: 'center',
@@ -2151,7 +2626,8 @@ window.__ModuleLoader__.load({
         font: FONTS.small,
         lineHeight: '20px',
         textAlign: 'left',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
         outline: 'none',
         appearance: 'none',
         WebkitAppearance: 'none',
@@ -2172,6 +2648,16 @@ window.__ModuleLoader__.load({
     };
 
     const CHIP_CELL_CHEVRON_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
+
+    /* A group heading in the endpoint list: a label, not a control, so it is a plain div the
+       keyboard's `[role="option"]` walk skips and the pane can still render in one flat run. */
+    const CHIP_GROUP_STYLE = {
+      margin: '4px 8px 0',
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+      lineHeight: '15px',
+      whiteSpace: 'nowrap',
+    };
 
     /* A precision row's second line: the wire levels it admits, so the trade is legible
        before it is chosen rather than after a bill. */
@@ -2815,11 +3301,16 @@ window.__ModuleLoader__.load({
           return normalized;
         };
 
+        /* Consecutive failures. `setStatusError`/`setConnection` are driven off this rather
+           than off one poll, so a Host that is merely busy does not empty the page. */
+        let misses = 0;
+
         const tick = async () => {
           if (cancelled) return;
           try {
             const normalized = await loadStatus();
             if (cancelled) return;
+            misses = 0;
             setSnapshot(normalized);
             setStatusError('');
             setConnection('online');
@@ -2838,8 +3329,13 @@ window.__ModuleLoader__.load({
                edit — fails this poll for a second or two, and blanking the page would throw
                away numbers that are still true. The next tick replaces it if it never
                comes back. */
-            setStatusError(errorMessage(t, error));
-            setConnection('offline');
+            misses += 1;
+            /* Below the threshold the page keeps the numbers it already has and says
+               nothing: a reload, a route edit or a busy turn all fail a poll or two. */
+            if (misses >= CONNECT_FAIL_THRESHOLD) {
+              setStatusError(errorMessage(t, error));
+              setConnection('offline');
+            }
           }
           schedule(POLL_INTERVAL_MS);
         };
@@ -4620,13 +5116,13 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** One row inside the chip's menu: a tier preset, or a precision floor. */
+    /** One row inside the chip's menu: a tier preset, a precision floor, or an endpoint. */
     function ChipOption(props) {
       const [hovered, setHovered] = React.useState(false);
       const selected = props.selected === true;
       const disabled = props.disabled === true;
-      /* A precision row names the wire levels it admits on a second line; a preset row is
-         one line and must render exactly as it did before the facet existed. */
+      /* A precision or provider row names its trade on a second line; a preset row is one
+         line and must render exactly as it did before the other facets existed. */
       const hint = stringValue(props.hint).trim();
       const stacked = hint !== '';
       const attrs = {
@@ -4642,10 +5138,16 @@ window.__ModuleLoader__.load({
           selected: selected,
           disabled: disabled,
           wrapped: stacked,
+          quiet: props.unavailable === true,
         }),
       };
       if (props.kind === 'precision') attrs['data-precision'] = props.value;
-      else attrs['data-preset'] = props.value;
+      else if (props.kind === 'provider') {
+        attrs['data-provider'] = props.value;
+        /* An endpoint outside Standard routing is drawn quiet and says so in the DOM, so a
+           stylesheet or a test can see the distinction the ink already draws. */
+        if (props.unavailable === true) attrs['data-unavailable'] = 'true';
+      } else attrs['data-preset'] = props.value;
       return h(
         'button',
         attrs,
@@ -4672,10 +5174,15 @@ window.__ModuleLoader__.load({
      * Session currently runs on in the tertiary tone on the right, and a chevron saying it
      * opens a list. It is the whole navigation of the two-level menu — pressing it drills
      * in, Escape comes back out.
+     *
+     * A disabled cell is one a pin already decided: it keeps drawing both halves — that is
+     * how the endpoint's own tier and precision stay readable — but the button is disabled,
+     * so a press cannot open a list whose pick the relay would ignore.
      */
     function ChipCell(props) {
       const [hovered, setHovered] = React.useState(false);
       const [focused, setFocused] = React.useState(false);
+      const disabled = props.disabled === true;
       return h(
         'button',
         {
@@ -4683,12 +5190,13 @@ window.__ModuleLoader__.load({
           role: 'menuitem',
           ref: props.cellRef,
           'aria-label': props.ariaLabel,
+          disabled: disabled,
           onMouseEnter: () => setHovered(true),
           onMouseLeave: () => setHovered(false),
           onFocus: () => setFocused(true),
           onBlur: () => setFocused(false),
-          onClick: props.onClick,
-          style: chipCellStyle({ hovered: hovered, focused: focused }),
+          onClick: disabled ? undefined : props.onClick,
+          style: chipCellStyle({ hovered: hovered, focused: focused, disabled: disabled }),
         },
         h('span', { style: CHIP_CELL_LABEL_STYLE }, props.label),
         h('span', { style: CHIP_CELL_VALUE_STYLE }, props.value),
@@ -4702,19 +5210,21 @@ window.__ModuleLoader__.load({
      * It changes the *Session*, not the provider row: the relay applies the preset to the
      * request body on the way out, so switching is a runtime choice like `reasoningEffort`
      * and never mints a provider route per preset. The preset is an outcome; the precision
-     * floor is a constraint on which endpoints that outcome may land on, so both are set
-     * from one popover, shaped like the composer's model picker: the root pane is a pair of
-     * cells ("Tier — Cheapest ›", "Precision — ≥8-bit ›") and a cell drills into its own
-     * list. Escape and Shift+Tab step back out to the root before closing. There is still
-     * exactly one control in the composer.
+     * floor is a constraint on which endpoints that outcome may land on; the provider pin is
+     * the endpoint itself, which outranks both. All three are set from one popover, shaped
+     * like the composer's model picker: the root pane is a row of cells ("Tier — Cheapest ›",
+     * "Precision — ≥8-bit ›", "Provider — Auto ›") and a cell drills into its own list.
+     * Escape and Shift+Tab step back out to the root before closing. There is still exactly
+     * one control in the composer.
      *
      * Unlike the model picker, a pick returns to the root pane and leaves the popover open,
-     * so both facets can be set in one visit; it closes on an outside press, Escape from the
-     * root pane, or the trigger itself.
+     * so all three facets can be set in one visit; it closes on an outside press, Escape from
+     * the root pane, or the trigger itself.
      *
-     * This chip talks to the Host's `/tier` and `/precision` APIs and nothing else; it
-     * writes no provider configuration, never touches the settings draft, and renders
-     * nothing unless the Session runs on a row mounted from one of our targets.
+     * This chip talks to the Host's `/tier`, `/precision`, `/providers` and `/provider` APIs
+     * and nothing else; it writes no provider configuration, never touches the settings
+     * draft, and renders nothing unless the Session runs on a row mounted from one of our
+     * targets.
      *
      * A blank Session has no durable `modelSelection` yet (the projection stays
      * `{lastUsed: null, next: null}` until its first message), so keying the chip off the
@@ -4773,10 +5283,15 @@ window.__ModuleLoader__.load({
       const [hovered, setHovered] = React.useState(false);
       const [focused, setFocused] = React.useState(false);
       /* Which pane the menu shows. It always opens on the root cells — never straight into
-         a list — and a cell drills into `tier` or `precision`; Escape/Shift+Tab come back. */
+         a list — and a cell drills into `tier`, `precision` or `provider`; Escape and
+         Shift+Tab come back. */
       const [pane, setPane] = React.useState(CHIP_PANE_ROOT);
       const [pendingTier, setPendingTier] = React.useState(null);
       const [pendingPrecision, setPendingPrecision] = React.useState(null);
+      /* `null` is idle; a tag is a pin being written; `''` is a clear being written. A
+         confirmed pick and a pending one differ only in which state reads the value, which
+         is what keeps the cells and the badge optimistic without a second copy of them. */
+      const [pendingProvider, setPendingProvider] = React.useState(null);
       const [error, setError] = React.useState('');
       const [anchor, setAnchor] = React.useState(null);
       /* What the Host reports for this Session: `{ preset, chosen, default }`. `chosen` is
@@ -4786,11 +5301,21 @@ window.__ModuleLoader__.load({
          answer. Null is not an error state: the chip then badges `any`, which hides the
          second half, so a Host from before this feature looks exactly like the old chip. */
       const [precisionState, setPrecisionState] = React.useState(null);
+      /* `{ provider, chosen, model, available }`: the endpoint this Session pins, or null for
+         none. Null is also what an older Host's 404 leaves behind, which is why the Provider
+         cell falls back to `Auto` rather than to an error. */
+      const [providerState, setProviderState] = React.useState(null);
+      /* This model's endpoints, or the empty list before (or instead of) an answer — the
+         Provider pane still opens and still holds the row that clears a pin. */
+      const [providerList, setProviderList] = React.useState(EMPTY_PROVIDER_LIST);
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
       const tierCellRef = React.useRef(null);
       const precisionCellRef = React.useRef(null);
+      const providerCellRef = React.useRef(null);
+      /* The cell each drilled pane hands its keyboard back to, by pane id. */
+      const cellRefs = { tier: tierCellRef, precision: precisionCellRef, provider: providerCellRef };
       /* Where the next render should put the keyboard: the cell that opened the drilled
          pane, or the list of the pane just entered. The model picker works the same way. */
       const pendingFocusRef = React.useRef(null);
@@ -4832,6 +5357,7 @@ window.__ModuleLoader__.load({
         setPane(CHIP_PANE_ROOT);
         setPendingTier(null);
         setPendingPrecision(null);
+        setPendingProvider(null);
         setError('');
         setAnchor(null);
       }, [providerKey]);
@@ -4909,6 +5435,91 @@ window.__ModuleLoader__.load({
         };
       }, [feedState.origin, sessionId]);
 
+      /*
+       * Read this Session's pinned endpoint beside its preset and its floor. A pin is the
+       * strongest of the three — it overrides both — so a failed read must leave the chip
+       * exactly as released rather than guess an endpoint; `null` here is "no pin", which
+       * is what the chip already renders with no answer at all.
+       */
+      React.useEffect(() => {
+        const origin = feedState.origin;
+        if (origin === null || typeof sessionId !== 'string' || sessionId === '') {
+          setProviderState(null);
+          return undefined;
+        }
+        const controller = new AbortController();
+        void (async () => {
+          try {
+            const response = await fetch(
+              origin + CONTROL_PREFIX + '/provider?session=' + encodeURIComponent(sessionId),
+              { method: 'GET', mode: 'cors', cache: 'no-store', headers: { accept: 'application/json' }, signal: controller.signal },
+            );
+            const payload = await readJsonSafe(response);
+            if (!response.ok) return;
+            const next = normalizeProviderState(payload);
+            if (next !== null && aliveRef.current) setProviderState(next);
+          } catch (error) {
+            /* No answer leaves the Provider cell on `Auto`: the chip still draws. */
+          }
+        })();
+        return () => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+        };
+      }, [feedState.origin, sessionId]);
+
+      /*
+       * Read this model's upstream endpoints, once per page: the list belongs to the model,
+       * not to the Session, and the chip remounts on every provider switch. A refusal — a
+       * Host that predates the route answers 404, the route itself answers 502 — is the
+       * empty list, and it is the one thing not cached, so a Host that gains the route (or
+       * an upstream that came back) is picked up by the next mount instead of never.
+       */
+      React.useEffect(() => {
+        const origin = feedState.origin;
+        const base = baseModelId(modelKey);
+        if (origin === null || base === '') {
+          setProviderList(EMPTY_PROVIDER_LIST);
+          return undefined;
+        }
+        /* Keyed by origin as well as model: a rebind puts the page in front of a different
+           Host, and that Host's list for the same model is not this list. */
+        const cacheKey = origin + '|' + base;
+        const cached = providerListCache.get(cacheKey);
+        if (cached !== undefined) {
+          setProviderList(cached);
+          return undefined;
+        }
+        setProviderList(EMPTY_PROVIDER_LIST);
+        const controller = new AbortController();
+        void (async () => {
+          try {
+            const response = await fetch(
+              origin + CONTROL_PREFIX + '/providers?model=' + encodeURIComponent(base),
+              { method: 'GET', mode: 'cors', cache: 'no-store', headers: { accept: 'application/json' }, signal: controller.signal },
+            );
+            const payload = await readJsonSafe(response);
+            if (!response.ok) return;
+            if (!isPlainObject(payload) || payload.ok === false) return;
+            const next = normalizeProviderList(payload);
+            providerListCache.set(cacheKey, next);
+            if (aliveRef.current) setProviderList(next);
+          } catch (error) {
+            /* No list is a usable state: the cell says `Auto`, the pane keeps its clear row. */
+          }
+        })();
+        return () => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+        };
+      }, [feedState.origin, modelKey]);
+
       /* Anchor the popover above the trigger, in viewport coordinates: the composer bar
          clips vertical overflow, so an absolutely positioned menu would be cut off. */
       React.useEffect(() => {
@@ -4957,7 +5568,8 @@ window.__ModuleLoader__.load({
         pendingFocusRef.current = null;
         if (intent === null) return undefined;
         if (intent !== 'row') {
-          const cell = intent === 'precision' ? precisionCellRef.current : tierCellRef.current;
+          const ref = cellRefs[intent] === undefined ? tierCellRef : cellRefs[intent];
+          const cell = ref.current;
           if (cell !== null && cell !== undefined && typeof cell.focus === 'function') {
             try {
               cell.focus({ preventScroll: true });
@@ -4996,8 +5608,8 @@ window.__ModuleLoader__.load({
       if (stringValue(source.targetId).trim() === '') return null;
 
       const name = stringValue(source.displayName).trim() || providerKey;
-      /* One mutation at a time, whichever facet started it: both write the same Session. */
-      const busy = pendingTier !== null || pendingPrecision !== null;
+      /* One mutation at a time, whichever facet started it: all three write the same Session. */
+      const busy = pendingTier !== null || pendingPrecision !== null || pendingProvider !== null;
       /* `chosen` is the preset this Session picked, empty while it follows the profile
          default; `preset` is what its next request will actually send. */
       const activePreset = tierState === null ? 'none' : tierState.preset;
@@ -5011,16 +5623,29 @@ window.__ModuleLoader__.load({
       const shownUnknown = pendingPrecision === null
         ? precisionChoice.includeUnknown
         : precisionIncludeUnknownDefault(pendingPrecision);
+      /* The pin the chip displays, read the same optimistic way: a pending write stands in
+         for the confirmed one until the read-back settles it, and `''` is a pending clear.
+         A pin owns the tier and the floor, so these two lines decide all three cells. */
+      const confirmedPin = providerPinForModel(providerState, modelKey);
+      const pinnedProvider = pendingProvider === null
+        ? confirmedPin
+        : pendingProvider === ''
+          ? null
+          : providerPinFromList(providerList, pendingProvider);
+      const pinnedTag = pinnedProvider === null ? '' : pinnedProvider.tag;
       /* Labels only. What each preset actually sends is explained once on the settings
          page; repeating it here would make every open menu a wall of text. */
       const presetLabel = (id) => t('preset.' + id);
       /* `<preset label>` + `<precision short label>`, or the preset label alone while the floor is
          `any` — which is what keeps a chip nobody has configured pixel-identical to the one this
          plugin already shipped. The two halves stay apart so the floor can be painted in the
-         caption tone, the way the model seat paints its effort. */
-      const badgeParts = pendingTier === null
-        ? chipBadgeParts(t, presetLabel(activePreset), { floor: shownFloor })
-        : { label: t('tier.switching'), precision: '' };
+         caption tone, the way the model seat paints its effort. A pinned endpoint replaces
+         both halves with the endpoint it fixes. */
+      const badgeParts = pinnedProvider !== null
+        ? chipBadgeParts(t, presetLabel(activePreset), { floor: shownFloor }, pinnedProvider)
+        : pendingTier === null
+          ? chipBadgeParts(t, presetLabel(activePreset), { floor: shownFloor })
+          : { label: t('tier.switching'), precision: '' };
       const badge = badgeParts.precision === ''
         ? badgeParts.label
         : badgeParts.label + ' ' + badgeParts.precision;
@@ -5031,6 +5656,7 @@ window.__ModuleLoader__.load({
         activePreset: activePreset,
         switchingPreset: pendingTier !== null,
         floor: shownFloor,
+        provider: pinnedProvider,
       });
       const rows = pane === CHIP_PANE_ROOT
         ? []
@@ -5039,6 +5665,8 @@ window.__ModuleLoader__.load({
             profileDefault: profileDefault,
             chosenPreset: chosenPreset,
             precisionFloor: shownFloor,
+            providerList: providerList,
+            pinnedTag: pinnedTag,
           });
 
       /* One POST, no provider write: the Host records the choice for this Session and the
@@ -5101,6 +5729,21 @@ window.__ModuleLoader__.load({
         return next;
       };
 
+      /* The pin is the endpoint tag itself: the Host records it for this Session and the
+         relay turns it into the request's provider preference, so nothing here writes a
+         provider row. The model travels with it so the Host can resolve a tag it has never
+         listed for that id; the base id is the one the pin belongs to, not the variant. */
+      const postProvider = async (tag) => {
+        const payload = await postControl('/provider', {
+          session: sessionId,
+          provider: tag === '' ? null : tag,
+          model: baseModelId(modelKey),
+        });
+        const next = normalizeProviderState(payload);
+        if (next === null) throw new Error(t('strip.stalled'));
+        return next;
+      };
+
       const switchTier = async (preset) => {
         if (busy) return;
         if (preset === chosenPreset) {
@@ -5158,7 +5801,43 @@ window.__ModuleLoader__.load({
         setPrecisionState(next);
       };
 
-      /* The focusable items of the pane that is showing: the two root cells, or the rows. */
+      const switchProvider = async (tag) => {
+        if (busy) return;
+        const target = stringValue(tag).trim();
+        /* Re-picking the row that is already ticked is not a write: it is a no-op that must
+           not cost a round trip, exactly like re-picking the current preset. */
+        if (target === pinnedTag) {
+          setError('');
+          return;
+        }
+        /* `''` is the clear: `pendingProvider === null` is the only idle state, which is
+           what lets the pending value stay a plain string the cells can render. */
+        setPendingProvider(target);
+        setError('');
+
+        let next = null;
+        let failure = '';
+        try {
+          next = await postProvider(target);
+        } catch (exception) {
+          failure = unknownOutcomeMessage(t, exception);
+        }
+
+        if (!aliveRef.current) return;
+        setPendingProvider(null);
+        if (next === null) {
+          setError(
+            t('provider.error', { message: failure === '' ? t('offline.noReason') : failure }),
+          );
+          return;
+        }
+        setProviderState(next);
+        /* Like the other two: the popover stays open on the root cells, so pinning one
+           endpoint and unpinning it is not a two-visit round trip. */
+      };
+
+      /* The focusable items of the pane that is showing: the root cells that are not owned
+         by a pin, or the rows. Headings are `role="presentation"`, so they never appear. */
       const paneItems = () => {
         const menu = menuRef.current;
         if (menu === null || menu === undefined || typeof menu.querySelectorAll !== 'function') return [];
@@ -5187,6 +5866,11 @@ window.__ModuleLoader__.load({
 
       /** Drill into one list: the next render puts the keyboard on its ticked row. */
       const drill = (next) => {
+        /* A cell a pin owns states the endpoint's value and has no list behind it: the
+           render disables the button, and the decision is refused here too so no other
+           route into a pane (a stale focus intent, a future control) can reach one. */
+        const cell = cells.find((candidate) => candidate.facet === next);
+        if (cell !== undefined && cell.disabled === true) return;
         pendingFocusRef.current = 'row';
         /* A stale failure belongs to the pane it happened in, not to this one. */
         setError('');
@@ -5195,7 +5879,7 @@ window.__ModuleLoader__.load({
 
       /** Leave a drilled pane for the root cells, handing the keyboard back to its cell. */
       const back = () => {
-        const from = pane === 'precision' ? 'precision' : 'tier';
+        const from = pane === CHIP_PANE_ROOT ? 'tier' : pane;
         pendingFocusRef.current = from;
         setPane(CHIP_PANE_ROOT);
       };
@@ -5241,8 +5925,9 @@ window.__ModuleLoader__.load({
       const chooseRow = (row) => {
         const from = pane;
         if (pane === 'precision') void switchPrecision(row.value);
+        else if (pane === 'provider') void switchProvider(row.value);
         else void switchTier(row.value);
-        pendingFocusRef.current = from === 'precision' ? 'precision' : 'tier';
+        pendingFocusRef.current = from === CHIP_PANE_ROOT ? 'tier' : from;
         setPane(CHIP_PANE_ROOT);
         setError('');
       };
@@ -5283,23 +5968,33 @@ window.__ModuleLoader__.load({
       const errorLine =
         error === '' ? null : h('p', { role: 'alert', style: Object.assign({}, ALERT_STYLE, { margin: '4px 4px 0' }) }, error);
 
+      /* One option kind per pane, so each row is pinned by an attribute of its own facet.
+         The endpoint pane is the only one whose list also carries heading rows. */
+      const rowKind = pane === 'precision' ? 'precision' : pane === 'provider' ? 'provider' : 'preset';
       const activeRows = rows.map((row) =>
-        h(ChipOption, {
-          key: row.key,
-          value: row.value,
-          label: row.label,
-          hint: row.hint,
-          kind: pane === 'precision' ? 'precision' : 'preset',
-          selected: row.selected,
-          disabled: busy,
-          onClick: () => {
-            chooseRow(row);
-          },
-        }),
+        row.header === true
+          ? /* A heading is a label, not an option: no role and no tab stop, so the arrow
+               keys walk the endpoints underneath it and never land on a word. */
+            h('div', { key: row.key, role: 'presentation', style: CHIP_GROUP_STYLE }, row.label)
+          : h(ChipOption, {
+              key: row.key,
+              value: row.value,
+              label: row.label,
+              hint: row.hint,
+              kind: rowKind,
+              unavailable: row.unavailable === true,
+              selected: row.selected,
+              disabled: busy,
+              onClick: () => {
+                chooseRow(row);
+              },
+            }),
       );
 
-      /* The root pane: exactly two cells, saying what the Session runs on and opening the
-         list behind each. The values are the same ones the trigger badges. */
+      /* The root pane: three cells, saying what the Session runs on and opening the list
+         behind each. The values are the same ones the trigger badges; a cell the pin owns is
+         disabled, so it states the endpoint's own tier and precision without offering the
+         choice back. */
       const rootPane = h(
         'div',
         { role: 'menu', 'aria-label': t('chip.menuAria'), style: CHIP_PANE_STYLE },
@@ -5308,6 +6003,7 @@ window.__ModuleLoader__.load({
           label: cells[0].label,
           value: cells[0].value,
           ariaLabel: cells[0].ariaLabel,
+          disabled: cells[0].disabled,
           onClick: () => {
             drill('tier');
           },
@@ -5317,14 +6013,26 @@ window.__ModuleLoader__.load({
           label: cells[1].label,
           value: cells[1].value,
           ariaLabel: cells[1].ariaLabel,
+          disabled: cells[1].disabled,
           onClick: () => {
             drill('precision');
+          },
+        }),
+        h(ChipCell, {
+          cellRef: providerCellRef,
+          label: cells[2].label,
+          value: cells[2].value,
+          ariaLabel: cells[2].ariaLabel,
+          disabled: cells[2].disabled,
+          onClick: () => {
+            drill('provider');
           },
         }),
       );
 
       /* The drilled pane: the listbox the pressed cell names, with the hint that belongs to
-         it. Selecting a row comes back here, to the root cells. */
+         it. The endpoint pane's hint is the one that also warns about a missing list or a
+         pin that has outlived it, because there is nowhere else to say either. */
       const drilledPane = h(
         'div',
         { style: CHIP_PANE_STYLE },
@@ -5332,16 +6040,23 @@ window.__ModuleLoader__.load({
           'div',
           {
             role: 'listbox',
-            'aria-label': pane === 'precision' ? t('precision.listAria', { name: name }) : t('strip.tierAria', { name: name }),
+            'aria-label':
+              pane === 'provider'
+                ? t('provider.listAria', { name: name })
+                : pane === 'precision'
+                  ? t('precision.listAria', { name: name })
+                  : t('strip.tierAria', { name: name }),
             style: CHIP_LIST_STYLE,
           },
           activeRows,
         ),
-        pane === 'precision'
-          ? shownUnknown
-            ? h('p', { style: CHIP_HINT_STYLE }, t('precision.unknownAdmitted'))
-            : null
-          : h('p', { style: CHIP_HINT_STYLE }, t('preset.hint')),
+        pane === 'provider'
+          ? h('p', { style: CHIP_HINT_STYLE }, providerPaneHint(t, providerList, pinnedTag))
+          : pane === 'precision'
+            ? shownUnknown
+              ? h('p', { style: CHIP_HINT_STYLE }, t('precision.unknownAdmitted'))
+              : null
+            : h('p', { style: CHIP_HINT_STYLE }, t('preset.hint')),
       );
 
       /* Errors sit below whichever pane is showing, so a failed pick is still readable after
@@ -5854,11 +6569,20 @@ window.__ModuleLoader__.load({
           const rawId = 'openrouter-plus-usage-raw-' + String(index);
           const modelText = entry.model === '' ? t('common.notAvailable') : entry.model;
           const sessionFull = entry.sessionId === '' ? '' : entry.sessionId;
-          const sessionText = sessionFull === ''
-            ? t('common.notAvailable')
+          /* The name is what an operator recognises a conversation by; the id is the
+             fallback for a Session the Host has no title for (a subagent, a sweep). It used
+             to be the other way round, which made every row read `session-a1c2e594-\u2026`
+             with the actual name demoted to a caption underneath. */
+          const sessionShort = sessionFull === ''
+            ? ''
             : sessionFull.length > 12
               ? sessionFull.slice(0, 8) + '\u2026'
               : sessionFull;
+          const sessionText = entry.sessionTitle !== ''
+            ? entry.sessionTitle
+            : sessionShort === ''
+              ? t('common.notAvailable')
+              : sessionShort;
 
           rows.push(
             h(
@@ -5936,7 +6660,7 @@ window.__ModuleLoader__.load({
                   title: sessionFull === '' ? undefined : sessionFull,
                 },
                 sessionText,
-                entry.sessionTitle === ''
+                entry.sessionTitle === '' || sessionShort === ''
                   ? null
                   : h(
                       'div',
@@ -5950,7 +6674,7 @@ window.__ModuleLoader__.load({
                           whiteSpace: 'nowrap',
                         },
                       },
-                      entry.sessionTitle,
+                      sessionShort,
                     ),
               ),
               h(
@@ -6202,13 +6926,26 @@ window.__ModuleLoader__.load({
         pageChrome,
         controlUrl,
         controlBase: CONTROL_BASE,
-        /* The chip's two facets are mostly view state, so the pieces a test can hold still
+        /* The chip's three facets are mostly view state, so the pieces a test can hold still
            are the payload readers, the badge text and the row lists they feed. */
         normalizePrecisionState,
         normalizePrecisionChoice,
         precisionFloorOf,
         precisionPostBody,
         precisionShortLabel,
+        /* The provider facet's readers: a Host that predates the route answers the same
+           empty list a Host with nothing to list does, so the readers are the difference
+           between a degraded menu and a broken one. */
+        normalizeProviderList,
+        normalizeProviderState,
+        normalizeProviderPin,
+        providerPinForModel,
+        baseModelId,
+        pinnedProviderLabel,
+        providerHint: providerRowHint,
+        providerTiers: PROVIDER_TIERS,
+        providerPrecisions: PROVIDER_PRECISIONS,
+        chipBadgeParts,
         chipBadgeLabel,
         chipFacetRows,
         /* The root pane and the pane ladder are the two-level menu's whole behaviour, so
