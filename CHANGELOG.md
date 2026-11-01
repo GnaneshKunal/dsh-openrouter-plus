@@ -5,6 +5,59 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [0.6.0] — 2026-11-02
+
+**The endpoint menu can say how fast a provider answers, not only what it charges.** OpenRouter
+reports per-endpoint latency and throughput in the same listing the picker already reads — but both
+fields come back `null` unless the request carries an API key, which is why 0.5.0 left speed off the
+row. The relay never stores a key and already spends the caller's one request at a time on a
+follow-up read, so it now spends it on the listing for the model that request named, and keeps the
+numbers rather than the key.
+
+### Added
+
+- **`latency` and `throughput` on every endpoint row** — `{ p50, p90 }` or `null`: time to first
+  token in milliseconds, output tokens per second, both OpenRouter's rolling 30-minute percentiles.
+  Parsed in `lib/providers.js` from `latency_last_30m` / `throughput_last_30m`, carried by
+  `GET /__openrouter-plus/providers`, printed by the composer's endpoint menu. A listing read
+  without a key reports neither, so a row that has never been routed omits the fact instead of
+  printing a zero.
+- **`onModelSeen(model, authorization, destination)` on the relay.** Called for each forwarded
+  request that named a model, never awaited. The Host answers it with one authenticated listing read
+  (`readProviders(..., { authorization })`), caches the rows and drops the key — the rule
+  `generationLookup` already followed. `destination` is what lets it refuse a request that went to
+  another upstream: a key belonging to one provider is never presented to another.
+- **`providerFacts` (config) and `GET`/`POST /__openrouter-plus/provider-facts`**, plus a
+  **Provider list display** section on the settings page: one checkbox per fact (precision, price,
+  uptime, throughput, latency) and a choice between the median alone and the median beside p90. All
+  facts default to on. The page stages the edit and posts once, because a config write re-applies
+  the plugin and rebinds the relay; the composer chip reads the same object in its own small
+  request, so a change reaches an already-open composer.
+
+### Changed
+
+- **An authenticated listing outlives the row TTL**, for `PROVIDERS_STATS_TTL_MS` (30 minutes — the
+  window its numbers describe), and an anonymous read can no longer replace it while it is fresh.
+  Without that, every menu refresh would trade the speed facts for a freshness they already have.
+  An authenticated read through a fresh anonymous entry upgrades it, which is what makes the menu
+  show numbers as soon as a request for that model has gone through.
+- **`readProviders()` takes an optional `authorization`**, forwarded verbatim for that one GET and
+  stored nowhere. An empty value sends no header at all: a blank one would turn "no key" into
+  "no listing".
+
+### Notes
+
+- **Corrects the 0.5.0 note below.** `latency_last_30m` and `throughput_last_30m` were `null` on
+  every model tested *because those reads carried no key*. Measured the other way on 2026-11-02,
+  `openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints` returns populated
+  percentiles for all 42 endpoints once an `Authorization` header is present, and differs in
+  exactly those fields — so the numbers are public facts behind a login, not account data, and one
+  read can be cached for every Session.
+- **The two speed facts read in opposite directions.** A latency p90 is *worse* than its p50; a
+  throughput p90 sits *below* its p50, because a throughput percentile is a rate that N% of requests
+  reached or exceeded. The paired form is therefore labelled (`p50 134 · p90 58 tok/s`) rather than
+  printed as a range.
+
 ## [0.5.4] — 2026-11-01
 
 **The diagnostics are opt-in.** 0.5.3 added control-API timings to `/status` and a log line per
@@ -166,8 +219,9 @@ listing, and sends it as a *hard* pin.
 ### Notes
 
 - The public endpoints API returns `latency_last_30m` and `throughput_last_30m` as `null` for every
-  model tested. The facet therefore shows price, precision and uptime, and leaves speed to the model
-  page rather than printing a placeholder that reads as zero.
+  model tested *without a key* (corrected in 0.6.0, which reads them authenticated). The facet
+  therefore shows price, precision and uptime, and leaves speed to the model page rather than
+  printing a placeholder that reads as zero.
 - **`status` is read but not interpreted.** It looked like a "routed / not routed" flag and is not
   one: `deepseek/deepseek-v4.1-flash-1017` reports `status: -5` on the endpoint that carries a third
   of its tokens. Availability is derived from the uptime windows instead — every reported window at

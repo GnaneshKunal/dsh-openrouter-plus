@@ -65,6 +65,9 @@ const {
   precisionShortLabel,
   precisionWireLevels,
   providerHint,
+  providerFacts,
+  providerFactsPayload,
+  providerDefaults,
   providerPinForModel,
   providerPrecisions,
   providerTiers,
@@ -1088,4 +1091,114 @@ test('the chip is one trigger over a two-level root-cell menu that drills in', a
   )
   assert.ok(pick.length > 0)
   assert.match(pick, /setPane\(CHIP_PANE_ROOT\)/, 'a pick comes back to the root cells')
+})
+
+test('a row states how fast the endpoint answers, in whole units', () => {
+  /* Both speed facts are OpenRouter's rolling 30-minute percentiles: time to the first
+     token, and output tokens per second. Rounding is the difference between a fact and a
+     measurement report — a millisecond count is not a price. */
+  const row = {
+    tag: 'relace/fp4',
+    name: 'Relace',
+    precision: 'fp4',
+    inputPrice: 0.035,
+    outputPrice: 0.5,
+    uptime1d: 99.65,
+    latency: { p50: 929.5, p90: 3768.5 },
+    throughput: { p50: 100.99999, p90: 35.2 },
+  }
+  assert.equal(providerHint(en, row), 'fp4 \u00b7 $0.035/$0.5 per M \u00b7 99.65% \u00b7 101 tok/s \u00b7 930 ms')
+
+  /* The pair is labelled rather than printed as a range: throughput's p90 is the *slower*
+     tenth, so a bare `101/35 tok/s` would read backwards. */
+  assert.equal(
+    providerHint(en, row, { percentiles: 'p50p90' }),
+    'fp4 \u00b7 $0.035/$0.5 per M \u00b7 99.65% \u00b7 p50 101 \u00b7 p90 35 tok/s \u00b7 p50 930 \u00b7 p90 3769 ms',
+  )
+
+  /* A fact the operator turned off is not stated at all — the line reflows, it does not
+     leave a gap where the fact used to be. */
+  assert.equal(providerHint(en, row, { throughput: false }), 'fp4 \u00b7 $0.035/$0.5 per M \u00b7 99.65% \u00b7 930 ms')
+  assert.equal(
+    providerHint(en, row, { price: false, uptime: false, latency: false }),
+    'fp4 \u00b7 101 tok/s',
+  )
+  assert.equal(
+    providerHint(en, row, {
+      precision: false,
+      price: false,
+      uptime: false,
+      throughput: false,
+      latency: false,
+    }),
+    '',
+    'every fact off leaves the row its name, not a floating separator',
+  )
+
+  /* A listing read without a key reports neither number, and the row is what it always was. */
+  assert.equal(
+    providerHint(en, { precision: 'fp4', inputPrice: 0.035, outputPrice: 0.5, uptime1d: 100 }),
+    'fp4 \u00b7 $0.035/$0.5 per M \u00b7 100%',
+  )
+
+  /* In the pair form one missing percentile still states the one that exists — labelled,
+     because an unlabelled number would claim to be the median — and never a dash. */
+  assert.equal(
+    providerHint(en, { precision: 'fp4', latency: { p50: 930, p90: null } }, { percentiles: 'p50p90' }),
+    'fp4 \u00b7 p50 930 ms',
+  )
+  assert.equal(
+    providerHint(en, { precision: 'fp4', latency: { p50: null, p90: 3769 } }, { percentiles: 'p50p90' }),
+    'fp4 \u00b7 p90 3769 ms',
+  )
+  /* ...and the translation speaks the same parts. */
+  assert.equal(
+    providerHint(zh, { precision: 'fp4', throughput: { p50: 50, p90: null } }, { percentiles: 'p50p90' }),
+    'fp4 \u00b7 p50 50 token/\u79d2',
+  )
+})
+
+test('the display preference is tolerant, and a Host without the route is not offered one', () => {
+  /* Absent means on: a hand-edited row that names two facts must not hide the other three. */
+  assert.deepEqual(providerFacts({ throughput: false }), {
+    precision: true,
+    price: true,
+    uptime: true,
+    throughput: false,
+    latency: true,
+    percentiles: 'p50',
+  })
+  /* Only an explicit `false` hides; junk reads as the default, the way the config readers
+     treat every other preference. */
+  assert.equal(providerFacts({ latency: 'no' }).latency, true)
+  assert.equal(providerFacts({ percentiles: 'p90' }).percentiles, 'p50')
+  assert.equal(providerFacts({ percentiles: 'p50p90' }).percentiles, 'p50p90')
+  assert.deepEqual(providerFacts(null), { ...providerDefaults })
+  assert.deepEqual(providerFacts('on'), { ...providerDefaults })
+
+  /* The payload reader is the availability gate: no `providerFacts` key, no control. */
+  assert.equal(providerFactsPayload({ ok: false }), null)
+  assert.equal(providerFactsPayload({ ok: true }), null)
+  assert.equal(providerFactsPayload(null), null)
+  assert.equal(providerFactsPayload({ ok: true, providerFacts: { uptime: false } }).uptime, false)
+})
+
+test('the row reader carries both speed facts, and null when the Host reported none', () => {
+  const list = normalizeProviderList({
+    ok: true,
+    providers: [
+      { tag: 'a/b', latency: { p50: 100, p90: 400 }, throughput: { p50: 50, p90: 20 } },
+      { tag: 'c/d', latency: null, throughput: null },
+      { tag: 'e/f', latency: { junk: true }, throughput: 'fast' },
+      { tag: 'g/h', latency: { p50: 100 } },
+    ],
+  })
+  const [fast, silent, junk, half] = list.providers
+  assert.deepEqual(fast.latency, { p50: 100, p90: 400 })
+  assert.deepEqual(fast.throughput, { p50: 50, p90: 20 })
+  assert.equal(silent.latency, null)
+  assert.equal(silent.throughput, null)
+  assert.equal(junk.latency, null, 'an object with no usable percentile is no statement')
+  assert.equal(junk.throughput, null)
+  assert.deepEqual(half.latency, { p50: 100, p90: null }, 'one percentile is still a fact')
 })

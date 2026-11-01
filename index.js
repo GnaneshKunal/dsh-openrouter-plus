@@ -19,6 +19,7 @@
 import { fetchEndpoints, survives } from './lib/endpoints.js'
 import {
   PROVIDERS_CACHE_LIMIT,
+  PROVIDERS_STATS_TTL_MS,
   PROVIDERS_TTL_MS,
   findProvider,
   groupProviders,
@@ -116,7 +117,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
 
 /* Kept equal to package.json's version: `/health` reports it and a release commit is the
    one moment this literal and the manifest must agree. */
-const VERSION = '0.5.4'
+const VERSION = '0.6.0'
 
 /**
  * How long a burst of relayed calls is coalesced before the usage snapshot is written.
@@ -145,6 +146,7 @@ const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
  *   sessionPrecisions: Record<string, { floor: string, includeUnknown: boolean }>,
  *   sessionPrecisionStamp: Record<string, number>,
  *   usageWidget: { enabled: boolean },
+ *   providerFacts: ReturnType<typeof normalizeProviderFacts>,
  * }}
  */
 export function normalizeConfig(raw) {
@@ -198,6 +200,10 @@ export function normalizeConfig(raw) {
     // Whether the sidebar card is drawn. The flag hides the card, never the numbers:
     // the settings page shows the same spend whether or not the card is on.
     usageWidget: { enabled: normalizeUsageWidget(config.usageWidget) },
+    // Which facts a provider row states beside its name, and how many percentiles of a
+    // speed it prints. Display only: the relay never reads this, and a fact that is off
+    // is simply not painted, not withheld from the listing.
+    providerFacts: normalizeProviderFacts(config.providerFacts),
   }
 }
 
@@ -212,6 +218,38 @@ export function normalizeUsageWidget(value) {
   if (value === false) return false
   if (isPlainObject(value) && value.enabled === false) return false
   return true
+}
+
+/**
+ * Which facts a provider row states, and how many percentiles of a speed it prints.
+ *
+ * Tolerant by design and on by default, one flag per fact: a row that does not mention a
+ * fact shows it when the listing reports one, and a fact the listing omits is already
+ * dropped row by row — so "on" never prints an empty column, it only stops one appearing
+ * late. Only an explicit `false` turns a fact off, which means a hand-edited row that
+ * writes `providerFacts: { latency: false }` reads exactly as the page's checkboxes do,
+ * and a typo cannot hide a whole column.
+ *
+ * `percentiles` is a choice rather than a flag: `p50` is the honest single number for both
+ * speed fields, and `p50p90` adds the tail. Anything else falls back to `p50`, which is the
+ * narrower answer and the one a label can always fit.
+ *
+ * @param {unknown} raw
+ * @returns {{
+ *   precision: boolean, price: boolean, uptime: boolean, throughput: boolean,
+ *   latency: boolean, percentiles: 'p50' | 'p50p90',
+ * }}
+ */
+export function normalizeProviderFacts(raw) {
+  const facts = isPlainObject(raw) ? raw : {}
+  return {
+    precision: facts.precision !== false,
+    price: facts.price !== false,
+    uptime: facts.uptime !== false,
+    throughput: facts.throughput !== false,
+    latency: facts.latency !== false,
+    percentiles: facts.percentiles === 'p50p90' ? 'p50p90' : 'p50',
+  }
 }
 
 /**
@@ -1175,6 +1213,24 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * Persist the provider-facts display preferences.
+   *
+   * Another preference in the plugin's own row, for the same reason as the sidebar flag:
+   * it decides what a row *shows*, never what the relay sends, so nothing on the request
+   * path has any use for it. The object written is the normalised one, so the row reads
+   * back with five named flags on the next boot instead of whatever subset the page sent.
+   *
+   * @param {ReturnType<typeof normalizeProviderFacts>} next
+   */
+  async function writeProviderFacts(next) {
+    const { editor, entry, current } = ownRow()
+    await editor.edit(entry, (currentConfig) => ({
+      ...(isPlainObject(currentConfig) ? currentConfig : current),
+      providerFacts: next,
+    }))
+  }
+
+  /**
    * The preset one Session runs on: its own choice, else the configured default.
    * An unknown/blank Session gets the default — a proxy hop with no session is still
    * the correct answer, never an error.
@@ -1591,16 +1647,51 @@ export function apply(ctx, rawConfig) {
   // ── the provider menu's listing ──────────────────────────────────────────
   // Choosing a pin needs a question the request path never asks: not "does anything
   // survive this filter" but "what are all the endpoints, and what does each cost and
-  // report". That listing is the same public GET, parsed wider (lib/providers.js) and
-  // cached apart from the admission cache above — this one holds tens of kilobytes per
-  // model, is read only when an operator opens the menu, and is never touched by a
-  // request. Keeping them separate is what lets admission stay synchronous and cheap.
+  // report". That listing is the same GET, parsed wider (lib/providers.js) and cached
+  // apart from the admission cache above — this one holds tens of kilobytes per model,
+  // is read when an operator opens the menu, and is never *consulted* by a request.
+  // Keeping them separate is what lets admission stay synchronous and cheap.
+  //
+  // There is one exception, and it is a warm-up rather than a read: the speed fields are
+  // populated only when the GET is authenticated, so a relayed request that carried the
+  // caller's key reads the listing for the model it named (see `onModelSeen` below) and
+  // leaves it here. That read is fire-and-forget, so no request ever waits on it — the
+  // point is only that the menu opened afterwards has numbers in it.
 
-  /** @type {Map<string, { at: number, providers: unknown[] }>} */
+  /**
+   * One model's rows, and whether the read that produced them carried a key.
+   *
+   * `authed` decides two things beyond what is stored: a listing with speed outlives the
+   * row TTL (see {@link PROVIDERS_STATS_TTL_MS}), and an anonymous read may not replace it
+   * while it is inside that window. Without that second rule a menu refresh would keep
+   * replacing the only rows that carry speed with identical rows that do not, and every
+   * open would throw the numbers away.
+   *
+   * @type {Map<string, { at: number, providers: unknown[], authed: boolean }>}
+   */
   const providerListings = new Map()
 
-  /** In-flight reads, keyed by model: one public GET per model at a time. @type {Map<string, Promise<void>>} */
+  /**
+   * In-flight reads, keyed by {@link providerReadKey}: one GET per model and kind at a
+   * time. An authenticated caller must never join an anonymous flight, or it would be
+   * handed exactly the rows whose speed fields are null.
+   *
+   * @type {Map<string, Promise<void>>}
+   */
   const providerReads = new Map()
+
+  /**
+   * The in-flight key for one read: the model, and whether the read is authenticated.
+   *
+   * Serialised as a pair rather than glued together with a separator, so no model id —
+   * however odd — can name the other kind's flight.
+   *
+   * @param {string} model
+   * @param {boolean} authed
+   */
+  function providerReadKey(model, authed) {
+    return JSON.stringify([model, authed])
+  }
 
   /**
    * Remember one model's provider rows, with bounded eviction.
@@ -1609,11 +1700,43 @@ export function apply(ctx, rawConfig) {
    * model whose listing 502s is not re-read on every menu open. The menu shows "no
    * providers" instead, which is the truth.
    *
+   * An anonymous read does not replace an authenticated one while that one is still within
+   * {@link PROVIDERS_STATS_TTL_MS}: the rows would come back identical except for the
+   * speed, so the replacement would trade facts for a freshness those facts do not have to
+   * satisfy. Past that window the numbers have rolled anyway and either read is as honest
+   * as the other. An entry with no rows is exempt: a failed read has no numbers to protect,
+   * and holding the menu to it for half an hour would turn one bad read into a menu that
+   * never retries.
+   *
    * @param {string} model
    * @param {unknown[]} providers
+   * @param {boolean} authed  whether the read that produced these rows carried a key
    */
-  function rememberProviders(model, providers) {
-    providerListings.set(model, { at: Date.now(), providers })
+  function rememberProviders(model, providers, authed) {
+    const existing = providerListings.get(model)
+    /* A failed read may not replace rows that are still fresh. Before the warm-up existed
+       this could not happen — a read only ran when the cache was empty — but an authenticated
+       read deliberately runs *through* a fresh anonymous entry to upgrade it, so a rejected
+       one (a 429, a blip on the endpoints API) would otherwise blank a working menu for the
+       whole row TTL. An entry that is already stale is still replaced by the failure, which is
+       what keeps a bad read from being retried on every menu open. */
+    if (
+      providers.length === 0 &&
+      existing !== undefined &&
+      existing.providers.length > 0 &&
+      Date.now() - existing.at < PROVIDERS_TTL_MS
+    ) {
+      return
+    }
+    if (
+      authed !== true &&
+      existing?.authed === true &&
+      existing.providers.length > 0 &&
+      Date.now() - existing.at < PROVIDERS_STATS_TTL_MS
+    ) {
+      return
+    }
+    providerListings.set(model, { at: Date.now(), providers, authed: authed === true })
     if (providerListings.size > PROVIDERS_CACHE_LIMIT) {
       const ordered = [...providerListings.entries()].sort((a, b) => a[1].at - b[1].at)
       for (const [key] of ordered.slice(0, providerListings.size - PROVIDERS_CACHE_LIMIT)) {
@@ -1622,11 +1745,23 @@ export function apply(ctx, rawConfig) {
     }
   }
 
-  /** One model's listing if it is still fresh, else null. */
+  /**
+   * One model's listing if it is still usable, else null.
+   *
+   * Two windows: the row TTL for any listing, and the longer stats window for one read
+   * with a key, whose speed numbers are a rolling 30-minute average and so still describe
+   * the window a fresh read would. The longer window is for rows that carry that report —
+   * an empty answer is a failed read, and it stays cached for the ordinary TTL so a bad
+   * read cannot keep the menu blank for half an hour.
+   */
   function cachedProviders(model) {
     const cached = providerListings.get(model)
     if (cached === undefined) return null
-    return Date.now() - cached.at < PROVIDERS_TTL_MS ? cached : null
+    const age = Date.now() - cached.at
+    if (age < PROVIDERS_TTL_MS) return cached
+    return cached.authed === true && cached.providers.length > 0 && age < PROVIDERS_STATS_TTL_MS
+      ? cached
+      : null
   }
 
   /**
@@ -1634,18 +1769,30 @@ export function apply(ctx, rawConfig) {
    *
    * Unlike the admission read this one *is* awaited, because the answer is the response —
    * a menu with no rows is worse than a slow one. Single-flight, so a page that asks for
-   * the same model twice (a reload, two tabs) still costs one public GET.
+   * the same model twice (a reload, two tabs) still costs one GET.
+   *
+   * `authorization` is the caller's own key, forwarded verbatim for the one read and
+   * stored nowhere. It does not make the read slower to answer: an anonymous entry is
+   * still an answer to an anonymous question, but not to an authenticated one — those rows
+   * have the speed fields nulled — so an authed call reads through and *upgrades* the
+   * entry instead of joining it. That upgrade is what keeps a menu opened right after a
+   * request from showing a warm listing with no numbers in it.
    *
    * @param {string} model
+   * @param {string | null} [authorization]
    * @returns {Promise<{ providers: unknown[], fetchedAt: number, cached: boolean, error?: string }>}
    */
-  async function providerListing(model) {
+  async function providerListing(model, authorization = null) {
+    const authed = typeof authorization === 'string' && authorization.trim() !== ''
     const fresh = cachedProviders(model)
-    if (fresh !== null) return { providers: fresh.providers, fetchedAt: fresh.at, cached: true }
-    if (!providerReads.has(model)) {
-      const read = readProviders(config.upstream, model)
+    if (fresh !== null && (!authed || fresh.authed === true)) {
+      return { providers: fresh.providers, fetchedAt: fresh.at, cached: true }
+    }
+    const key = providerReadKey(model, authed)
+    if (!providerReads.has(key)) {
+      const read = readProviders(config.upstream, model, authed ? { authorization } : {})
         .then((listing) => {
-          rememberProviders(model, listing.providers)
+          rememberProviders(model, listing.providers, authed)
           /* The same GET answers both questions, so it seeds both caches. Without this the
              two readers would cost two public GETs per model per TTL — and, worse, the
              first request after a pin would be *unpinned*, because admission would still
@@ -1657,15 +1804,15 @@ export function apply(ctx, rawConfig) {
         })
         .catch((error) => {
           const reason = error instanceof Error ? error.message : String(error)
-          rememberProviders(model, [])
+          rememberProviders(model, [], authed)
           log('warn', 'could not read the provider listing for the menu', { model, reason })
         })
         .finally(() => {
-          providerReads.delete(model)
+          providerReads.delete(key)
         })
-      providerReads.set(model, read)
+      providerReads.set(key, read)
     }
-    await providerReads.get(model)
+    await providerReads.get(key)
     const after = cachedProviders(model)
     if (after === null) return { providers: [], fetchedAt: Date.now(), cached: false, error: 'the listing was not readable' }
     return { providers: after.providers, fetchedAt: after.at, cached: false }
@@ -2326,6 +2473,28 @@ export function apply(ctx, rawConfig) {
       sendJson(res, 200, { ok: true, usageWidget: { enabled: body.enabled } })
     }),
 
+    /**
+     * Which facts a provider row states, and how many percentiles it prints.
+     *
+     * A sibling of `/widget` rather than a field of `/status`: the sidebar card polls that
+     * endpoint and has no use for this, while the provider menu needs it at the moment it
+     * paints a row. `GET` answers all five flags and the percentile choice whether the row
+     * wrote a subset or nothing at all; `POST { providerFacts }` stores the normalised
+     * object, so the next boot reads back exactly what the page just sent.
+     */
+    [`${CONTROL_PREFIX}/provider-facts`]: controlRoute(async (req, res) => {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, providerFacts: normalizeProviderFacts(config.providerFacts) })
+        return
+      }
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const next = normalizeProviderFacts(body.providerFacts)
+      await outsideHmrTransaction(ctx, () => writeProviderFacts(next))
+      log('info', 'set the provider-facts display preferences', { providerFacts: next })
+      sendJson(res, 200, { ok: true, providerFacts: next })
+    }),
+
     // There is deliberately no `/routes/twin`: switching a Session's tier must not
     // mint a provider route. The relay writes the tier into the request body, so the
     // only state a switch touches is the Session tier table (`POST /tier`).
@@ -2696,6 +2865,25 @@ export function apply(ctx, rawConfig) {
     onRecord: (entry) => {
       metrics.record(entry)
       scheduleUsageWrite()
+    },
+    /* The caller's key, spent on one listing read for the model it just used. This is the
+       only moment the speed fields are populated: the same GET answered without a key
+       reports them null on every endpoint, so a menu that only ever read anonymously would
+       never have a number to show. Nothing is awaited and nothing is stored but the rows —
+       the key lives exactly as long as the call, like the generation lookup above. */
+    onModelSeen: (model, authorization, destination) => {
+      if (typeof authorization !== 'string' || authorization === '') return
+      /* Only for a request this plugin forwarded to its own upstream. A target mount can be
+         pointed at any API, and the key the client sent belongs to *that* one — spending it
+         on OpenRouter would hand another provider's credential to a host it was never meant
+         for. A listing is only readable at the configured upstream anyway, so the guard
+         costs nothing but the check. */
+      if (typeof destination !== 'string' || !destination.startsWith(`${config.upstream}/`)) return
+      const id = baseModelId(model).trim()
+      // A model this relay cannot read an OpenRouter listing for — one on another
+      // provider's namespace, or no model at all — is simply not warmed.
+      if (id === '' || !id.includes('/')) return
+      void providerListing(id, authorization).catch(() => {})
     },
   })
 

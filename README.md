@@ -61,6 +61,11 @@ switching never mints a provider, a route or a model list.
   surfaces the upstream error, instead of quietly landing somewhere else. Picking one **disables**
   the Tier and Precision cells and shows the endpoint's own values, because the endpoint already
   decided both.
+- **Speed beside the price.** Each endpoint row in that menu can also state how fast it is — output
+  tokens per second and milliseconds to the first token, OpenRouter's own rolling 30-minute
+  percentiles — read with your key on the first request that names the model, and refreshed as you
+  use it. Five facts do not fit one 220 px row, so Settings → OpenRouter Plus carries a checkbox per
+  fact and a choice between the median and the median-plus-p90.
 - **Pinned base URLs** for what a chip cannot cover — `/v1` (no pin), `/default/v1` (Standard),
   `/flex/v1` (Flex), `/priority/v1` (Priority), `/ultrafast/v1` (Ultra). Paste one into an
   OpenAI-compatible provider route and that preset applies to *every* Session on the route,
@@ -406,8 +411,11 @@ row per facet, each showing its current value and opening its own list when pres
   admits. `Any` is the default and sends nothing, so until you pick one the badge reads exactly
   `Cheapest`, the way it always did.
 - **Provider** — `Auto`, or one endpoint from the model's listing: `Relace · fp4`. Each row carries
-  what the endpoint costs and how often it answers. An endpoint whose uptime is reported as zero is
-  drawn quiet rather than hidden, because pinning a struggling endpoint by hand is a legitimate
+  what the endpoint costs, how often it answers and — once this model has been routed at least once —
+  how fast it answers (`134 tok/s · 498 ms`), because speed needs an authenticated read of the same
+  listing. Which of those facts a row states is a setting rather than a guess; see
+  [Choosing what a row says](#choosing-what-a-row-says). An endpoint whose uptime is reported as zero
+  is drawn quiet rather than hidden, because pinning a struggling endpoint by hand is a legitimate
   thing to want.
 
 A pin owns the other two. Pick `deepinfra/fp8/priority` and **Tier** changes to `Priority` and
@@ -441,16 +449,29 @@ and for a model served by many endpoints (42 for DeepSeek V4.1 Flash 1017 at the
 that is often the question that matters: `relace/fp4` bills $0.035/$0.50 per million,
 `particle-ai` $0.05/$0.50, and `fireworks/us` $0.45/$1.80 for the same weights.
 
-The model page's **Providers** tab is that list, and the API behind it is public and keyless:
+The model page's **Providers** tab is that list, and the API behind it is public:
 
 ```
 GET https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints
 ```
 
 Each entry carries the `tag` a request names in `provider.only` — the pin's identity — beside
-`provider_name`, `quantization`, `service_tier`, `pricing` and the uptime windows. Latency and
-throughput are *not* in the public answer (they come back `null`), so the menu shows price and
-uptime and leaves speed to the model page.
+`provider_name`, `quantization`, `service_tier`, `pricing` and the uptime windows.
+`latency_last_30m` and `throughput_last_30m` are the exception: the same GET answers them `null`
+unless it carries an API key, so speed is the one part of the list that is gated.
+
+**Why the menu has speed at all, then.** The relay already forwards your `Authorization` header on
+every request and stores no key. When a request names a model, it spends that key on *one* listing
+read for that model — the same key, the same rule as the generation lookup described above — and
+keeps the rows, never the key. So the first time a model is actually used, its price, uptime,
+latency and throughput all land in the menu cache; the numbers are OpenRouter's own rolling
+30-minute percentiles (time to first token in milliseconds, output tokens per second), and they are
+refreshed whenever a request for that model passes through. A model you have never routed has no
+speed numbers yet, and the row simply omits them rather than printing a zero.
+
+The read is refused when the request went to some *other* upstream (a `/t/<id>/…` mount pointed at a
+different API): that key belongs to that provider, and handing it to OpenRouter would leak a
+credential to a host it was never meant for.
 
 **What a pin sends.** One `provider` object, and nothing else:
 
@@ -476,11 +497,26 @@ cached listing first and attaches the pin only when that endpoint is still there
 request goes out on the Session's own preset and `x-oorp-pin: bypass` says so. The menu says it too:
 a pinned endpoint missing from a fresh listing reads as stale.
 
-**Reading the list costs one GET per model per ten minutes.** Opening the Provider facet reads it,
-and that one read also seeds the precision floor's admission cache — so the first request after a pin
-is already pinned, and turning on a floor does not cost an unfiltered turn. A failed read answers
-with an empty list rather than an error: the facet then says "no providers", which is something an
-operator can act on.
+**Reading the list costs one GET per model per window.** Opening the Provider facet reads it, and
+that one read also seeds the precision floor's admission cache — so the first request after a pin is
+already pinned, and turning on a floor does not cost an unfiltered turn. An *authenticated* read is
+kept for thirty minutes rather than ten, because that is the window its speed numbers describe, and
+it is never replaced by a keyless one while it is fresh. A failed read answers with an empty list
+rather than an error: the facet then says "no providers", which is something an operator can act on.
+
+### Choosing what a row says
+
+Five facts do not fit one menu row, so Settings → OpenRouter Plus → **Provider list display**
+carries a checkbox per fact — precision, price, uptime, throughput, latency — plus a choice between
+the median alone and the median beside p90. All five are on by default, and saving writes
+`providerFacts` onto the plugin row (one Apply, one relay reload). A fact the listing does not
+report is still dropped rather than shown as a dash, which is why turning speed on changes nothing
+until a model has actually been used.
+
+The two speed facts do not read alike in the paired form: a latency p90 is *worse* than its p50,
+while a throughput p90 sits *below* its p50 — a throughput percentile is a speed that N% of
+requests reached or exceeded, so its p90 is the slow tail. That is why the pair is labelled
+`p50 930 · p90 3769 ms` instead of printed as a range.
 
 ## Control API
 
@@ -500,11 +536,13 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
-| `GET /__openrouter-plus/providers?model=<id>` | that model's endpoints — `providers` rows (`tag`, `name`, `tier`, `precision`, prices, uptime, `available`) plus `groups` in display order, and `cached` |
+| `GET /__openrouter-plus/providers?model=<id>` | that model's endpoints — `providers` rows (`tag`, `name`, `tier`, `precision`, prices, uptime, `latency`, `throughput`, `available`) plus `groups` in display order, and `cached`. `latency`/`throughput` are `{ p50, p90 }` or `null` (a keyless read reports none) |
 | `GET /__openrouter-plus/provider?session=<id>&model=<id>` | the endpoint that Session pinned (`{ tag, name, tier, precision }`, or `null`), and whether the model still lists it |
 | `POST /__openrouter-plus/provider` | `{ session, provider, model? }` — pin one endpoint slug; `provider: null` clears it. A slug the model does not list answers `404`. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` — show/hide the sidebar spend card; a config write |
+| `GET /__openrouter-plus/provider-facts` | `{ providerFacts }` — which facts an endpoint row states, and whether it prints the median alone or with p90 |
+| `POST /__openrouter-plus/provider-facts` | `{ providerFacts }` — the same object; a config write on the `providerFacts` key |
 | `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
 | `POST /__openrouter-plus/models/add` | `{ route, upstream?, models: [], remove: [], confirmRemove? }` — add/remove an explicit selection; a removal requires `confirmRemove: true` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
@@ -560,11 +598,20 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 | `usageWidget` | `{ enabled: true }` | draw the sidebar spend card. A bare `false` is accepted; hiding the card hides nothing else — the settings page still shows every number |
+| `providerFacts` | all `true`, `percentiles: p50` | which facts an endpoint row states (`precision`, `price`, `uptime`, `throughput`, `latency`) and whether speed prints the median alone (`p50`) or with the tail (`p50p90`). Only an explicit `false` hides a fact. Written by **Provider list display** on the settings page; display only — the relay never reads it |
 
 ## Security model
 
 - **Loopback only.** The relay forwards the caller's `Authorization` verbatim and stores no key.
   Do not bind a routable interface.
+- **The key is spent, never kept.** Two reads use the caller's own `Authorization` and nothing is
+  written after them: the generation lookup (when a response omits its provider or its bill) and one
+  endpoint-listing read per model per cache window, which is what puts latency and throughput in the
+  provider menu. The **listing** read is refused when the request went to another upstream, so a key
+  belonging to one provider is not presented to another. The generation lookup is older and always
+  asks this plugin's configured `upstream`, whichever mount the request arrived on: a key belonging
+  to a third-party gateway is presented to OpenRouter only if that gateway answered with a
+  generation id (`gen-…` or `X-Generation-Id`).
 - **The control API rides the GUI's origin and fence.** It is mounted on the DSH web server, so it
   is reachable exactly where the GUI is and nowhere else, and every browser request passes the same
   Host/Origin check and session cookie the GUI's own API uses. Only a loopback request with no

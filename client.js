@@ -69,6 +69,9 @@ window.__ModuleLoader__.load({
      * a moment; after this the next answer wins rather than the click.
      */
     const WIDGET_SETTLE_MS = 10000;
+    /* A write's answer can be cut by the reload it causes. Wait long enough for the relay to
+       be back, then ask again, rather than leave staged checkboxes looking unsaved forever. */
+    const FACTS_RETRY_MS = 2000;
 
     /** One URL for every control call: the prefix, resolved against this page. */
     function controlUrl(pathText) {
@@ -191,6 +194,83 @@ window.__ModuleLoader__.load({
       providers: Object.freeze([]),
       groups: Object.freeze([]),
     });
+
+    /**
+     * What a provider row states when nobody has chosen.
+     *
+     * Every fact is on, because that is what the row already says: precision, price and
+     * uptime were not optional before speed existed, and a fact the Host did not report is
+     * dropped anyway — so a default that turns speed on costs nothing on a listing read
+     * without a key, and a default that turned it off would make the setting look broken
+     * for anyone whose relay has seen a request.
+     */
+    const DEFAULT_PROVIDER_FACTS = Object.freeze({
+      precision: true,
+      price: true,
+      uptime: true,
+      throughput: true,
+      latency: true,
+      percentiles: 'p50',
+    });
+
+    /** The facts a row can state, in the order the row prints them and the page lists them. */
+    const PROVIDER_FACT_KEYS = ['precision', 'price', 'uptime', 'throughput', 'latency'];
+
+    /**
+     * One `/provider-facts` answer, or the defaults.
+     *
+     * Absent means on, and only an explicit `false` hides a fact: the config is read at boot
+     * and hand-edited as often as it is written, so a partial object has to render as the
+     * default row rather than as a row missing whatever the edit forgot.
+     */
+    function normalizeProviderFacts(raw) {
+      if (!isPlainObject(raw)) return { ...DEFAULT_PROVIDER_FACTS };
+      const shown = (key) => raw[key] !== false;
+      return {
+        precision: shown('precision'),
+        price: shown('price'),
+        uptime: shown('uptime'),
+        throughput: shown('throughput'),
+        latency: shown('latency'),
+        /* Two percentiles of each speed fact, or the median alone. Anything else reads as
+           the median: a misspelled value must not blank the row. */
+        percentiles: stringValue(raw.percentiles).trim() === 'p50p90' ? 'p50p90' : 'p50',
+      };
+    }
+
+    /**
+     * Whether two facts objects state the same thing.
+     *
+     * Both sides are always built by {@link normalizeProviderFacts}, so the key order is the
+     * same and a string compare is exact — which is what lets the page answer "did anything
+     * change?" instead of "did anyone touch a control?".
+     */
+    function sameProviderFacts(left, right) {
+      return JSON.stringify(normalizeProviderFacts(left)) === JSON.stringify(normalizeProviderFacts(right));
+    }
+
+    /**
+     * `/provider-facts` bodies, normalised; null when the Host predates the route, which is
+     * what keeps the settings page from offering a control that would 404.
+     */
+    function normalizeProviderFactsPayload(payload) {
+      if (!isPlainObject(payload) || payload.ok === false) return null;
+      if (!hasOwn(payload, 'providerFacts')) return null;
+      return normalizeProviderFacts(payload.providerFacts);
+    }
+
+    /**
+     * A speed fact's percentiles as the row prints them, or null when the Host reported none.
+     *
+     * Only p50 and p90 travel: the median is what a row can afford to state, and p90 is the
+     * worst case worth pricing — p75 and p99 would be three more numbers in a menu row.
+     */
+    function percentilePairOf(raw) {
+      if (!isPlainObject(raw)) return null;
+      const p50 = finiteNumber(raw.p50);
+      const p90 = finiteNumber(raw.p90);
+      return p50 === null && p90 === null ? null : { p50, p90 };
+    }
 
     /**
      * The model suffix an endpoint list does not depend on. `:floor` and `:nitro` are price
@@ -395,11 +475,46 @@ window.__ModuleLoader__.load({
          number in English and names itself in the translation, the way a table header does. */
       'provider.price': '${input}/${output} per M',
       'provider.uptime': '{percent}%',
+      /* How fast the endpoint answers: time to the first token, and output tokens per
+         second. Both are OpenRouter's rolling 30-minute percentiles, and a listing read
+         without a key reports neither — so an absent fact is dropped, never printed as 0.
+         In the pair form the numbers share a unit, and each is labelled because throughput's
+         percentiles run the other way: its p90 is the *slow* tail. */
+      'provider.latency': '{ms} ms',
+      'provider.throughput': '{tps} tok/s',
+      'provider.latencyPair': 'p50 {first} \u00b7 p90 {second} ms',
+      'provider.throughputPair': 'p50 {first} \u00b7 p90 {second} tok/s',
+      /* One percentile of a pair that was asked for: labelled, because an unlabelled number
+         would claim to be the median. There is no dash form — a fact that was not reported
+         is dropped, never drawn. */
+      'provider.latencyP50': 'p50 {ms} ms',
+      'provider.latencyP90': 'p90 {ms} ms',
+      'provider.throughputP50': 'p50 {tps} tok/s',
+      'provider.throughputP90': 'p90 {tps} tok/s',
       'provider.hint':
         'A pinned endpoint bypasses OpenRouter routing for this Session only; its precision and price are fixed.',
       'provider.empty': 'This Host did not list any endpoint for the model.',
       'provider.stale': 'The pinned endpoint is no longer listed for this model.',
       'provider.error': 'Could not pin the endpoint: {message}',
+      /* Which facts a provider row states, and how many percentiles of each. Five facts do
+         not fit one 220 px menu row, and speed is the pair an operator may not always want,
+         so the row's vocabulary is a setting instead of a guess about what fits. */
+      'provider.facts.caption': 'Provider list display',
+      'provider.facts.hint':
+        'Which facts an endpoint row states in the composer menu. Speed is OpenRouter\u2019s own rolling 30-minute figure, and it appears only after the relay has seen a request for that model. Applying reloads the relay once, and the cached listings go with it, so speed comes back as each model is used again.',
+      'provider.facts.precision': 'Precision',
+      'provider.facts.price': 'Price',
+      'provider.facts.uptime': 'Uptime',
+      'provider.facts.throughput': 'Throughput',
+      'provider.facts.latency': 'Latency',
+      'provider.facts.percentiles': 'Percentiles',
+      'provider.facts.percentiles.hint': 'The median alone, or the median beside the slow tail (p90).',
+      'provider.facts.p50': 'Median (p50)',
+      'provider.facts.p50p90': 'Median and p90',
+      'provider.facts.apply': 'Apply',
+      'provider.facts.saving': 'Saving\u2026',
+      'provider.facts.saved': 'Saved.',
+      'provider.facts.error': 'Could not save the display settings: {message}',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -643,10 +758,34 @@ window.__ModuleLoader__.load({
       'provider.group.unavailable': '不可用',
       'provider.price': '${input}/${output} 每百万 token',
       'provider.uptime': '可用率 {percent}%',
+      'provider.latency': '{ms} 毫秒',
+      'provider.throughput': '{tps} token/秒',
+      'provider.latencyPair': 'p50 {first} \u00b7 p90 {second} 毫秒',
+      'provider.throughputPair': 'p50 {first} \u00b7 p90 {second} token/秒',
+      'provider.latencyP50': 'p50 {ms} 毫秒',
+      'provider.latencyP90': 'p90 {ms} 毫秒',
+      'provider.throughputP50': 'p50 {tps} token/秒',
+      'provider.throughputP90': 'p90 {tps} token/秒',
       'provider.hint': '固定端点只对当前会话生效，并跳过 OpenRouter 的路由；其精度与价格随之固定。',
       'provider.empty': 'Host 未列出该模型的任何端点。',
       'provider.stale': '已固定的端点不再出现在该模型的列表中。',
       'provider.error': '无法固定端点：{message}',
+      'provider.facts.caption': '提供商列表显示',
+      'provider.facts.hint':
+        '决定编辑器菜单中每个端点行显示哪些信息。速度取自 OpenRouter 自身的 30 分钟滚动统计，并且只在中继见过该模型的请求后出现。应用会重载中继一次，缓存的列表也随之清空，因此速度会在模型再次被使用后重新出现。',
+      'provider.facts.precision': '精度',
+      'provider.facts.price': '价格',
+      'provider.facts.uptime': '可用率',
+      'provider.facts.throughput': '吞吐',
+      'provider.facts.latency': '延迟',
+      'provider.facts.percentiles': '分位数',
+      'provider.facts.percentiles.hint': '只显示中位数，或同时显示中位数与较慢的尾部（p90）。',
+      'provider.facts.p50': '中位数（p50）',
+      'provider.facts.p50p90': '中位数与 p90',
+      'provider.facts.apply': '应用',
+      'provider.facts.saving': '保存中…',
+      'provider.facts.saved': '已保存。',
+      'provider.facts.error': '无法保存显示设置：{message}',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -1148,6 +1287,11 @@ window.__ModuleLoader__.load({
         uptime1d: finiteNumber(raw.uptime1d),
         uptime5m: finiteNumber(raw.uptime5m),
         uptime30m: finiteNumber(raw.uptime30m),
+        /* How fast this endpoint answers, as the Host last read it: time to the first token
+           in milliseconds, output tokens per second, each a p50/p90 pair. Null on a listing
+           the relay read without a key, which is the ordinary case — absent, never zero. */
+        latency: percentilePairOf(raw.latency),
+        throughput: percentilePairOf(raw.throughput),
         /* `status` is carried for transparency but never decides anything: it is a health
            code the API leaves unexplained, and on DeepSeek V4.1 Flash the endpoint serving
            a third of the traffic reports `-5`. Availability is the Host's answer, read from
@@ -1311,20 +1455,82 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * A provider row's second line: what the endpoint is, what it costs and how often it
-     * answers. A field the Host did not report is dropped rather than printed as a dash —
-     * this line is already two facts denser than a preset row's, and a dash reads as zero.
+     * A duration or a speed as a row prints it: whole units, never a fraction of one.
+     *
+     * Rounding happens here rather than in {@link numberText}, which exists for prices: a
+     * throughput of `100.99999 tok/s` is a hundred and one, and the eighth decimal of a
+     * millisecond count says more about the measurement than about the endpoint.
      */
-    function providerRowHint(t, row) {
-      if (!isPlainObject(row)) return '';
-      const parts = [providerPrecisionLabel(t, row.precision)];
-      const input = numberText(row.inputPrice);
-      const output = numberText(row.outputPrice);
-      if (input !== '' && output !== '') {
-        parts.push(t('provider.price', { input: input, output: output }));
+    function integerText(value) {
+      const number = finiteNumber(value);
+      return number === null ? '' : String(Math.round(number));
+    }
+
+    /**
+     * One speed fact — single, or as a p50/p90 pair when the operator asked for both.
+     *
+     * A missing percentile in the pair form is named rather than dropped: the pair only
+     * exists because both were asked for, so `p90 —` says the worst case was not reported,
+     * while a silent `930 ms` would read as though the second number had never been wanted.
+     */
+    function speedText(t, shown, pair, kind) {
+      if (!isPlainObject(pair)) return '';
+      const p50 = integerText(pair.p50);
+      const p90 = integerText(pair.p90);
+      if (shown.percentiles !== 'p50p90') {
+        if (p50 === '') return '';
+        return kind === 'latency'
+          ? t('provider.latency', { ms: p50 })
+          : t('provider.throughput', { tps: p50 });
       }
-      const uptime = numberText(row.uptime1d);
-      if (uptime !== '') parts.push(t('provider.uptime', { percent: uptime }));
+      if (p50 === '' && p90 === '') return '';
+      /* One half missing is still a fact, and it is labelled rather than dropped or drawn as
+         a dash: an unlabelled number would claim to be the median, and a dash reads as zero. */
+      if (p50 === '' || p90 === '') {
+        const whole = p50 === '' ? p90 : p50;
+        const which = p50 === '' ? 'P90' : 'P50';
+        return kind === 'latency'
+          ? t('provider.latency' + which, { ms: whole })
+          : t('provider.throughput' + which, { tps: whole });
+      }
+      return kind === 'latency'
+        ? t('provider.latencyPair', { first: p50, second: p90 })
+        : t('provider.throughputPair', { first: p50, second: p90 });
+    }
+
+    /**
+     * A provider row's second line: what the endpoint is, what it costs, and how fast and how
+     * often it answers.
+     *
+     * A field the Host did not report is dropped rather than printed as a dash — this line is
+     * already two facts denser than a preset row's, and a dash reads as zero. Which facts are
+     * asked for at all is the operator's setting (`providerFacts`), because five of them do not
+     * fit one menu row and speed is the pair nobody always wants to see.
+     */
+    function providerRowHint(t, row, facts) {
+      if (!isPlainObject(row)) return '';
+      const shown = normalizeProviderFacts(facts);
+      const parts = [];
+      if (shown.precision) parts.push(providerPrecisionLabel(t, row.precision));
+      if (shown.price) {
+        const input = numberText(row.inputPrice);
+        const output = numberText(row.outputPrice);
+        if (input !== '' && output !== '') {
+          parts.push(t('provider.price', { input: input, output: output }));
+        }
+      }
+      if (shown.uptime) {
+        const uptime = numberText(row.uptime1d);
+        if (uptime !== '') parts.push(t('provider.uptime', { percent: uptime }));
+      }
+      if (shown.throughput) {
+        const throughput = speedText(t, shown, row.throughput, 'throughput');
+        if (throughput !== '') parts.push(throughput);
+      }
+      if (shown.latency) {
+        const latency = speedText(t, shown, row.latency, 'latency');
+        if (latency !== '') parts.push(latency);
+      }
       return parts.join(' \u00b7 ');
     }
 
@@ -1357,7 +1563,7 @@ window.__ModuleLoader__.load({
           value: row.tag,
           key: 'provider:' + row.tag,
           label: row.name,
-          hint: providerRowHint(t, row),
+          hint: providerRowHint(t, row, isPlainObject(view) ? view.providerFacts : null),
           selected: row.tag === pinnedTag,
           header: false,
           kind: 'provider',
@@ -1412,14 +1618,50 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The endpoint list per model, for the life of this page. The composer remounts the chip
-     * on every provider and Session switch, so a menu reopened ten times must not mean ten
-     * lists. It is keyed by origin as well as model: a rebind puts the page in front of a
-     * different Host, whose list is not this one's. A refusal is deliberately not cached, so
-     * a Host upgraded (or an upstream that came back) mid-page is picked up on the next
-     * mount instead of never.
+     * How long this page may reuse one model's endpoint list.
+     *
+     * Matches the Host's own window, because the speed facts on a row are the reason the
+     * cache can no longer be permanent: the first request for a model is what fills them in,
+     * so a page-lifetime entry would keep showing the keyless list — price and uptime, no
+     * speed — for the rest of the session, which is exactly the "it does not work" reading
+     * the feature has to avoid. Ten minutes is when the Host re-reads an anonymous listing;
+     * an authenticated one is kept for thirty, so this is the shorter of the two windows.
+     */
+    const PROVIDER_LIST_CACHE_MS = 10 * 60 * 1000;
+
+    /** How many models keep a list here; enough for a session's worth of switching. */
+    const PROVIDER_LIST_CACHE_LIMIT = 8;
+
+    /**
+     * The endpoint list per model, briefly. The composer remounts the chip on every provider
+     * and Session switch, so a menu reopened ten times must not mean ten lists. It is keyed by
+     * origin as well as model: a rebind puts the page in front of a different Host, whose list
+     * is not this one's. A refusal is deliberately not cached, so a Host upgraded (or an
+     * upstream that came back) mid-page is picked up on the next mount instead of never.
      */
     const providerListCache = new Map();
+
+    /** One cached list, or null when it is absent or past the window above. */
+    function cachedProviderList(key) {
+      const entry = providerListCache.get(key);
+      if (entry === undefined) return null;
+      if (Date.now() - entry.at >= PROVIDER_LIST_CACHE_MS) {
+        providerListCache.delete(key);
+        return null;
+      }
+      return entry.list;
+    }
+
+    /** Keep one list, oldest-first out past the cap: each is tens of kilobytes. */
+    function rememberProviderList(key, list) {
+      providerListCache.set(key, { at: Date.now(), list: list });
+      if (providerListCache.size > PROVIDER_LIST_CACHE_LIMIT) {
+        const ordered = [...providerListCache.entries()].sort((a, b) => a[1].at - b[1].at);
+        for (const [key] of ordered.slice(0, providerListCache.size - PROVIDER_LIST_CACHE_LIMIT)) {
+          providerListCache.delete(key);
+        }
+      }
+    }
 
     /** `<preset label> · <precision short label>`, or the preset label alone for `any`. */
     function chipBadgeLabel(t, presetLabel, precision, provider) {
@@ -3056,6 +3298,17 @@ window.__ModuleLoader__.load({
       paddingTop: '4px',
     };
 
+    /* The five fact checkboxes in one wrap-friendly row: they are one vocabulary for the
+       row, not five independent settings, so they read as a single control. */
+    const FACTS_ROW_STYLE = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '4px 16px',
+      minWidth: 0,
+      paddingTop: '4px',
+    };
+
     /* ------------------------------------------------------------------ components */
 
     /**
@@ -3182,12 +3435,24 @@ window.__ModuleLoader__.load({
       const [widgetPending, setWidgetPending] = React.useState(null);
       const [widgetError, setWidgetError] = React.useState('');
 
+      /* The provider-list vocabulary: what the Host reports, and the edit staged against it.
+         Staged rather than one write per click because a config write re-applies the plugin
+         and rebinds the relay — five checkboxes must cost one reload, not five. `null` while
+         nothing is staged and while an older Host has no such route (no control is drawn for
+         a preference that could not be saved). */
+      const [providerFacts, setProviderFacts] = React.useState(null);
+      const [factsDraft, setFactsDraft] = React.useState(null);
+      const [factsBusy, setFactsBusy] = React.useState(false);
+      const [factsError, setFactsError] = React.useState('');
+      const [factsNotice, setFactsNotice] = React.useState('');
+
       const mountedRef = React.useRef(true);
       const busyRef = React.useRef(null);
       const actionControllerRef = React.useRef(null);
       const noticeTimerRef = React.useRef(null);
       const copyTimerRef = React.useRef(null);
       const widgetTimerRef = React.useRef(null);
+      const factsRetryRef = React.useRef(null);
 
       /* Track mount state and clear every owned timer/request on unmount. */
       React.useEffect(() => {
@@ -3219,6 +3484,10 @@ window.__ModuleLoader__.load({
           if (widgetTimerRef.current !== null) {
             clearTimeout(widgetTimerRef.current);
             widgetTimerRef.current = null;
+          }
+          if (factsRetryRef.current !== null) {
+            clearTimeout(factsRetryRef.current);
+            factsRetryRef.current = null;
           }
         };
       }, []);
@@ -3395,6 +3664,139 @@ window.__ModuleLoader__.load({
           }
         };
       }, [connection, origin, targetsKey, t]);
+
+      /*
+       * The provider-list vocabulary, in a request of its own beside the routes.
+       *
+       * A Host from before this preference answers 404, and no control is offered: an
+       * `available` flag carved out of a missing route is what keeps the page from drawing a
+       * checkbox whose write would fail. The read repeats after a write (a config write
+       * reloads the relay, so the truth is the re-read, never the response body alone).
+       */
+      React.useEffect(() => {
+        if (connection !== 'online') return undefined;
+        let cancelled = false;
+        const controller = new AbortController();
+        (async () => {
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/provider-facts', {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: { accept: 'application/json' },
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              /* The route is gone — an older Host, or a rebind that outlived the retry. Withdraw
+                 the control rather than keep drawing one whose write would 404. */
+              if (!cancelled) setProviderFacts(null);
+              return;
+            }
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            const next = normalizeProviderFactsPayload(payload);
+            if (cancelled || next === null) return;
+            setProviderFacts(next);
+            /* A write whose answer was cut by the reload it caused still landed, and this
+               read is how the page finds out: a draft that now equals the server's answer is
+               no longer a draft, so a checkbox stops looking unsaved. A draft that differs is
+               an edit in progress and is left alone. */
+            setFactsDraft((draft) => (draft !== null && sameProviderFacts(draft, next) ? null : draft));
+          } catch (error) {
+            /* No answer, no control: the composer row keeps the vocabulary it shipped with. */
+          }
+        })();
+        return () => {
+          cancelled = true;
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already settled */
+          }
+        };
+      }, [connection, origin, refreshKey]);
+
+      /*
+       * One Apply for the whole vocabulary.
+       *
+       * The write reloads the plugin, which cuts every response in flight on the relay — so
+       * the staged edit is left in place until the Host answers, and the re-read after it is
+       * what confirms the value. A cut connection is not a refusal: only an answer the relay
+       * actually gave clears the draft and reports a failure.
+       */
+      const runProviderFacts = () => {
+        if (factsDraft === null || factsBusy || providerFacts === null) return;
+        if (sameProviderFacts(factsDraft, providerFacts)) return;
+        /* One config write at a time: a second one rebinds the relay under the first one's
+           still-open answer. Same gate the route and widget writes share. */
+        if (busy !== null || busyRef.current !== null) return;
+        busyRef.current = 'provider-facts';
+        const next = factsDraft;
+        const controller = new AbortController();
+        actionControllerRef.current = controller;
+        setFactsBusy(true);
+        setFactsError('');
+        setFactsNotice('');
+        (async () => {
+          let refused = false;
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/provider-facts', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: JSON.stringify({ providerFacts: next }),
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            /* A 200 whose body refuses (`ok: false`) did not save anything either; every
+               other action on this page reads that shape the same way. */
+            if (!response.ok || (isPlainObject(payload) && payload.ok === false)) {
+              refused = true;
+              throw new Error(
+                payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }),
+              );
+            }
+            const saved = normalizeProviderFactsPayload(payload);
+            if (!mountedRef.current) return;
+            if (saved !== null) setProviderFacts(saved);
+            setFactsDraft(null);
+            setFactsNotice(t('provider.facts.saved'));
+            /* The relay rebinds, so ask again rather than trust a body that crossed it. */
+            setRefreshKey((key) => key + 1);
+          } catch (error) {
+            if (!mountedRef.current) return;
+            if (refused) {
+              setFactsError(t('provider.facts.error', { message: errorMessage(t, error) }));
+            } else if (factsRetryRef.current === null) {
+              /* Unknown, not failed: the write may well have landed before the rebind cut
+                 the answer, so the re-read is scheduled instead of the edit being called a
+                 failure. */
+              factsRetryRef.current = setTimeout(() => {
+                factsRetryRef.current = null;
+                if (mountedRef.current) setRefreshKey((key) => key + 1);
+              }, FACTS_RETRY_MS);
+            }
+          } finally {
+            if (mountedRef.current) setFactsBusy(false);
+            if (busyRef.current === 'provider-facts') busyRef.current = null;
+            if (actionControllerRef.current === controller) actionControllerRef.current = null;
+          }
+        })();
+      };
 
       const runRouteAction = (kind, body, successKey, successName) => {
         if (busy !== null || busyRef.current !== null) return;
@@ -4318,6 +4720,83 @@ window.__ModuleLoader__.load({
           renderTargetsBody(),
         );
 
+      /*
+       * What an endpoint row states in the composer menu.
+       *
+       * Its own section rather than a line inside "Provider routes": this is not a routing
+       * decision, it is how one row reads. Nothing is drawn when the Host has no such route,
+       * because a preference that cannot be saved must not be offered.
+       */
+      const renderProviderFacts = () => {
+        if (providerFacts === null) return null;
+        const shown = factsDraft === null ? providerFacts : factsDraft;
+        /* Staging a value and then putting it back is not a change: comparing the two states
+           rather than "is a draft present" keeps Apply from offering a write that would only
+           reload the relay to store what is already there. */
+        const dirty = factsDraft !== null && !sameProviderFacts(factsDraft, providerFacts);
+        const stage = (change) => {
+          setFactsDraft(Object.assign({}, shown, change));
+          setFactsNotice('');
+          setFactsError('');
+        };
+        return h(
+          'section',
+          { style: sectionStyle() },
+          h('h4', { style: H4_STYLE }, t('provider.facts.caption')),
+          h('p', { style: HINT_STYLE }, t('provider.facts.hint')),
+          h(
+            'div',
+            { style: FACTS_ROW_STYLE },
+            PROVIDER_FACT_KEYS.map((key) =>
+              h(
+                'label',
+                { key: key, style: USAGE_TOGGLE_STYLE },
+                h('input', {
+                  type: 'checkbox',
+                  checked: shown[key] === true,
+                  disabled: factsBusy,
+                  onChange: (event) => stage({ [key]: event.target.checked }),
+                }),
+                h('span', null, t('provider.facts.' + key)),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { style: ROW_STYLE },
+            h(
+              'div',
+              { style: ROW_INFO_STYLE },
+              h('span', { style: SUB_LABEL_STYLE }, t('provider.facts.percentiles')),
+              h('span', { style: HINT_STYLE }, t('provider.facts.percentiles.hint')),
+            ),
+            h(
+              'div',
+              { style: ROW_CONTROL_STYLE },
+              h(TierSelect, {
+                value: shown.percentiles,
+                disabled: factsBusy,
+                ariaLabel: t('provider.facts.percentiles'),
+                options: [
+                  { value: 'p50', label: t('provider.facts.p50') },
+                  { value: 'p50p90', label: t('provider.facts.p50p90') },
+                ],
+                onChange: (value) => stage({ percentiles: value }),
+              }),
+              h(ActionButton, {
+                label: factsBusy ? t('provider.facts.saving') : t('provider.facts.apply'),
+                disabled: !dirty || factsBusy || busy !== null,
+                onClick: runProviderFacts,
+              }),
+            ),
+          ),
+          factsError !== '' ? h('p', { role: 'alert', style: ALERT_STYLE }, factsError) : null,
+          factsNotice !== ''
+            ? h('p', { role: 'status', 'aria-live': 'polite', style: NOTICE_STYLE }, factsNotice)
+            : null,
+        );
+      };
+
       /* ---------------------------------------------------------------- assembly */
 
       /* The sections follow the snapshot, not the connection: a poll that fails mid-reload
@@ -4332,6 +4811,7 @@ window.__ModuleLoader__.load({
         snapshot !== null ? renderMounts() : null,
         snapshot !== null ? renderSavings() : null,
         snapshot !== null ? renderProviders() : null,
+        snapshot !== null ? renderProviderFacts() : null,
         snapshot !== null ? renderRecent() : null,
       );
     }
@@ -5308,6 +5788,11 @@ window.__ModuleLoader__.load({
       /* This model's endpoints, or the empty list before (or instead of) an answer — the
          Provider pane still opens and still holds the row that clears a pin. */
       const [providerList, setProviderList] = React.useState(EMPTY_PROVIDER_LIST);
+      /* Which facts the endpoint rows state. Read once per origin: it is a profile-wide
+         preference, not Session state, so it does not change with the model. The default is
+         what the row stated before the preference existed, which is also what a Host that
+         predates the route answers — a missing answer must not thin the menu. */
+      const [providerFacts, setProviderFacts] = React.useState(DEFAULT_PROVIDER_FACTS);
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
@@ -5488,8 +5973,8 @@ window.__ModuleLoader__.load({
         /* Keyed by origin as well as model: a rebind puts the page in front of a different
            Host, and that Host's list for the same model is not this list. */
         const cacheKey = origin + '|' + base;
-        const cached = providerListCache.get(cacheKey);
-        if (cached !== undefined) {
+        const cached = cachedProviderList(cacheKey);
+        if (cached !== null) {
           setProviderList(cached);
           return undefined;
         }
@@ -5505,7 +5990,7 @@ window.__ModuleLoader__.load({
             if (!response.ok) return;
             if (!isPlainObject(payload) || payload.ok === false) return;
             const next = normalizeProviderList(payload);
-            providerListCache.set(cacheKey, next);
+            rememberProviderList(cacheKey, next);
             if (aliveRef.current) setProviderList(next);
           } catch (error) {
             /* No list is a usable state: the cell says `Auto`, the pane keeps its clear row. */
@@ -5519,6 +6004,46 @@ window.__ModuleLoader__.load({
           }
         };
       }, [feedState.origin, modelKey]);
+
+      /*
+       * Which facts an endpoint row states, read once per origin.
+       *
+       * Deliberately its own request rather than a field of `/providers`: that body is cached
+       * for ten minutes (see `providerListCache`), so a preference carried inside it would
+       * freeze at whatever the first model read — and a Settings change would not reach an
+       * already-open composer.
+       */
+      React.useEffect(() => {
+        const origin = feedState.origin;
+        if (origin === null) return undefined;
+        const controller = new AbortController();
+        void (async () => {
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/provider-facts', {
+              method: 'GET',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: { accept: 'application/json' },
+              signal: controller.signal,
+            });
+            const payload = await readJsonSafe(response);
+            if (!response.ok) return;
+            const next = normalizeProviderFactsPayload(payload);
+            if (next !== null && aliveRef.current) setProviderFacts(next);
+          } catch (error) {
+            /* No answer leaves the row exactly as it shipped: every fact on. */
+          }
+        })();
+        return () => {
+          try {
+            controller.abort();
+          } catch (error) {
+            /* already aborted */
+          }
+        };
+        /* Re-read on every pane: a Settings change is made in another surface, and a chip
+           that only read once per origin would show the old vocabulary until it remounted. */
+      }, [feedState.origin, pane]);
 
       /* Anchor the popover above the trigger, in viewport coordinates: the composer bar
          clips vertical overflow, so an absolutely positioned menu would be cut off. */
@@ -5666,6 +6191,7 @@ window.__ModuleLoader__.load({
             chosenPreset: chosenPreset,
             precisionFloor: shownFloor,
             providerList: providerList,
+            providerFacts: providerFacts,
             pinnedTag: pinnedTag,
           });
 
@@ -6943,6 +7469,11 @@ window.__ModuleLoader__.load({
         baseModelId,
         pinnedProviderLabel,
         providerHint: providerRowHint,
+        /* Which facts that hint states, and the reader behind the preference: a page that
+           offers five checkboxes has to answer the same defaults the chip renders with. */
+        providerFacts: normalizeProviderFacts,
+        providerFactsPayload: normalizeProviderFactsPayload,
+        providerDefaults: DEFAULT_PROVIDER_FACTS,
         providerTiers: PROVIDER_TIERS,
         providerPrecisions: PROVIDER_PRECISIONS,
         chipBadgeParts,
