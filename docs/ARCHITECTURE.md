@@ -64,6 +64,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
 | `lib/quantization.js` | relay-core | `normalizePrecision(raw) -> { floor, includeUnknown, allow }`, `precisionLabel(value)`, `PRECISION_IDS`, `QUANTIZATION_LEVELS`; the twelve-value enum materialised into the allowlist `provider.quantizations` accepts. Pure, no I/O |
 | `lib/endpoints.js` | relay-core | `parseEndpoints(payload, maxBytes)`, `levelsFrom(endpoints)`, `survives(allow, levels)`, `fetchEndpoints(upstream, model, { fetch })`; per-endpoint precision for admission control. Injected fetch, no network in tests |
+| `lib/providers.js` | relay-core | `parseProviders(payload, maxBytes)`, `sortProviders`, `groupProviders`, `findProvider`, `pinnedFacets`, `precisionLevels`, `tagsOf`, `readProviders(upstream, model, { fetch })`; the same listing read for *display* — full rows, dollars per million, groups in the model page's order. Injected fetch, no network in tests |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
@@ -100,6 +101,9 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/precision?session=<id>` | — | `{ ok, session, precision: { floor, includeUnknown, allow }, inherited, source: 'session' | 'default', chosen, default, floors }` — what that Session applies *now*; `allow` is `null` for `any` |
 | `POST /__openrouter-plus/precision` | `{ session, precision: { floor, includeUnknown } }` | the same body; a Session choice, **memory only**, cleared by an absent/null `precision` |
 | `POST /__openrouter-plus/precision/default` | `{ precision }` | `{ ok, default, floors }`; one config write on the `precisionFloor` key |
+| `GET /__openrouter-plus/providers?model=<id>` | — | `{ ok, model, fetchedAt, cached, providers: ProviderRow[], groups: [{ id, tags }] }`; the model's live endpoints, `400` without a `/`-qualified model id, `200` with an empty list and an `error` when the read fails |
+| `GET /__openrouter-plus/provider?session=<id>&model=<id>` | — | `{ ok, session, provider: { tag, name, tier, precision } | null, chosen, model, available }`; what that Session pins *now* |
+| `POST /__openrouter-plus/provider` | `{ session, provider, model? }` | the same body; `provider: null` clears. **Memory only.** A slug the model's listing does not offer answers `404` |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` | `{ ok: true, usageWidget: { enabled } }`; one config write — the sidebar card's preference (`usageWidget` on the plugin row). A non-boolean `enabled` is a `400` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
@@ -283,6 +287,40 @@ Behaviour that the caller relies on:
    endpoint that really said zero — and the sniffer never alters the bytes it inspects.
 6. **Errors** — an unreachable upstream yields a `502` JSON body `{ error: { message } }`; no stack
    traces leak to the caller.
+
+### A provider pin, and why it replaces the other levers
+
+`applyRecipe` normally writes the relay's four fields one at a time. A `pin` is different in kind: it
+**returns early** and hands the body to `applyPin`, because the slug it names already carries a tier
+and a precision. Leaving `service_tier` or `provider.quantizations` beside `only` is at best
+redundant and at worst the source of an upstream error — a floor of `fp8` next to a pinned `fp4`
+endpoint excludes the endpoint that was asked for, which is a `404`, not a degrade. So the pin path
+*removes* what it contradicts (`service_tier`, `quantizations`, `ignore`, a `:floor`/`:nitro` model
+variant) and writes exactly two fields:
+
+```js
+provider.only = [tag]          // the allowlist that makes the slug a decision
+provider.allow_fallbacks = false  // and the field that stops the router drifting off it
+```
+
+`sort` and `order` are deliberately left alone: over a one-element allowlist they are inert, and the
+relay does not police fields it did not write. The pair is idempotent — a second pass over an
+unchanged body reports `false`, which is what keeps the "never re-serialise an unchanged body"
+promise.
+
+Two headers report the outcome, and both are always present rather than conditional:
+
+- `x-oorp-pin` — the slug that was routed to, `bypass` when a pin was configured but withheld
+  (admission had not read the listing, or the model no longer lists that endpoint), `none` when
+  nothing was pinned. A withheld pin falls back to the Session's preset rather than failing, so
+  without this header the only symptom would be a request that quietly went elsewhere.
+- `x-oorp-precision` — reports `any` while a pin is force. That is not a bypass: the pin *superseded*
+  the floor, so no include list was withheld by mistake.
+
+Admission lives in the Host, not the relay, for the same reason the floor's does: `only` is an
+allowlist, so a stale slug would exclude every endpoint. `admittedPin(slug, model)` reads the same
+synchronous cache the floor reads and answers `null` on a miss while warming it, so the request path
+never waits on a public GET.
 
 ## `lib/metrics.js`
 

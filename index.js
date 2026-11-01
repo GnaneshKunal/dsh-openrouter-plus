@@ -17,6 +17,15 @@
  * what makes Settings → OpenRouter Plus work behind Tailscale.
  */
 import { fetchEndpoints, survives } from './lib/endpoints.js'
+import {
+  PROVIDERS_CACHE_LIMIT,
+  PROVIDERS_TTL_MS,
+  findProvider,
+  groupProviders,
+  precisionLevels,
+  readProviders,
+  tagsOf,
+} from './lib/providers.js'
 import { createMetrics } from './lib/metrics.js'
 import { baseModelId, createRelay } from './lib/proxy.js'
 import { createConfigBridge } from './lib/config-bridge.js'
@@ -107,7 +116,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
 
 /* Kept equal to package.json's version: `/health` reports it and a release commit is the
    one moment this literal and the manifest must agree. */
-const VERSION = '0.4.0'
+const VERSION = '0.5.4'
 
 /**
  * How long a burst of relayed calls is coalesced before the usage snapshot is written.
@@ -128,6 +137,8 @@ const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
  * @returns {{
  *   enabled: boolean, host: string, port: number, portFallback: boolean,
  *   upstream: string, routes: Record<string, string|null>, upstreamTimeoutMs: number,
+ *   controlDiagnostics: boolean,
+ *   generationLookup: boolean,
  *   autoRepairReasoning: boolean, defaultPreset: string|null,
  *   sessionPresets: Record<string, string>, sessionPresetStamp: Record<string, number>,
  *   precisionFloor: { floor: string, includeUnknown: boolean, allow: string[]|null },
@@ -153,6 +164,15 @@ export function normalizeConfig(raw) {
     upstreamTimeoutMs: Number.isFinite(config.upstreamTimeoutMs) && config.upstreamTimeoutMs > 0
       ? config.upstreamTimeoutMs
       : 0,
+    // Record control-API timings and log slow calls. Off by default: this plugin also runs
+    // where RAM and metered I/O matter, and the failure it explains is one an operator
+    // opts into debugging.
+    controlDiagnostics: config.controlDiagnostics === true,
+    // Reconcile a request the response did not fully describe against OpenRouter's own
+    // generation record. On by default: the Responses API names no provider anywhere in
+    // its body, so without this the Requests tab's Provider column stays empty forever on
+    // such a route. One authenticated GET per affected request, never blocking the caller.
+    generationLookup: config.generationLookup !== false,
     // `false` never fills, absent/`null` fills only from evidence found in the
     // profile, a map is the blanket fallback for models with no evidence.
     reasoningEfforts: normalizeReasoningEfforts(config.reasoningEfforts),
@@ -528,6 +548,68 @@ function applyCors(req, res) {
  *
  * @param {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>|void} handler
  */
+/**
+ * Whether the control API records its own timings and logs its slow calls.
+ *
+ * **Off by default.** This plugin also runs on metered, memory-tight hosts where a
+ * diagnostic that costs nothing on a laptop is still cost with no upside — and the
+ * failure it explains ("not answering" while the Host is merely busy) is one an operator
+ * opts into debugging. On: a bounded ring of 20 entries, no disk, one log line per slow
+ * or failed call. Off: a single boolean test per request.
+ */
+let controlDiagnostics = false
+
+/** @param {unknown} value */
+function setControlDiagnostics(value) {
+  controlDiagnostics = value === true
+}
+
+/**
+ * How slow a control-API call has to be before it is worth recording.
+ *
+ * The page gives up on `/status` after a couple of seconds, and a Host chewing through a
+ * turn can be slow to schedule anything else. That is the failure mode this exists to
+ * make visible: without it, "not answering" is indistinguishable from a crash, a refusal,
+ * or a dead listener.
+ */
+const CONTROL_SLOW_MS = 1000
+
+/** How many slow or failed control calls to keep for `/status`. */
+const CONTROL_TIMING_LIMIT = 20
+
+/**
+ * The last slow or failed control calls, oldest first. Reported by `/status` under
+ * `control`, so an operator can tell "the Host was busy" from "the route threw".
+ *
+ * @type {Array<{ at: number, path: string, ms: number, status: number }>}
+ */
+const controlTimings = []
+
+/** @param {string} path @param {number} ms @param {number} status */
+function noteControlTiming(path, ms, status) {
+  if (!controlDiagnostics) return
+  if (ms < CONTROL_SLOW_MS && status < 500) return
+  controlTimings.push({ at: Date.now(), path, ms, status })
+  if (controlTimings.length > CONTROL_TIMING_LIMIT) controlTimings.shift()
+}
+
+/**
+ * The Host logger, when a plugin instance has provided one.
+ *
+ * `controlRoute` is module-level so the route table can be built at definition time, but
+ * the logger only exists once `apply()` has run. A no-op default keeps a route callable
+ * before that — and keeps a *logged* failure from becoming an uncaught exception, which
+ * is exactly what a direct `log(...)` here used to do.
+ *
+ * @type {(level: string, message: string, fields?: Record<string, unknown>) => void}
+ */
+let controlLog = () => {}
+
+/** @param {(level: string, message: string, fields?: Record<string, unknown>) => void} fn */
+function setControlLog(fn) {
+  controlLog = typeof fn === 'function' ? fn : () => {}
+}
+
 function controlRoute(handler) {
   return async (req, res) => {
     applyCors(req, res)
@@ -540,12 +622,34 @@ function controlRoute(handler) {
       sendJson(res, 403, { error: { message: 'missing x-oorp-client header' } })
       return
     }
+    /* Nothing is attached at all when the diagnostic is off: one boolean, no listener,
+       no clock reading. */
+    const measured = controlDiagnostics === true
+    const startedAt = measured ? Date.now() : 0
+    const path = measured ? (req.url ?? '').split('?')[0] : ''
+    if (measured) {
+      res.once?.('finish', () => {
+        const ms = Date.now() - startedAt
+        noteControlTiming(path, ms, res.statusCode)
+        if (ms >= CONTROL_SLOW_MS) {
+          controlLog('warn', 'control API call was slow', { path, ms, method: req.method })
+        }
+      })
+    }
     try {
       await handler(req, res)
     } catch (error) {
       const status = Number.isInteger(/** @type {any} */ (error)?.status)
         ? /** @type {any} */ (error).status
         : 500
+      if (measured) {
+        noteControlTiming(path, Date.now() - startedAt, status)
+        controlLog('warn', 'control API call failed', {
+          path,
+          ms: Date.now() - startedAt,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      }
       sendJson(res, status, {
         error: { message: error instanceof Error ? error.message : String(error) },
       })
@@ -642,6 +746,11 @@ function controlRejection(connection, req) {
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
   const log = createLogger(ctx)
+  // The control-API timing lines have to go somewhere; this is the only place a logger
+  // exists, so the module-level route wrapper reads it from here.
+  setControlLog(log)
+  // Off unless the profile asks for it: see `setControlDiagnostics`.
+  setControlDiagnostics(config.controlDiagnostics)
 
   if (!config.enabled) {
     log('info', 'disabled by config (enabled: false); no listener bound')
@@ -699,6 +808,17 @@ export function apply(ctx, rawConfig) {
 
   /** How long a resolved title is trusted before the store is asked again. */
   const SESSION_TITLE_TTL_MS = 60000
+
+  /**
+   * How long `/status` may spend refreshing titles before it answers without them.
+   *
+   * A title is decoration; the counters are the answer. Resolving one is a Host service
+   * round trip, and during a turn those are the busiest calls in the process — awaiting
+   * every one of them unbounded is how `/status` answered in 86 ms when idle and blew the
+   * page's 2.5 s budget exactly when someone was watching a running turn. Whatever a
+   * lookup misses here arrives on the next poll; the page polls every few seconds.
+   */
+  const SESSION_TITLE_WAIT_MS = 600
 
   /** @param {string} id */
   async function sessionTitleOf(id) {
@@ -796,9 +916,20 @@ export function apply(ctx, rawConfig) {
     for (const row of bySession) if (row.session !== null) ids.add(row.session)
     for (const row of recent) if (row.sessionId !== null) ids.add(row.sessionId)
     const titles = new Map()
-    await Promise.all([...ids].slice(0, 80).map(async (id) => {
-      titles.set(id, await sessionTitleOf(id))
-    }))
+    const stale = []
+    for (const id of [...ids].slice(0, 80)) {
+      const cached = sessionTitles.get(id)
+      if (cached !== undefined) titles.set(id, cached.title)
+      if (cached === undefined || Date.now() - cached.at >= SESSION_TITLE_TTL_MS) stale.push(id)
+    }
+    if (stale.length > 0) {
+      await Promise.race([
+        Promise.all(stale.map(async (id) => {
+          titles.set(id, await sessionTitleOf(id))
+        })),
+        new Promise((resolve) => setTimeout(resolve, SESSION_TITLE_WAIT_MS)),
+      ])
+    }
     return {
       ...snapshot,
       bySession: bySession.map((row) => ({ ...row, title: titles.get(row.session) ?? '' })),
@@ -991,6 +1122,22 @@ export function apply(ctx, rawConfig) {
   /** When each choice was made, for bounded eviction. @type {Map<string, number>} */
   const sessionPresetStamp = new Map(Object.entries(config.sessionPresetStamp ?? {}))
 
+  /**
+   * The upstream endpoint each Session pinned, by OpenRouter slug (`relace/fp4`).
+   *
+   * A third per-Session lever beside the preset and the floor, and memory-only for the
+   * same reason as both: it is runtime state, and a config write per switch would reload
+   * this plugin mid-conversation. It is *not* merged with the other two — a pin subsumes
+   * them, and the chip disables their cells while one is set — so this table is the only
+   * place the choice lives.
+   *
+   * @type {Map<string, { tag: string, name: string, tier: string, precision: string }>}
+   */
+  const sessionPins = new Map()
+
+  /** When each pin was chosen, for bounded eviction. @type {Map<string, number>} */
+  const sessionPinStamp = new Map()
+
   /** The preset a Session runs on when it has chosen nothing. */
   function defaultPreset() {
     return normalizePresetId(config.defaultPreset) ?? 'none'
@@ -1062,6 +1209,7 @@ export function apply(ctx, rawConfig) {
     const preset = presetForSession(session)
     const wire = PRESET_WIRE[preset] ?? PRESET_WIRE.none
     const precision = precisionForSession(session)
+    const pin = pinForSession(session)
     return {
       preset,
       serviceTier: wire.serviceTier,
@@ -1069,6 +1217,12 @@ export function apply(ctx, rawConfig) {
       variant: wire.variant,
       precision: precision.floor,
       quantizations: admittedQuantizations(precision, model),
+      // Admitted, not merely chosen: the relay writes `only` from this field, and a slug
+      // the listing does not back would exclude every endpoint. `pinChosen` is what the
+      // page and the response header report, so a withheld pin is visible rather than
+      // looking like nobody asked.
+      pin: admittedPin(pin === null ? null : pin.tag, model),
+      pinChosen: pin === null ? null : pin.tag,
     }
   }
 
@@ -1099,6 +1253,63 @@ export function apply(ctx, rawConfig) {
       for (const [key] of ordered.slice(0, sessionPresets.size - SESSION_PRESET_LIMIT)) {
         sessionPresets.delete(key)
         sessionPresetStamp.delete(key)
+      }
+    }
+  }
+
+  /**
+   * The endpoint one Session pinned, or null.
+   *
+   * The record carries the display facts (`name`, `tier`, `precision`) beside the slug
+   * because they were known when the pin was chosen: a Session's chip has to paint
+   * "Relace · fp4" on load, and re-reading a 47 KB listing to recover the name of a slug
+   * this process already resolved would make the chip depend on a network round trip for
+   * something it decided itself. They are read as a *report* of the choice, never as the
+   * thing that routes — the relay pins by `tag` alone.
+   *
+   * @param {unknown} session
+   * @returns {{ tag: string, name: string, tier: string, precision: string } | null}
+   */
+  function pinForSession(session) {
+    const key = typeof session === 'string' ? session.trim() : ''
+    if (key === '') return null
+    const chosen = sessionPins.get(key)
+    if (!isPlainObject(chosen)) return null
+    const tag = typeof chosen.tag === 'string' ? chosen.tag.trim() : ''
+    if (tag === '') return null
+    return {
+      tag,
+      name: typeof chosen.name === 'string' && chosen.name !== '' ? chosen.name : tag.split('/')[0],
+      tier: typeof chosen.tier === 'string' && chosen.tier !== '' ? chosen.tier : 'standard',
+      precision: typeof chosen.precision === 'string' && chosen.precision !== '' ? chosen.precision : 'unknown',
+    }
+  }
+
+  /**
+   * Record one Session's pinned endpoint — or clear it, which hands that Session back to
+   * its preset and floor (both of which the chip disabled while the pin was set, so
+   * clearing restores exactly what was there before).
+   *
+   * Memory only, like {@link writeSessionPreset} and for the same reason.
+   *
+   * @param {string} session
+   * @param {{ tag: string, name: string, tier: string, precision: string } | null} pin
+   */
+  function writeSessionPin(session, pin) {
+    if (pin === null) {
+      sessionPins.delete(session)
+      sessionPinStamp.delete(session)
+      return
+    }
+    sessionPins.set(session, pin)
+    sessionPinStamp.set(session, Date.now())
+    // Bounded eviction, as for presets: a long-lived Host must not grow a table of every
+    // Session it ever ran.
+    if (sessionPins.size > SESSION_PRESET_LIMIT) {
+      const ordered = [...sessionPinStamp.entries()].sort((a, b) => a[1] - b[1])
+      for (const [key] of ordered.slice(0, sessionPins.size - SESSION_PRESET_LIMIT)) {
+        sessionPins.delete(key)
+        sessionPinStamp.delete(key)
       }
     }
   }
@@ -1189,7 +1400,12 @@ export function apply(ctx, rawConfig) {
    * An empty `levels` is a real, cached answer ("no listing", or no endpoints) so a
    * model that cannot be filtered is not re-read on every single request.
    *
-   * @type {Map<string, { at: number, levels: Set<string> }>}
+   * `tags` rides along because a pin needs a different question answered from the same
+   * read: the floor asks *which precisions* are out there, a pin asks *which endpoints*.
+   * Both are answered from one listing, so one public GET serves both features and a
+   * pinned Session pays nothing extra on the request path.
+   *
+   * @type {Map<string, { at: number, levels: Set<string>, tags: Set<string> }>}
    */
   const endpointLevels = new Map()
 
@@ -1203,16 +1419,17 @@ export function apply(ctx, rawConfig) {
   const floorBypassedByModel = new Map()
 
   /**
-   * Remember one model's precisions, with bounded eviction. The timestamp is what makes
-   * this a TTL cache rather than a permanent claim about a model: OpenRouter adds and
-   * removes endpoints, and a stale listing is the difference between routing correctly
-   * and excluding every provider.
+   * Remember one model's precisions and endpoint slugs, with bounded eviction. The
+   * timestamp is what makes this a TTL cache rather than a permanent claim about a model:
+   * OpenRouter adds and removes endpoints, and a stale listing is the difference between
+   * routing correctly and excluding every provider — or pinning one that is gone.
    *
    * @param {string} model
    * @param {Set<string>} levels
+   * @param {Set<string>} tags
    */
-  function rememberEndpoints(model, levels) {
-    endpointLevels.set(model, { at: Date.now(), levels })
+  function rememberEndpoints(model, levels, tags) {
+    endpointLevels.set(model, { at: Date.now(), levels, tags })
     if (endpointLevels.size > ENDPOINTS_CACHE_LIMIT) {
       const ordered = [...endpointLevels.entries()].sort((a, b) => a[1].at - b[1].at)
       for (const [key] of ordered.slice(0, endpointLevels.size - ENDPOINTS_CACHE_LIMIT)) {
@@ -1270,13 +1487,14 @@ export function apply(ctx, rawConfig) {
     log('info', 'precision floor withheld while the endpoint listing is read', { model })
     const read = fetchEndpoints(config.upstream, model)
       .then((listing) => {
-        rememberEndpoints(model, listing.levels)
+        // `tagsOf` reads any row carrying a `tag`, which the admission listing's rows do.
+        rememberEndpoints(model, listing.levels, tagsOf(listing.endpoints))
       })
       .catch((error) => {
-        rememberEndpoints(model, new Set())
+        rememberEndpoints(model, new Set(), new Set())
         log(
           'warn',
-          'could not read the endpoint listing; the precision floor is bypassed for this model',
+          'could not read the endpoint listing; the precision floor and any provider pin are bypassed for this model',
           { model, reason: error instanceof Error ? error.message : String(error) },
         )
       })
@@ -1328,6 +1546,129 @@ export function apply(ctx, rawConfig) {
     noteFloorBypassed(wanted)
     warmEndpoints(wanted)
     return null
+  }
+
+  /**
+   * The pinned slug this request may send, or `null` when it must pin nothing.
+   *
+   * The same rule as the floor, for the same reason, one field over: `only` is an
+   * allowlist, so a slug the model no longer lists would exclude every endpoint and fail
+   * upstream instead of falling back. A pin is therefore attached only once this process
+   * has seen that tag in the cached listing; everything else — no pin, no model, a miss,
+   * a stale or empty listing, a slug that has since disappeared — resolves to `null` and
+   * the request goes out on the Session's own preset.
+   *
+   * Synchronous on purpose: the relay awaits whatever the resolver returns and the
+   * request path must never wait on a public GET, exactly as with the floor.
+   *
+   * @param {string | null} pin the slug this Session chose, if any
+   * @param {unknown} model the model the request named, if it named one
+   * @returns {string | null}
+   */
+  function admittedPin(pin, model) {
+    if (pin === null) return null
+    const wanted = typeof model === 'string' ? baseModelId(model).trim() : ''
+    // No model, or an id on another provider's namespace: nothing to admit against, and
+    // no OpenRouter listing to read. The pin stays withheld rather than guessing.
+    if (wanted === '' || !wanted.includes('/')) return null
+
+    const cached = endpointLevels.get(wanted)
+    if (cached !== undefined && Date.now() - cached.at < ENDPOINTS_TTL_MS) {
+      if (cached.tags.has(pin)) return pin
+      // Warm cache and the slug is gone: this is the interesting case, because the menu
+      // still offers it and only a log can say why the request was not pinned.
+      log('info', 'provider pin withheld: this model no longer lists that endpoint', {
+        model: wanted,
+        pin,
+      })
+      return null
+    }
+
+    warmEndpoints(wanted)
+    return null
+  }
+
+  // ── the provider menu's listing ──────────────────────────────────────────
+  // Choosing a pin needs a question the request path never asks: not "does anything
+  // survive this filter" but "what are all the endpoints, and what does each cost and
+  // report". That listing is the same public GET, parsed wider (lib/providers.js) and
+  // cached apart from the admission cache above — this one holds tens of kilobytes per
+  // model, is read only when an operator opens the menu, and is never touched by a
+  // request. Keeping them separate is what lets admission stay synchronous and cheap.
+
+  /** @type {Map<string, { at: number, providers: unknown[] }>} */
+  const providerListings = new Map()
+
+  /** In-flight reads, keyed by model: one public GET per model at a time. @type {Map<string, Promise<void>>} */
+  const providerReads = new Map()
+
+  /**
+   * Remember one model's provider rows, with bounded eviction.
+   *
+   * An empty array is a real, cached answer — the read was attempted and failed — so a
+   * model whose listing 502s is not re-read on every menu open. The menu shows "no
+   * providers" instead, which is the truth.
+   *
+   * @param {string} model
+   * @param {unknown[]} providers
+   */
+  function rememberProviders(model, providers) {
+    providerListings.set(model, { at: Date.now(), providers })
+    if (providerListings.size > PROVIDERS_CACHE_LIMIT) {
+      const ordered = [...providerListings.entries()].sort((a, b) => a[1].at - b[1].at)
+      for (const [key] of ordered.slice(0, providerListings.size - PROVIDERS_CACHE_LIMIT)) {
+        providerListings.delete(key)
+      }
+    }
+  }
+
+  /** One model's listing if it is still fresh, else null. */
+  function cachedProviders(model) {
+    const cached = providerListings.get(model)
+    if (cached === undefined) return null
+    return Date.now() - cached.at < PROVIDERS_TTL_MS ? cached : null
+  }
+
+  /**
+   * Read one model's provider listing, waiting for it when it is not cached.
+   *
+   * Unlike the admission read this one *is* awaited, because the answer is the response —
+   * a menu with no rows is worse than a slow one. Single-flight, so a page that asks for
+   * the same model twice (a reload, two tabs) still costs one public GET.
+   *
+   * @param {string} model
+   * @returns {Promise<{ providers: unknown[], fetchedAt: number, cached: boolean, error?: string }>}
+   */
+  async function providerListing(model) {
+    const fresh = cachedProviders(model)
+    if (fresh !== null) return { providers: fresh.providers, fetchedAt: fresh.at, cached: true }
+    if (!providerReads.has(model)) {
+      const read = readProviders(config.upstream, model)
+        .then((listing) => {
+          rememberProviders(model, listing.providers)
+          /* The same GET answers both questions, so it seeds both caches. Without this the
+             two readers would cost two public GETs per model per TTL — and, worse, the
+             first request after a pin would be *unpinned*, because admission would still
+             consider the listing unread. Opening the menu now admits a floor too, which is
+             a strict improvement for the other feature. */
+          if (listing.providers.length > 0) {
+            rememberEndpoints(model, precisionLevels(listing.providers), tagsOf(listing.providers))
+          }
+        })
+        .catch((error) => {
+          const reason = error instanceof Error ? error.message : String(error)
+          rememberProviders(model, [])
+          log('warn', 'could not read the provider listing for the menu', { model, reason })
+        })
+        .finally(() => {
+          providerReads.delete(model)
+        })
+      providerReads.set(model, read)
+    }
+    await providerReads.get(model)
+    const after = cachedProviders(model)
+    if (after === null) return { providers: [], fetchedAt: Date.now(), cached: false, error: 'the listing was not readable' }
+    return { providers: after.providers, fetchedAt: after.at, cached: false }
   }
 
   /**
@@ -1588,6 +1929,11 @@ export function apply(ctx, rawConfig) {
         ok: state.error === undefined,
         version: VERSION,
         controlPrefix: CONTROL_PREFIX,
+        /* Present only when `controlDiagnostics` is on: the last slow or failed control
+           calls, so "not answering" can be told apart from a crash. Absent by default. */
+        ...(controlDiagnostics
+          ? { control: { slowMs: CONTROL_SLOW_MS, recent: [...controlTimings] } }
+          : {}),
         address,
         // Whether the relay actually owns a socket, which is the one fact a browser
         // can not infer: this answer can arrive while the relay failed to bind.
@@ -1809,6 +2155,161 @@ export function apply(ctx, rawConfig) {
         precision: precision === null ? null : precisionLabel(precision.floor),
       })
       sendJson(res, 200, answer(session))
+    }),
+
+    /**
+     * The endpoints one model can be pinned to.
+     *
+     * The menu's whole data source: one row per OpenRouter endpoint, grouped the way the
+     * model page groups them (standard, flex, priority, and the ones it will not route
+     * to), each carrying the slug a pin names plus the price and uptime that make the
+     * choice legible. Read on demand and cached for {@link PROVIDERS_TTL_MS} — this is the
+     * one listing in this plugin that is display rather than admission.
+     *
+     * A read that fails answers 200 with an empty list and an `error` rather than a 502:
+     * the menu then says "no providers", which is something an operator can act on, and a
+     * failure that repeated on every open would be worse than one quiet empty answer. The
+     * page treats an empty list as "nothing to choose from" either way.
+     */
+    [`${CONTROL_PREFIX}/providers`]: controlRoute(async (req, res) => {
+      if (!requireMethod(req, res, 'GET')) return
+      const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
+      const model = baseModelId((query.get('model') ?? '').trim())
+      // Every model this plugin can pin is `<author>/<slug>`; anything else has no
+      // OpenRouter listing to read, so it is a bad request rather than an empty menu.
+      if (model === '' || !model.includes('/')) {
+        sendJson(res, 400, {
+          error: { message: 'model is required: the model id whose endpoints to list, e.g. "deepseek/deepseek-v3.2"' },
+        })
+        return
+      }
+      const listing = await providerListing(model)
+      // Groups carry tag lists rather than row copies: the rows are already in
+      // `providers`, and a second copy would double a 47 KB payload to say "these first".
+      const groups = groupProviders(listing.providers).map((group) => ({
+        id: group.id,
+        tags: group.providers.map((provider) => provider.tag),
+      }))
+      sendJson(res, 200, {
+        ok: true,
+        model,
+        fetchedAt: listing.fetchedAt,
+        cached: listing.cached === true,
+        providers: listing.providers,
+        groups,
+        ...(listing.error === undefined ? {} : { error: listing.error }),
+      })
+    }),
+
+    /**
+     * The endpoint one Session pinned.
+     *
+     * A sibling of `/tier` and `/precision` rather than a field of either, because a pin
+     * is not a fifth value on the same axis — it *subsumes* them, which is exactly why the
+     * chip disables those two cells while it is set. `GET ?session=<id>` reports what the
+     * Session routes to (`provider` is null when nothing is pinned) and, when `model` is
+     * also named, whether that slug is still listed for it. `POST { session, provider }`
+     * pins one slug, or clears it with `null`. Memory only, like its two siblings.
+     *
+     * The record stored beside the slug is the row's own `name`/`tier`/`precision`, so the
+     * chip can paint "Relace · fp4" on load without waiting for a 47 KB listing. Those
+     * three fields are a report of the choice, never the thing that routes: the relay pins
+     * by `tag` alone.
+     */
+    [`${CONTROL_PREFIX}/provider`]: controlRoute(async (req, res) => {
+      /**
+       * @param {string} session
+       * @param {string | null} model
+       */
+      const answer = async (session, model) => {
+        const record = pinForSession(session)
+        let available = true
+        if (record !== null && model !== null) {
+          /* Read the cache, never the network. This is the chip's mount path — it runs
+             beside `/tier` and `/precision` to paint the cell — and waiting on an 8 s
+             public GET to answer "is that endpoint still listed" would stall the only
+             thing the page is trying to show. An unread listing therefore reports
+             `available: true`: unknown is not the same claim as gone, and the menu's own
+             `/providers` read is what supplies the definitive answer a moment later. */
+          const cached = cachedProviders(model)
+          if (cached !== null && cached.providers.length > 0) {
+            available = findProvider(cached.providers, record.tag) !== null
+          }
+        }
+        return {
+          ok: true,
+          session,
+          provider: record,
+          chosen: record === null ? null : record.tag,
+          model,
+          available,
+        }
+      }
+      if (req.method === 'GET') {
+        const query = new URL(req.url ?? '/', 'http://relay.invalid').searchParams
+        const rawModel = (query.get('model') ?? '').trim()
+        sendJson(res, 200, await answer(
+          (query.get('session') ?? '').trim(),
+          rawModel === '' ? null : baseModelId(rawModel),
+        ))
+        return
+      }
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      const session = typeof body.session === 'string' ? body.session.trim() : ''
+      if (!session) {
+        sendJson(res, 400, { error: { message: 'session is required: the Session whose pinned endpoint is being set' } })
+        return
+      }
+      if (session.length > 128) {
+        sendJson(res, 400, { error: { message: 'session must be at most 128 characters' } })
+        return
+      }
+      const rawModel = typeof body.model === 'string' ? body.model.trim() : ''
+      const model = rawModel === '' ? null : baseModelId(rawModel)
+      // Absent or null clears the pin; a bare slug pins it. No config write and no
+      // transaction escape: this touches memory only, like `/tier` and `/precision`.
+      const raw = body.provider === undefined || body.provider === null ? null : body.provider
+      if (raw === null) {
+        writeSessionPin(session, null)
+        log('info', 'cleared the pinned endpoint for a session', { session })
+        sendJson(res, 200, await answer(session, model))
+        return
+      }
+      const tag = typeof raw === 'string' ? raw.trim() : ''
+      if (tag === '') {
+        sendJson(res, 400, { error: { message: 'provider must be a non-empty endpoint slug, or null to clear the pin' } })
+        return
+      }
+      if (tag.length > 128) {
+        sendJson(res, 400, { error: { message: 'provider must be at most 128 characters' } })
+        return
+      }
+      /** @type {{ tag: string, name: string, tier: string, precision: string } | null} */
+      let record = null
+      if (model !== null) {
+        const listing = await providerListing(model)
+        const row = findProvider(listing.providers, tag)
+        if (row !== null) {
+          record = { tag: row.tag, name: row.name, tier: row.tier, precision: row.precision }
+        } else if (listing.providers.length > 0) {
+          // Readable, and this model does not offer the slug: pinning it could only ever
+          // be withheld later, so it is refused here while the operator can still see the
+          // list they picked from.
+          sendJson(res, 404, {
+            error: { message: `model ${JSON.stringify(model)} does not list an endpoint named ${JSON.stringify(tag)}` },
+          })
+          return
+        }
+      }
+      // No model, or an unreadable listing: keep the pin with what the slug itself says.
+      // Refusing here would make a legitimate choice depend on a public read succeeding.
+      if (record === null) {
+        record = { tag, name: tag.split('/')[0], tier: 'standard', precision: 'unknown' }
+      }
+      writeSessionPin(session, record)
+      log('info', 'pinned an endpoint for a session', { session, pin: record.tag })
+      sendJson(res, 200, await answer(session, model))
     }),
 
     // The sidebar card is a preference, not traffic state: one config key, and the
@@ -2186,6 +2687,7 @@ export function apply(ctx, rawConfig) {
     version: VERSION,
     log,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
+    generationLookup: config.generationLookup,
     resolveTarget,
     // The tier and precision a bare mount should apply for the Session carrying the
     // request. The relay only asks; every choice, and the admission decision behind the

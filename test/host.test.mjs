@@ -1294,3 +1294,220 @@ test('an `any` floor reads no listings and leaves the request body byte-identica
   assert.deepEqual(status.precision.default, { floor: 'any', includeUnknown: false, allow: null })
   assert.deepEqual(status.precision.floorBypassed, { count: 0, byModel: [] })
 })
+
+test('the provider control API lists endpoints, pins one, and the relay routes only to it', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+
+  /** A stand-in OpenRouter listing: one standard endpoint, one priority, one it will not route. */
+  const listing = {
+    data: {
+      endpoints: [
+        {
+          provider_name: 'Relace', tag: 'relace/fp4', quantization: 'fp4', service_tier: null,
+          pricing: { prompt: '0.000000035', completion: '0.0000005', input_cache_read: '0.000000005', discount: 0 },
+          context_length: 1048576, max_completion_tokens: 943718,
+          uptime_last_1d: 100, uptime_last_30m: 100, uptime_last_5m: 100, status: 0,
+          supported_parameters: ['tools', 'reasoning'],
+        },
+        {
+          provider_name: 'DeepInfra', tag: 'deepinfra/fp8/priority', quantization: 'fp8', service_tier: 'priority',
+          pricing: { prompt: '0.000000147', completion: '0.000000441', discount: 0.51 },
+          uptime_last_1d: 100, status: 0,
+        },
+        {
+          // A negative status is a health code, not a routing verdict; uptime decides.
+          provider_name: 'Decart', tag: 'decart', quantization: 'fp16', status: -5,
+          uptime_last_1d: 99.5,
+          pricing: { prompt: '0.000000123', completion: '0.000000492' },
+        },
+        {
+          provider_name: 'Idle', tag: 'idle/fp8', quantization: 'fp8', status: 0,
+          uptime_last_1d: 0, uptime_last_5m: 0,
+          pricing: { prompt: '0.000000001', completion: '0.000000001' },
+        },
+      ],
+    },
+  }
+
+  /** @type {string[]} */
+  const listingHits = []
+  /** @type {Array<Record<string, any>>} */
+  const bodies = []
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.startsWith('/v1/models/') && url.endsWith('/endpoints')) {
+      const model = url.slice('/v1/models/'.length, -'/endpoints'.length)
+      listingHits.push(model)
+      res.writeHead(model === 'deepseek/deepseek-v3.2' ? 200 : 404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(model === 'deepseek/deepseek-v3.2' ? listing : { error: 'not found' }))
+      return
+    }
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+
+  apply(ctx, {
+    port,
+    portFallback: false,
+    upstream: `http://127.0.0.1:${upstreamPort}/v1`,
+  })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const providersUrl = `${origin}/__openrouter-plus/providers`
+  const providerUrl = `${origin}/__openrouter-plus/provider`
+  const chat = (session, body = { model: 'deepseek/deepseek-v3.2', messages: [] }) => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': session },
+    body: JSON.stringify(body),
+  })
+
+  // 1. A model id is required: every pinnable model is `<author>/<slug>`.
+  assert.equal((await fetch(providersUrl)).status, 400)
+  assert.equal((await fetch(`${providersUrl}?model=noslug`)).status, 400)
+
+  // 2. The listing: rows, normalised prices, and the Host's group order.
+  const listed = await (await fetch(`${providersUrl}?model=deepseek/deepseek-v3.2`)).json()
+  assert.equal(listed.ok, true)
+  assert.equal(listed.cached, false)
+  assert.deepEqual(listed.groups.map((group) => group.id), ['standard', 'priority', 'unavailable'])
+  const relace = listed.providers.find((provider) => provider.tag === 'relace/fp4')
+  assert.equal(relace.inputPrice, 0.035, 'per-token strings leave as dollars per million')
+  assert.equal(relace.name, 'Relace')
+  assert.equal(relace.tier, 'standard')
+  assert.equal(relace.precision, 'fp4')
+  // Status is carried but never read as availability: a negative code with 99.5% uptime is
+  // a live endpoint (the real DeepSeek V4.1 Flash listing reports -5 on the provider that
+  // carries a third of its traffic). Only a zeroed uptime quiets a row.
+  assert.equal(listed.providers.find((provider) => provider.tag === 'decart').available, true)
+  assert.equal(listed.providers.find((provider) => provider.tag === 'decart').status, -5)
+  assert.equal(listed.providers.find((provider) => provider.tag === 'idle/fp8').available, false)
+
+  // The second read is cached, and the listing was fetched once for the whole test —
+  // the admission cache is seeded from the same read, which is what lets a pin take
+  // effect on the very next request instead of costing a second public GET.
+  const again = await (await fetch(`${providersUrl}?model=deepseek/deepseek-v3.2`)).json()
+  assert.equal(again.cached, true)
+  assert.equal(listingHits.length, 1)
+
+  // 3. Nothing is pinned until a Session says so.
+  const fresh = await (await fetch(`${providerUrl}?session=sess-1`)).json()
+  assert.equal(fresh.provider, null)
+  assert.equal(fresh.chosen, null)
+
+  // 4. Every write carries the guard header, like every other control POST.
+  assert.equal((await fetch(providerUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session: 'sess-1', provider: 'relace/fp4' }),
+  })).status, 403)
+
+  // 5. Pinning one endpoint: memory only, and the record carries the display facts so the
+  //    chip can paint "Relace · fp4" without reading the listing again.
+  const pinned = await postJson(providerUrl, {
+    session: 'sess-1',
+    provider: 'relace/fp4',
+    model: 'deepseek/deepseek-v3.2',
+  })
+  assert.equal(pinned.status, 200)
+  const pinnedBody = await pinned.json()
+  assert.deepEqual(pinnedBody.provider, { tag: 'relace/fp4', name: 'Relace', tier: 'standard', precision: 'fp4' })
+  assert.equal(pinnedBody.available, true)
+  assert.equal(editor.writes.length, 0, 'a pin must not write the config')
+
+  const readBack = await (await fetch(`${providerUrl}?session=sess-1`)).json()
+  assert.deepEqual(readBack.provider, pinnedBody.provider)
+  assert.equal(readBack.chosen, 'relace/fp4')
+  // Another Session is untouched.
+  assert.equal((await (await fetch(`${providerUrl}?session=sess-2`)).json()).provider, null)
+
+  // 6. The very next request is already pinned: `only` + `allow_fallbacks: false`, and the
+  //    Session's preset tier is gone rather than left to contradict the endpoint.
+  const routed = await chat('sess-1')
+  assert.equal(routed.status, 200)
+  assert.equal(routed.headers.get('x-oorp-pin'), 'relace/fp4')
+  assert.deepEqual(bodies[0].provider, { only: ['relace/fp4'], allow_fallbacks: false })
+  assert.equal('service_tier' in bodies[0], false, 'the pinned endpoint is already in a tier')
+
+  // 7. A slug this model does not list is refused while the operator can still see the
+  //    list, rather than stored and silently withheld later.
+  assert.equal((await postJson(providerUrl, {
+    session: 'sess-1',
+    provider: 'nope/fp8',
+    model: 'deepseek/deepseek-v3.2',
+  })).status, 404)
+
+  // 8. Clearing the pin hands the Session back to its preset: no provider block at all.
+  const cleared = await postJson(providerUrl, { session: 'sess-1', provider: null })
+  assert.equal(cleared.status, 200)
+  assert.equal((await cleared.json()).provider, null)
+  const unpinned = await chat('sess-1')
+  assert.equal(unpinned.headers.get('x-oorp-pin'), 'none')
+  assert.equal('provider' in bodies[1], false)
+
+  // 9. A Session's pin is not written to the profile, ever.
+  assert.equal(editor.writes.length, 0)
+})
+
+/** Boot one plugin instance on its own port and return its origin. */
+async function bootPlugin(t, config = {}) {
+  const port = await freePort()
+  const { ctx, dispose } = createFakeContext()
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false, ...config })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+  return origin
+}
+
+test('the control-API diagnostics cost nothing unless asked for', async (t) => {
+  /* Off by default. This plugin also runs on metered, memory-tight hosts, and the failure
+     the diagnostics explain — "not answering" while the Host is merely busy — is one an
+     operator opts into debugging rather than something a default pays for. */
+  const origin = await bootPlugin(t)
+  const status = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.equal('control' in status, false, 'an unconfigured profile reports no timing block')
+})
+
+test('with controlDiagnostics on, /status reports the slow and failed calls', async (t) => {
+  const origin = await bootPlugin(t, { controlDiagnostics: true })
+  const status = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.ok(status.control, 'the status payload names a control block')
+  assert.equal(typeof status.control.slowMs, 'number', 'and publishes its own threshold')
+  assert.equal(status.control.slowMs, 1000)
+  assert.ok(Array.isArray(status.control.recent))
+  /* The ring is process-wide, so it may already hold what earlier tests provoked; every
+     entry has to be readable — when, which route, how long, and what it answered. */
+  for (const entry of status.control.recent) {
+    assert.equal(typeof entry.path, 'string')
+    assert.equal(typeof entry.ms, 'number')
+    assert.equal(typeof entry.status, 'number')
+    assert.equal(typeof entry.at, 'number')
+  }
+  assert.ok(status.control.recent.length <= 20, 'the ring is bounded')
+})

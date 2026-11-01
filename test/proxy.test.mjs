@@ -768,6 +768,8 @@ test('normalizeRecipe() accepts a bare tier and keeps the levers apart', () => {
     variant: null,
     precision: null,
     quantizations: null,
+    pin: null,
+    pinChosen: null,
   })
   assert.equal(normalizeRecipe(''), null)
   assert.equal(normalizeRecipe(null), null)
@@ -778,6 +780,8 @@ test('normalizeRecipe() accepts a bare tier and keeps the levers apart', () => {
     variant: null,
     precision: null,
     quantizations: null,
+    pin: null,
+    pinChosen: null,
   })
   assert.deepEqual(normalizeRecipe({ serviceTier: 'PRIORITY' }), {
     preset: null,
@@ -786,6 +790,8 @@ test('normalizeRecipe() accepts a bare tier and keeps the levers apart', () => {
     variant: null,
     precision: null,
     quantizations: null,
+    pin: null,
+    pinChosen: null,
   })
   assert.deepEqual(normalizeRecipe({ sort: 'throughput', variant: 'floor', preset: 'x' }), {
     preset: 'x',
@@ -794,6 +800,8 @@ test('normalizeRecipe() accepts a bare tier and keeps the levers apart', () => {
     variant: 'floor',
     precision: null,
     quantizations: null,
+    pin: null,
+    pinChosen: null,
   })
   assert.equal(normalizeRecipe({}), null, 'an empty recipe names nothing, so it is no recipe')
 })
@@ -808,6 +816,8 @@ test('normalizeRecipe() carries the precision floor and its admitted include lis
     variant: null,
     precision: 'eight-bit-up',
     quantizations: ['fp8', 'fp16'],
+    pin: null,
+    pinChosen: null,
   })
   // A floor with no admitted list is still a recipe: that is the bypass state.
   assert.deepEqual(normalizeRecipe({ precision: 'full-width' }), {
@@ -817,6 +827,8 @@ test('normalizeRecipe() carries the precision floor and its admitted include lis
     variant: null,
     precision: 'full-width',
     quantizations: null,
+    pin: null,
+    pinChosen: null,
   })
   // Garbage in the list is "no list", never an empty one: an empty include list would
   // mean "no endpoint is eligible", which is a request this relay must never send.
@@ -1004,4 +1016,306 @@ test('a relay with no resolver adds no precision header value beyond any', async
   assert.equal(response.headers.get('x-oorp-precision'), 'any')
   // Byte-identical to a pre-feature relay: no provider block, no floor.
   assert.equal(receivedBody, JSON.stringify({ model: 'deepseek/deepseek-v3.2', messages: [] }))
+})
+
+test('applyRecipe() writes a hard pin and removes the levers a pin contradicts', () => {
+  const body = {
+    model: 'vendor/model:floor',
+    service_tier: 'flex',
+    provider: { quantizations: ['fp8'], ignore: ['relace'], order: ['a'], custom: 'kept' },
+  }
+  const changed = applyRecipe(body, normalizeRecipe({ pin: 'relace/fp4' }))
+
+  assert.equal(changed, true)
+  // `only` + `allow_fallbacks: false` is the pair that makes a slug a decision rather than
+  // a preference: without the second field the router quietly serves another provider.
+  assert.deepEqual(body.provider, { order: ['a'], custom: 'kept', only: ['relace/fp4'], allow_fallbacks: false })
+  assert.equal('service_tier' in body, false, 'the pinned endpoint is already in a tier')
+  assert.equal('quantizations' in body.provider, false, 'a floor could exclude the endpoint that was asked for')
+  assert.equal('ignore' in body.provider, false, 'an ignore list under a pin can only exclude the pin itself')
+  assert.equal(body.model, 'vendor/model', 'a :floor variant routes across the pool a pin just narrowed to one')
+
+  // Idempotent: a second pass has nothing left to write, which is what stops an unchanged
+  // body being re-serialised on every request.
+  assert.equal(applyRecipe(body, normalizeRecipe({ pin: 'relace/fp4' })), false)
+  assert.deepEqual(body.provider, { order: ['a'], custom: 'kept', only: ['relace/fp4'], allow_fallbacks: false })
+})
+
+test('applyRecipe() creates the provider block a pin needs and replaces a caller`s own only', () => {
+  const body = { model: 'm', provider: { only: ['someone-else'] } }
+  assert.equal(applyRecipe(body, normalizeRecipe({ pin: 'relace/fp4' })), true)
+  assert.deepEqual(body.provider, { only: ['relace/fp4'], allow_fallbacks: false }, 'the pin wins a contest with the caller')
+
+  const bare = { model: 'm' }
+  assert.equal(applyRecipe(bare, normalizeRecipe({ pin: 'relace/fp4' })), true)
+  assert.deepEqual(bare.provider, { only: ['relace/fp4'], allow_fallbacks: false }, 'a body with no provider block gains one')
+})
+
+test('a pinned Session sends only that endpoint and reports it in the response header', async () => {
+  /** @type {Array<{ body: Record<string, unknown> }>} */
+  const seen = []
+  const gateway = await startServer(async (req, res) => {
+    seen.push({ body: JSON.parse((await readRequestBody(req)).toString('utf8')) })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(gateway.origin, { '/v1': null }, {
+    resolveTarget: () => ({ upstream: gateway.origin }),
+    resolveSessionRecipe: (session) => {
+      // `pinned` has an admitted slug; `withheld` chose one the listing no longer backs.
+      if (session === 'pinned') {
+        return { preset: 'cheapest', serviceTier: null, sort: 'price', variant: null,
+                 precision: 'eight-bit-up', quantizations: ['fp8'], pin: 'relace/fp4', pinChosen: 'relace/fp4' }
+      }
+      if (session === 'withheld') {
+        return { preset: 'none', serviceTier: null, sort: null, variant: null,
+                 precision: 'any', quantizations: null, pin: null, pinChosen: 'vanished/fp8' }
+      }
+      return { preset: 'none', serviceTier: null, sort: null, variant: null, precision: 'any', quantizations: null }
+    },
+  })
+
+  const send = (session) => fetch(`${address.origin}/t/one/v1/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': session },
+    body: JSON.stringify({ model: 'vendor/model', provider: { order: ['a'] } }),
+  })
+
+  const pinned = await send('pinned')
+  assert.equal(pinned.status, 200)
+  assert.equal(pinned.headers.get('x-oorp-pin'), 'relace/fp4')
+  assert.deepEqual(seen[0].body.provider, { order: ['a'], only: ['relace/fp4'], allow_fallbacks: false })
+  assert.equal('service_tier' in seen[0].body, false, 'the preset`s tier does not fight the pin')
+  // The floor is not "bypassed" here: a pin supersedes it, so nothing was withheld.
+  assert.equal(pinned.headers.get('x-oorp-precision'), 'any')
+
+  const withheld = await send('withheld')
+  assert.equal(withheld.status, 200)
+  assert.equal(withheld.headers.get('x-oorp-pin'), 'bypass', 'a pin that was not admitted is visible, not silent')
+  assert.deepEqual(seen[1].body.provider, { order: ['a'] }, 'a withheld pin writes nothing at all')
+
+  const none = await send('unpinned')
+  assert.equal(none.headers.get('x-oorp-pin'), 'none')
+})
+
+/**
+ * One Responses-API event, serialised the way OpenRouter streams it.
+ * Built from objects on purpose: hand-counting four closing braces is how a fixture
+ * ends up testing the fixture instead of the parser.
+ */
+function responsesEvent(type, body) {
+  return `event: ${type}\ndata: ${JSON.stringify({ type, response: body })}`;
+}
+
+test('findUsage() reads the Responses API envelope, not just Chat Completions', () => {
+  /* The two wire shapes differ in where the facts live. `api: openai-responses` wraps
+     every event as { type, response: { … } }, so `usage` sits at `response.usage` — and a
+     reader that only looks at `envelope.usage` reports every such request as "cost not
+     reported" while the bill is one level down. Field names differ too. Values below are
+     from a real POST /api/v1/responses on deepseek/deepseek-v4.1-flash-1017. */
+  const usage = {
+    input_tokens: 32,
+    input_tokens_details: { cached_tokens: 8 },
+    output_tokens: 16,
+    output_tokens_details: { reasoning_tokens: 5 },
+    total_tokens: 48,
+    cost: 0.0000288,
+    is_byok: false,
+    cost_details: {
+      upstream_inference_cost: 0.0000288,
+      upstream_inference_input_cost: 0.0000096,
+      upstream_inference_output_cost: 0.0000192,
+    },
+  }
+  const stream = [
+    responsesEvent('response.created', {
+      id: 'gen-1793544908-UF5yYisTODn65ctDacW5',
+      model: 'deepseek/deepseek-v4.1-flash-1017',
+      service_tier: 'default',
+      usage: null,
+    }),
+    responsesEvent('response.output_text.delta', { id: 'gen-1793544908-UF5yYisTODn65ctDacW5' }),
+    responsesEvent('response.completed', {
+      id: 'gen-1793544908-UF5yYisTODn65ctDacW5',
+      model: 'deepseek/deepseek-v4.1-flash-1017',
+      service_tier: 'default',
+      status: 'completed',
+      usage,
+    }),
+    'data: [DONE]',
+    '',
+  ].join('\n')
+
+  const found = findUsage(stream)
+  assert.equal(found.promptTokens, 32, 'input_tokens is this API`s prompt count')
+  assert.equal(found.completionTokens, 16, 'output_tokens is its completion count')
+  assert.equal(found.cacheReadTokens, 8, 'input_tokens_details.cached_tokens')
+  assert.equal(found.reasoningTokens, 5, 'output_tokens_details.reasoning_tokens')
+  assert.equal(found.costUsd, 0.0000288, 'the credit amount actually charged')
+  assert.equal(found.upstreamCostUsd, 0.0000288)
+  assert.equal(found.upstreamPromptCostUsd, 0.0000096, 'upstream_inference_input_cost is the prompt half')
+  assert.equal(found.upstreamCompletionCostUsd, 0.0000192, 'upstream_inference_output_cost is the completion half')
+  assert.equal(found.servedTier, 'default', 'the tier lives inside the response envelope')
+  assert.equal(found.servedModel, 'deepseek/deepseek-v4.1-flash-1017')
+  assert.equal(found.genId, 'gen-1793544908-UF5yYisTODn65ctDacW5', 'and so does the id')
+  assert.equal(found.providerName, null, 'a Responses body names no provider at all — only the header does')
+})
+
+test('a relayed Responses-API stream reports cost and the provider from the response headers', async () => {
+  /** @type {Array<Record<string, any>>} */
+  const records = []
+  /* OpenRouter advertises these through `access-control-expose-headers`, and a Responses
+     stream repeats neither in its body — so the proxy is the only place that can carry
+     them into the record. Without this every `api: openai-responses` route shows an empty
+     Provider column and "not reported" for cost, which is exactly the bug. */
+  const upstream = await startServer(async (_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'x-provider-name': 'Relace',
+      'x-generation-id': 'gen-1793544908-UF5yYisTODn65ctDacW5',
+    })
+    res.end(`${responsesEvent('response.completed', {
+      id: 'resp_abc',
+      model: 'm',
+      usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14, cost: 0.5 },
+    })}\n\ndata: [DONE]\n\n`)
+  })
+
+  const relay = createRelay({
+    host: '127.0.0.1',
+    port: 0,
+    upstream: upstream.origin,
+    routes: { '/v1': null },
+    onRecord: (entry) => records.push(entry),
+  })
+  const address = await relay.start()
+  cleanups.push(() => relay.stop())
+
+  const response = await fetch(`${address.origin}/v1/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'm', input: [] }),
+  })
+  assert.equal(response.status, 200)
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  const record = records.at(-1)
+  assert.ok(record, 'the request was recorded')
+  assert.equal(record.promptTokens, 10, 'a Responses stream is billed like any other')
+  assert.equal(record.completionTokens, 4)
+  assert.equal(record.costUsd, 0.5)
+  assert.equal(record.providerName, 'Relace', 'the provider came from X-Provider-Name')
+  assert.equal(record.genId, 'gen-1793544908-UF5yYisTODn65ctDacW5', 'and the id from X-Generation-Id')
+})
+
+test('a response that names no provider is reconciled against the generation record', async () => {
+  /** @type {Array<Record<string, any>>} */
+  const records = []
+  /** @type {string[]} */
+  const asked = []
+  /* The Responses API names no provider in its body and sends no X-Provider-Name, so the
+     generation record is the only per-request source. This stub answers both ends: the
+     stream (with a usage block but no provider) and the lookup. */
+  const upstream = await startServer(async (req, res) => {
+    if ((req.url ?? '').startsWith('/generation')) {
+      asked.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        data: {
+          id: 'gen-abc',
+          model: 'deepseek/deepseek-v4.1-flash-1017',
+          provider_name: 'Mistral',
+          total_cost: 0.0000288,
+          native_tokens_prompt: 32,
+          native_tokens_completion: 16,
+          native_tokens_reasoning: 4,
+          native_tokens_cached: 8,
+          service_tier: 'default',
+        },
+      }))
+      return
+    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'x-generation-id': 'gen-abc',
+    })
+    res.end(`${responsesEvent('response.completed', {
+      id: 'resp_1',
+      model: 'm',
+      usage: { input_tokens: 32, output_tokens: 16, total_tokens: 48, cost: 0.0000288 },
+    })}\n\ndata: [DONE]\n\n`)
+  })
+
+  const relay = createRelay({
+    host: '127.0.0.1',
+    port: 0,
+    upstream: upstream.origin,
+    routes: { '/v1': null },
+    onRecord: (entry) => records.push(entry),
+  })
+  const address = await relay.start()
+  cleanups.push(() => relay.stop())
+
+  const response = await fetch(`${address.origin}/v1/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-test' },
+    body: JSON.stringify({ model: 'm', input: [] }),
+  })
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  const record = records.at(-1)
+  assert.ok(record, 'the request was recorded')
+  assert.equal(record.providerName, 'Mistral', 'the provider came from the generation record')
+  assert.equal(record.costUsd, 0.0000288, 'a cost the stream reported is never overwritten')
+  assert.equal(record.reasoningTokens, 4, 'a field the stream never reported is filled in')
+  assert.equal(record.cacheReadTokens, 8)
+  assert.equal(record.servedModel, 'm', 'a field the stream did report is never overwritten')
+  assert.equal(asked.length, 1, 'one lookup, keyed by the generation id')
+  assert.match(asked[0], /id=gen-abc/)
+})
+
+test('the generation lookup is skipped when the response already named its provider', async () => {
+  /** @type {Array<Record<string, any>>} */
+  const records = []
+  /** @type {string[]} */
+  const asked = []
+  const upstream = await startServer(async (req, res) => {
+    if ((req.url ?? '').startsWith('/generation')) {
+      asked.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"data":{"provider_name":"Wrong"}}')
+      return
+    }
+    // A Chat Completions chunk: `provider` rides in the body, so nothing is missing.
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end(
+      'data: {"id":"gen-xyz","object":"chat.completion.chunk","model":"m","provider":"Together",'
+      + '"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7,"cost":0.25}}\n\n'
+      + 'data: [DONE]\n\n',
+    )
+  })
+
+  const relay = createRelay({
+    host: '127.0.0.1',
+    port: 0,
+    upstream: upstream.origin,
+    routes: { '/v1': null },
+    onRecord: (entry) => records.push(entry),
+  })
+  const address = await relay.start()
+  cleanups.push(() => relay.stop())
+
+  const response = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-test' },
+    body: JSON.stringify({ model: 'm', messages: [] }),
+  })
+  await response.text()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  assert.equal(records.at(-1).providerName, 'Together', 'the body wins')
+  assert.deepEqual(asked, [], 'and no lookup is made at all')
 })

@@ -73,6 +73,8 @@
 
         # 0 disables the upstream timeout, which is what long SSE completions need.
         upstreamTimeoutMs: 0
+        generationLookup: true
+        controlDiagnostics: false
 
         # Extra endpoints served from /t/<id>/<tier>/v1 mounts, so one listener can
         # front more than OpenRouter (a gateway, a self-hosted server, anything
