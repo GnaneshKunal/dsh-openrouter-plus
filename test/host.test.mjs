@@ -11,7 +11,14 @@ import http from 'node:http'
 import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
 
-import { apply, normalizeConfig, normalizeRoutes, normalizeSessionPrecisions, normalizeUsageWidget } from '../index.js'
+import {
+  apply,
+  normalizeConfig,
+  normalizeProviderFacts,
+  normalizeRoutes,
+  normalizeSessionPrecisions,
+  normalizeUsageWidget,
+} from '../index.js'
 
 /* Every boot in this file writes the usage snapshot under `$DSH_HOME`. Point that at a
    throwaway directory so a test run can neither read nor overwrite the real one. */
@@ -212,6 +219,32 @@ test('the sidebar card is on unless it was switched off', () => {
   assert.equal(normalizeUsageWidget(null), true)
   // `/status` answers the object, so the card has one shape to read either way.
   assert.deepEqual(normalizeConfig({ usageWidget: false }).usageWidget, { enabled: false })
+})
+
+test('the provider list states every fact it has unless one was switched off', () => {
+  // On by default, one flag per fact. A fact the listing omits is already dropped row by
+  // row, so "on" never prints an empty column — it only stops a fact appearing late.
+  assert.deepEqual(normalizeProviderFacts(undefined), {
+    precision: true,
+    price: true,
+    uptime: true,
+    throughput: true,
+    latency: true,
+    percentiles: 'p50',
+  })
+  assert.deepEqual(normalizeConfig(undefined).providerFacts, normalizeProviderFacts(undefined))
+  assert.equal(normalizeProviderFacts({ latency: false }).latency, false, 'an explicit false is the only off')
+  // Anything that is not a real `false` keeps the fact on, so a typo cannot hide a column.
+  assert.equal(normalizeProviderFacts({ price: 'no' }).price, true)
+  assert.equal(normalizeProviderFacts({ uptime: 0 }).uptime, true)
+  assert.equal(normalizeProviderFacts(null).throughput, true)
+  assert.equal(normalizeProviderFacts(false).precision, true)
+  // The percentile choice is the one value with a vocabulary of its own; anything else
+  // falls back to p50, the single number that is honest for both speed fields.
+  assert.equal(normalizeProviderFacts({ percentiles: 'p50p90' }).percentiles, 'p50p90')
+  assert.equal(normalizeProviderFacts({ percentiles: 'P50P90' }).percentiles, 'p50')
+  assert.equal(normalizeProviderFacts({ percentiles: 'p99' }).percentiles, 'p50')
+  assert.equal(normalizeProviderFacts({}).percentiles, 'p50')
 })
 
 test('boots the relay, serves control endpoints, and stops cleanly', async (t) => {
@@ -417,6 +450,59 @@ test('the sidebar flag is written through the guarded control API, and only to t
   assert.deepEqual(editor.writes[0].next, { host: '127.0.0.1', port, usageWidget: { enabled: false } })
   // The next boot reads the flag back off the row, bare or boxed.
   assert.equal(normalizeConfig(editor.writes[0].next).usageWidget.enabled, false)
+})
+
+test('the provider-facts preference is read and written through the control API', async (t) => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false })
+
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const factsUrl = `${origin}/__openrouter-plus/provider-facts`
+  const defaults = { precision: true, price: true, uptime: true, throughput: true, latency: true, percentiles: 'p50' }
+  // The page reads the whole object even when the row wrote nothing at all.
+  assert.deepEqual(await (await fetch(factsUrl)).json(), { ok: true, providerFacts: defaults })
+  // It is a display preference, so it stays off the endpoint the sidebar card polls.
+  assert.equal('providerFacts' in (await (await fetch(`${origin}/__openrouter-plus/status`)).json()), false)
+
+  // Every control write carries the guard header; without it nothing is written.
+  const unguarded = await fetch(factsUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ providerFacts: { latency: false } }),
+  })
+  assert.equal(unguarded.status, 403)
+  assert.equal(editor.writes.length, 0, 'an unguarded write must not reach the config')
+
+  // A partial object is stored as the normalised object, so the row reads back the same
+  // shape the page will send next time.
+  const expected = { ...defaults, latency: false, percentiles: 'p50p90' }
+  const written = await postJson(factsUrl, { providerFacts: { latency: false, percentiles: 'p50p90' } })
+  assert.equal(written.status, 200)
+  assert.deepEqual(await written.json(), { ok: true, providerFacts: expected })
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].entry, editor.rows[0].entry, 'the plugin row is the only row written')
+  assert.deepEqual(editor.writes[0].next, { host: '127.0.0.1', port, providerFacts: expected })
+  // A write reloads the plugin in the real Host, so what proves it stuck is the row it
+  // wrote and the config the next boot reads off it — not a second GET against this
+  // instance, whose config was read before the write.
+  assert.deepEqual(normalizeConfig(editor.writes[0].next).providerFacts, expected)
+
+  // Nonsense in a field is not a reason to refuse the write: it normalises to the default,
+  // which is how a hand-edited row keeps working.
+  const tolerant = await postJson(factsUrl, { providerFacts: { price: 'no', percentiles: 'p99' } })
+  assert.equal(tolerant.status, 200)
+  assert.deepEqual(await tolerant.json(), { ok: true, providerFacts: defaults })
 })
 
 test('booting with the card switched off still reports the cost telemetry', async (t) => {
@@ -1466,6 +1552,373 @@ test('the provider control API lists endpoints, pins one, and the relay routes o
 
   // 9. A Session's pin is not written to the profile, ever.
   assert.equal(editor.writes.length, 0)
+})
+
+test('a keyed request warms the listing with speed, and an anonymous read cannot undo it', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+
+  const model = 'deepseek/deepseek-v4.1-flash-1017'
+  /** The same two endpoints read with and without a key: only the speed fields differ. */
+  const listingFor = (authed) => ({
+    data: {
+      endpoints: [
+        {
+          provider_name: 'Relace', tag: 'relace/fp4', quantization: 'fp4', status: 0,
+          pricing: { prompt: '0.000000035', completion: '0.0000005' },
+          uptime_last_1d: 100,
+          latency_last_30m: authed ? { p50: 498, p75: 900, p90: 1438, p99: 3000 } : null,
+          throughput_last_30m: authed ? { p50: 134, p75: 100, p90: 58, p99: 20 } : null,
+        },
+        {
+          provider_name: 'Wafer', tag: 'wafer/us', quantization: 'mxfp4', status: 0,
+          pricing: { prompt: '0.000000038', completion: '0.0000005' },
+          uptime_last_1d: 100,
+          latency_last_30m: authed ? { p50: 274.5, p90: 701.8 } : null,
+          throughput_last_30m: authed ? { p50: 169, p90: 94 } : null,
+        },
+      ],
+    },
+  })
+
+  /** Every listing read the Host paid for, and whether it carried the caller's key. */
+  const listingHits = []
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.startsWith('/v1/models/') && url.endsWith('/endpoints')) {
+      const authed = typeof req.headers.authorization === 'string'
+      listingHits.push({
+        model: url.slice('/v1/models/'.length, -'/endpoints'.length),
+        authed,
+        authorization: req.headers.authorization ?? null,
+      })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(listingFor(authed)))
+      return
+    }
+    await readRequestBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+
+  const { ctx, logs, dispose } = createFakeContext()
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+  apply(ctx, { port, portFallback: false, upstream: `http://127.0.0.1:${upstreamPort}/v1` })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const providersUrl = `${origin}/__openrouter-plus/providers?model=${model}`
+  const chat = (headers, body) => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  })
+
+  // 1. The menu's own read is keyless, and that is all a keyless read can report: both
+  //    speed fields come back null on every row, so there is nothing for a row to print.
+  const anonymous = await (await fetch(providersUrl)).json()
+  assert.equal(
+    anonymous.providers.every((provider) => provider.latency === null && provider.throughput === null),
+    true,
+  )
+  assert.equal(listingHits.length, 1)
+  assert.equal(listingHits[0].authed, false)
+
+  // 2. A keyed request is the one moment the speed can be read: the relay hands over the
+  //    model and the caller's own Authorization, and the Host stores the rows — never the
+  //    key — for whichever menu opens next.
+  const routed = await chat({ authorization: 'Bearer sk-not-a-real-key' }, { model: `${model}:floor`, messages: [] })
+  assert.equal(routed.status, 200)
+
+  const warmed = await waitFor(async () => {
+    const payload = await (await fetch(providersUrl)).json()
+    return payload.providers.some((provider) => provider.latency !== null) ? payload : null
+  })
+  assert.equal(warmed.cached, true, 'the menu answers from the warmed entry')
+  assert.equal(listingHits.length, 2, 'exactly one warm read')
+  assert.equal(listingHits[1].authed, true)
+  assert.equal(listingHits[1].authorization, 'Bearer sk-not-a-real-key', "the caller's own header, verbatim")
+  assert.equal(listingHits[1].model, model, 'the model without the relay-owned variant suffix')
+  const relace = warmed.providers.find((provider) => provider.tag === 'relace/fp4')
+  assert.deepEqual(relace.latency, { p50: 498, p90: 1438 })
+  assert.deepEqual(relace.throughput, { p50: 134, p90: 58 })
+
+  // 3. A menu read afterwards answers from the warm entry and costs no GET — which is the
+  //    point of the longer stats window: a refresh must not replace rows that carry speed
+  //    with identical rows that do not.
+  const again = await (await fetch(providersUrl)).json()
+  assert.equal(again.cached, true)
+  assert.deepEqual(
+    again.providers.map((provider) => provider.latency),
+    warmed.providers.map((provider) => provider.latency),
+  )
+  assert.equal(listingHits.length, 2)
+
+  // 4. A request with no key warms nothing: there is no Authorization to read a listing
+  //    with, and a keyless read would only overwrite good rows with nulls.
+  assert.equal((await chat({}, { model, messages: [] })).status, 200)
+  // Fire-and-forget, so give a wrongly-fired read the chance to show up before saying it did not.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(listingHits.length, 2, 'a keyless request fires no listing read')
+
+  // 5. The borrowed key is spent and dropped: it reaches the upstream, and nowhere else —
+  //    not a log line, not a response body.
+  assert.equal(listingHits[1].authorization, 'Bearer sk-not-a-real-key')
+  assert.equal(
+    logs.some((line) => line.includes('sk-not-a-real-key')),
+    false,
+    'the key never reaches a log line',
+  )
+  assert.equal(JSON.stringify(again).includes('sk-not-a-real-key'), false, 'nor a response body')
+})
+
+test('a listing read with a key outlives the row TTL, and expires with its own window', async (t) => {
+  /* The speed numbers are a rolling 30-minute average, so an authenticated listing is worth
+     keeping past the ten-minute row TTL: replacing it with identical rows whose speed is null
+     would trade the only facts worth having for a freshness those facts already have. Past its
+     own window it must expire, or a page would show yesterday's speed forever. */
+  const port = await freePort()
+  const upstreamPort = await freePort()
+  const model = 'deepseek/deepseek-v4.1-flash-1017'
+  const listingFor = (authed) => ({
+    data: {
+      endpoints: [
+        {
+          provider_name: 'Relace', tag: 'relace/fp4', quantization: 'fp4', status: 0,
+          pricing: { prompt: '0.000000035', completion: '0.0000005' },
+          uptime_last_1d: 100,
+          latency_last_30m: authed ? { p50: 498, p90: 1438 } : null,
+          throughput_last_30m: authed ? { p50: 134, p90: 58 } : null,
+        },
+      ],
+    },
+  })
+  /** Whether each listing read carried the caller's key. */
+  const authedReads = []
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.startsWith('/v1/models/') && url.endsWith('/endpoints')) {
+      const authed = typeof req.headers.authorization === 'string'
+      authedReads.push(authed)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(listingFor(authed)))
+      return
+    }
+    await readRequestBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+  const { ctx, dispose } = createFakeContext()
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+  apply(ctx, { port, portFallback: false, upstream: `http://127.0.0.1:${upstreamPort}/v1` })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const providersUrl = `${origin}/__openrouter-plus/providers?model=${model}`
+  const chat = (headers) => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ model, messages: [] }),
+  })
+
+  assert.equal((await chat({ authorization: 'Bearer sk-test-key' })).status, 200)
+  const warmed = await waitFor(async () => {
+    const payload = await (await fetch(providersUrl)).json()
+    return payload.providers[0]?.latency !== null ? payload : null
+  })
+  assert.equal(authedReads.length, 1)
+  assert.equal(authedReads[0], true)
+
+  /* Eleven minutes on: past the row TTL, inside the stats window. */
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  t.mock.timers.tick(11 * 60 * 1000)
+  const inside = await (await fetch(providersUrl)).json()
+  assert.equal(inside.cached, true)
+  assert.deepEqual(inside.providers[0].latency, { p50: 498, p90: 1438 })
+  assert.equal(authedReads.length, 1, 'no read: the numbers still describe the window they came from')
+
+  /* Past the 30-minute window the numbers have rolled; the next menu open reads again — and
+     because a menu open carries no key, the replacement has no speed. */
+  t.mock.timers.tick(20 * 60 * 1000)
+  const expired = await (await fetch(providersUrl)).json()
+  assert.equal(authedReads.length, 2, 'the window ended, so the menu read again')
+  assert.equal(authedReads[1], false)
+  assert.equal(expired.providers[0].latency, null)
+  t.mock.timers.reset()
+})
+
+test('a failed warm-up read leaves a fresh listing alone', async (t) => {
+  /* The authenticated read runs *through* a fresh anonymous entry to upgrade it. Without a
+     guard on the failure path, one rejected upgrade (a 429, a blip) would cache an empty list
+     over a working one and blank the menu for the whole row TTL — a regression the warm-up
+     introduced, because before it a read only ran when the cache was empty. */
+  const port = await freePort()
+  const upstreamPort = await freePort()
+  const model = 'deepseek/deepseek-v4.1-flash-1017'
+  let failAuthed = false
+  const upstream = http.createServer(async (req, res) => {
+    const url = req.url ?? '/'
+    if (url.startsWith('/v1/models/') && url.endsWith('/endpoints')) {
+      const authed = typeof req.headers.authorization === 'string'
+      if (authed && failAuthed) {
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end('{"error":{"message":"busy"}}')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        data: {
+          endpoints: [
+            {
+              provider_name: 'Relace', tag: 'relace/fp4', quantization: 'fp4', status: 0,
+              pricing: { prompt: '0.000000035', completion: '0.0000005' },
+              uptime_last_1d: 100,
+              latency_last_30m: authed ? { p50: 498, p90: 1438 } : null,
+              throughput_last_30m: null,
+            },
+          ],
+        },
+      }))
+      return
+    }
+    await readRequestBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+  const { ctx, dispose } = createFakeContext()
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+    await dispose()
+  })
+  apply(ctx, { port, portFallback: false, upstream: `http://127.0.0.1:${upstreamPort}/v1` })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const providersUrl = `${origin}/__openrouter-plus/providers?model=${model}`
+  const menu = await (await fetch(providersUrl)).json()
+  assert.equal(menu.providers.length, 1)
+  assert.equal(menu.providers[0].latency, null)
+
+  failAuthed = true
+  const routed = await fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-test-key' },
+    body: JSON.stringify({ model, messages: [] }),
+  })
+  assert.equal(routed.status, 200)
+  // Give the rejected background read the time to land.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  const after = await (await fetch(providersUrl)).json()
+  assert.equal(after.providers.length, 1, 'the working listing survived a failed upgrade')
+  assert.equal(after.cached, true)
+  assert.equal(after.error, undefined)
+})
+
+test('a mount pointed at another upstream never spends the caller key on a listing read', async (t) => {
+  /* The key the client sends belongs to the upstream it is talking to. A target mount may
+     point anywhere, so warming the OpenRouter listing from such a request would hand another
+     provider's credential to a host it was never meant for — the read is refused before it is
+     made. A listing is only readable at the configured upstream anyway. */
+  const upstreamPort = await freePort()
+  const otherPort = await freePort()
+
+  let listingHits = 0
+  const upstream = http.createServer(async (req, res) => {
+    if ((req.url ?? '').endsWith('/endpoints')) listingHits += 1
+    await readRequestBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+  t.after(async () => {
+    await new Promise((resolve) => {
+      upstream.closeAllConnections?.()
+      upstream.close(() => resolve(undefined))
+    })
+  })
+
+  let otherHits = 0
+  const other = http.createServer(async (req, res) => {
+    otherHits += 1
+    await readRequestBody(req)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => other.listen(otherPort, '127.0.0.1', resolve))
+  t.after(async () => {
+    await new Promise((resolve) => {
+      other.closeAllConnections?.()
+      other.close(() => resolve(undefined))
+    })
+  })
+
+  const origin = await bootPlugin(t, {
+    upstream: `http://127.0.0.1:${upstreamPort}/v1`,
+    targets: {
+      /* A target that happens to point at the configured upstream is still that upstream:
+         the guard is about which host is dialled, not which mount named it. */
+      ours: { upstream: `http://127.0.0.1:${upstreamPort}/v1` },
+      elsewhere: { upstream: `http://127.0.0.1:${otherPort}/v1` },
+    },
+  })
+
+  // Positive control: through a `/t/` mount that dials our own upstream, the read happens.
+  const ourMount = await fetch(`${origin}/t/ours/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-our-key' },
+    body: JSON.stringify({ model: 'deepseek/deepseek-v4.1-flash-1017', messages: [] }),
+  })
+  assert.equal(ourMount.status, 200)
+  await waitFor(() => listingHits === 1)
+  assert.equal(listingHits, 1, 'a mount pointed at this upstream still warms')
+
+  const response = await fetch(`${origin}/t/elsewhere/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer sk-some-other-provider' },
+    body: JSON.stringify({ model: 'deepseek/deepseek-v4.1-flash-1017', messages: [] }),
+  })
+  assert.equal(response.status, 200)
+  assert.equal(otherHits, 1, 'the request itself was forwarded to the mount it named')
+  // Fire-and-forget: give a wrongly-fired read the chance to arrive before saying it did not.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(listingHits, 1, "another provider's key is never spent on this upstream")
 })
 
 /** Boot one plugin instance on its own port and return its origin. */

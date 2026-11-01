@@ -64,7 +64,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/models-sync.js` | models-page | `readLiveModels(payload)` → route entries; `annotateLive(models, existing)` → marks `inRoute`; `selectModels({ live, existing, selected })` → the new list. Pure, no I/O |
 | `lib/quantization.js` | relay-core | `normalizePrecision(raw) -> { floor, includeUnknown, allow }`, `precisionLabel(value)`, `PRECISION_IDS`, `QUANTIZATION_LEVELS`; the twelve-value enum materialised into the allowlist `provider.quantizations` accepts. Pure, no I/O |
 | `lib/endpoints.js` | relay-core | `parseEndpoints(payload, maxBytes)`, `levelsFrom(endpoints)`, `survives(allow, levels)`, `fetchEndpoints(upstream, model, { fetch })`; per-endpoint precision for admission control. Injected fetch, no network in tests |
-| `lib/providers.js` | relay-core | `parseProviders(payload, maxBytes)`, `sortProviders`, `groupProviders`, `findProvider`, `pinnedFacets`, `precisionLevels`, `tagsOf`, `readProviders(upstream, model, { fetch })`; the same listing read for *display* — full rows, dollars per million, groups in the model page's order. Injected fetch, no network in tests |
+| `lib/providers.js` | relay-core | `parseProviders(payload, maxBytes)`, `sortProviders`, `groupProviders`, `findProvider`, `pinnedFacets`, `precisionLevels`, `tagsOf`, `readProviders(upstream, model, { fetch, authorization })`; the same listing read for *display* — full rows, dollars per million, the `latency`/`throughput` p50·p90 pair, groups in the model page's order. Injected fetch, no network in tests |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
@@ -101,7 +101,9 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/precision?session=<id>` | — | `{ ok, session, precision: { floor, includeUnknown, allow }, inherited, source: 'session' | 'default', chosen, default, floors }` — what that Session applies *now*; `allow` is `null` for `any` |
 | `POST /__openrouter-plus/precision` | `{ session, precision: { floor, includeUnknown } }` | the same body; a Session choice, **memory only**, cleared by an absent/null `precision` |
 | `POST /__openrouter-plus/precision/default` | `{ precision }` | `{ ok, default, floors }`; one config write on the `precisionFloor` key |
-| `GET /__openrouter-plus/providers?model=<id>` | — | `{ ok, model, fetchedAt, cached, providers: ProviderRow[], groups: [{ id, tags }] }`; the model's live endpoints, `400` without a `/`-qualified model id, `200` with an empty list and an `error` when the read fails |
+| `GET /__openrouter-plus/providers?model=<id>` | — | `{ ok, model, fetchedAt, cached, providers: ProviderRow[], groups: [{ id, tags }] }`; the model's live endpoints, `400` without a `/`-qualified model id, `200` with an empty list and an `error` when the read fails. A row's `latency`/`throughput` is a `{ p50, p90 }` pair or `null`, and only a keyed read populates them |
+| `GET /__openrouter-plus/provider-facts` | — | `{ ok, providerFacts: { precision, price, uptime, throughput, latency, percentiles } }` — which facts an endpoint row states, and whether speed prints p50 alone or with p90 |
+| `POST /__openrouter-plus/provider-facts` | `{ providerFacts }` | `{ ok, providerFacts }`; one config write on the `providerFacts` key. A partial body is normalised rather than refused, so a hand-edited row reads the same as the page's checkboxes |
 | `GET /__openrouter-plus/provider?session=<id>&model=<id>` | — | `{ ok, session, provider: { tag, name, tier, precision } | null, chosen, model, available }`; what that Session pins *now* |
 | `POST /__openrouter-plus/provider` | `{ session, provider, model? }` | the same body; `provider: null` clears. **Memory only.** A slug the model's listing does not offer answers `404` |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` | `{ ok: true, usageWidget: { enabled } }`; one config write — the sidebar card's preference (`usageWidget` on the plugin row). A non-boolean `enabled` is a `400` |
@@ -221,6 +223,11 @@ Target mounts (alongside the legacy tier mounts):
  * @param {Record<string, (req,res)=>Promise<void>|void>} [options.control]
  *        absolute pathname -> handler, checked before proxying
  * @param {(entry: object) => void} [options.onRecord]   per-request metric sink
+ * @param {(model: string, authorization: string|null, destination: string) => void} [options.onModelSeen]
+ *        a hint that a request named a model, with the caller's own Authorization value and the
+ *        absolute URL it is being forwarded to; never awaited, never allowed to fail the request.
+ *        The Host spends it on one authenticated listing read (speed facts) and keeps the rows,
+ *        not the key — and uses `destination` to refuse a request that went to another upstream.
  * @param {(level, message, detail) => void} [options.log]
  * @param {number} [options.upstreamTimeoutMs=0]  0 = no timeout (long SSE streams)
  * @param {string} [options.version]

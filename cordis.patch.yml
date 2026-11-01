@@ -99,6 +99,22 @@
         usageWidget:
           enabled: true
 
+        # Which facts an endpoint row states in the composer's provider menu, and how
+        # many percentiles of a speed it prints. Every fact is on by default and a fact
+        # the listing did not report is dropped rather than shown as a dash, so turning
+        # these on costs nothing — latency and throughput appear only once the relay has
+        # seen a request for that model, because speed needs an authenticated read of
+        # the listing. `percentiles: p50` prints the median alone; `p50p90` adds the
+        # tail. Written by "Provider list display" on the settings page; display only,
+        # the relay never reads it.
+        providerFacts:
+          precision: true
+          price: true
+          uptime: true
+          throughput: true
+          latency: true
+          percentiles: p50
+
         # The precision floor every Session inherits until it picks its own in the
         # composer chip. `any` sends nothing at all, so this default is byte-identical
         # to a profile that predates the feature. The other three name a pool

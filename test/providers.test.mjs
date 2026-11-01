@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  PROVIDERS_STATS_TTL_MS,
+  PROVIDERS_TTL_MS,
   PROVIDER_GROUPS,
   findProvider,
   groupProviders,
@@ -244,6 +246,80 @@ test('findProvider() and pinnedFacets() answer the two questions the chip asks',
   })
   assert.equal(pinnedFacets(null), null)
   assert.equal(pinnedFacets({}), null)
+})
+
+test('parseProviders() keeps the two speed percentiles a label can print, and null otherwise', () => {
+  // Both speed fields are `{ p50, p75, p90, p99 }` or null, and a keyless read reports null
+  // on every endpoint — measured on this very model, 42/42 rows, which is why an
+  // authenticated listing is the only one that has anything to show here.
+  assert.equal(
+    parseProviders(LISTING).every((provider) => provider.latency === null && provider.throughput === null),
+    true,
+    'a listing read without a key carries no speed at all',
+  )
+
+  const providers = parseProviders({
+    data: {
+      endpoints: [
+        {
+          tag: 'relace/fp4',
+          latency_last_30m: { p50: 929.5, p75: 2100, p90: 3768.5, p99: 9000 },
+          throughput_last_30m: { p50: 101, p75: 70, p90: 35, p99: 12 },
+        },
+        { tag: 'half/fp8', latency_last_30m: { p50: 498, p90: null }, throughput_last_30m: null },
+        { tag: 'empty/fp8', latency_last_30m: {}, throughput_last_30m: [] },
+        { tag: 'malformed/fp8', latency_last_30m: { p50: 'fast', p90: 'fast' }, throughput_last_30m: 'fast' },
+        { tag: 'absent/fp8' },
+      ],
+    },
+  })
+  const byTag = new Map(providers.map((provider) => [provider.tag, provider]))
+
+  // p50 and p90 only. p50 is the honest single number for both fields; p90 is the tail a
+  // row may print beside it. p75 and p99 are simply not kept.
+  assert.deepEqual(byTag.get('relace/fp4').latency, { p50: 929.5, p90: 3768.5 })
+  assert.deepEqual(byTag.get('relace/fp4').throughput, { p50: 101, p90: 35 })
+  // A percentile the upstream did not report is null and never 0: "no p90" is a fact,
+  // a p90 of zero milliseconds would be a different and false one.
+  assert.deepEqual(byTag.get('half/fp8').latency, { p50: 498, p90: null })
+  assert.equal(byTag.get('half/fp8').throughput, null)
+  // Nothing usable in the object at all: one absent fact, not a pair of nulls.
+  assert.equal(byTag.get('empty/fp8').latency, null)
+  assert.equal(byTag.get('empty/fp8').throughput, null)
+  assert.equal(byTag.get('malformed/fp8').latency, null, 'a string percentile is not a number')
+  assert.equal(byTag.get('malformed/fp8').throughput, null)
+  assert.equal(byTag.get('absent/fp8').latency, null)
+  assert.equal(byTag.get('absent/fp8').throughput, null)
+})
+
+test('an authenticated listing outlives the row TTL, because its numbers are a 30-minute average', () => {
+  assert.equal(PROVIDERS_STATS_TTL_MS, 30 * 60 * 1000)
+  assert.ok(PROVIDERS_STATS_TTL_MS > PROVIDERS_TTL_MS, 'otherwise the longer window would be pointless')
+})
+
+test('readProviders() sends the caller Authorization only when it was handed one', async () => {
+  /** @type {Array<{ headers: Record<string, string> }>} */
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, headers: init.headers })
+    return { ok: true, status: 200, text: async () => JSON.stringify(LISTING) }
+  }
+  const read = (options) => readProviders('https://openrouter.ai/api/v1', 'deepseek/deepseek-v3.2', {
+    fetch: fetchImpl,
+    ...options,
+  })
+
+  await read({ authorization: 'Bearer sk-not-a-real-key' })
+  await read({})
+  await read({ authorization: '   ' })
+
+  // Verbatim: it is the caller's own credential, and OpenRouter is the only judge of it.
+  assert.equal(seen[0].headers.authorization, 'Bearer sk-not-a-real-key')
+  assert.equal(seen[0].headers.accept, 'application/json')
+  // A keyless read stays keyless. An empty `authorization` header is not equivalent to
+  // none: an upstream may read it as a malformed credential and refuse the listing.
+  assert.equal('authorization' in seen[1].headers, false)
+  assert.equal('authorization' in seen[2].headers, false)
 })
 
 test('readProviders() reads the right URL and never reaches the network in a test', async () => {
