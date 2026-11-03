@@ -75,6 +75,16 @@ const {
   providerFacts,
   providerFactsPayload,
   providerDefaults,
+  /* The page keeps its last good answer for the next mount, so the readers are pinned
+     with the storage they tolerate: a tab that loses its first poll still paints. */
+  readCachedStatus,
+  writeCachedStatus,
+  readCachedFacts,
+  writeCachedFacts,
+  clearCachedFacts,
+  readCachedBody,
+  writeCachedBody,
+  storageKeys,
   providerPinForModel,
   providerPrecisions,
   providerTiers,
@@ -1493,4 +1503,98 @@ test('a listing the Host did not answer reads as null, not as a model with no en
     'the model is the one query the Host reads, encoded',
   )
   assert.equal(calls[0].init.cache, 'no-store')
+})
+
+/* The page is usually opened over a Session that is still streaming, and a tab under that
+   load can lose its first /status read to the twelve-second timeout: the request is aborted,
+   snapshot stays null, and the operator is shown a header and nothing else. The last answer is
+   therefore kept for the next mount, and painted while the first poll is in flight. The rest of
+   the block pins hardening around that paint — the poll restarts only on refreshKey, and its
+   next tick is scheduled in a finally — not a diagnosed cause of the timeout. */
+test('the settings page paints its last answer and survives a re-render', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /useState\(readCachedStatus\)/, 'the page seeds from the cached answer')
+  assert.match(source, /writeCachedStatus\(answer\.body\)/, 'and refreshes it on every poll')
+  assert.match(source, /factsSeedRef/, 'the display section is seeded too')
+  assert.match(source, /readCachedFacts\(\)/)
+  /* The poll is mount-scoped and restarts for one reason: a refresh (a retry, or the re-read
+     after a write). The translate function travels through a ref so it cannot become a second
+     reason — hardening for a seat that ever hands the page a per-render function. */
+  assert.match(source, /\}, \[refreshKey\]\);/, 'the poll restarts on refreshKey alone')
+  assert.doesNotMatch(source, /\}, \[refreshKey, t\]\);/)
+  assert.match(source, /\} finally \{/, 'a failing poll still schedules the next one')
+  assert.match(source, /schedule\(POLL_INTERVAL_MS\);\s*\}\s*\};/)
+  /* A 404 is the one refusal that withdraws the section: the route is gone. */
+  assert.match(source, /response\.status === 404/)
+  assert.match(source, /clearCachedFacts\(\)/)
+})
+
+test('the last answer survives the tab, and a store it cannot use is no answer', () => {
+  const store = new Map()
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  }
+  const define = (value) =>
+    Object.defineProperty(globalThis, 'sessionStorage', { value, configurable: true })
+  define(storage)
+  try {
+    assert.equal(readCachedStatus(), null, 'nothing is painted before the first answer')
+    /* The wire body, not the normalised one: re-reading it through the same normaliser is
+       what keeps a body written by another build out of this page. */
+    const body = {
+      ok: true,
+      version: '0.7.0',
+      metrics: { requests: 7, promptTokens: 70, completionTokens: 7 },
+    }
+    assert.equal(writeCachedStatus(body), true)
+    const painted = readCachedStatus()
+    assert.equal(painted.version, '0.7.0')
+    assert.equal(painted.metrics.requests, 7)
+    assert.equal(painted.metrics.promptTokens, 70)
+
+    /* A refused body is no answer rather than a broken page. */
+    store.set(storageKeys.status, JSON.stringify({ body: { ok: false } }))
+    assert.equal(readCachedStatus(), null)
+    store.set(storageKeys.status, 'not json')
+    assert.equal(readCachedStatus(), null)
+    store.set(storageKeys.status, JSON.stringify({ body: null }))
+    assert.equal(readCachedStatus(), null)
+
+    /* The facts travel with the flag that says whether the Host carries the sort at all: a
+       Host from before the field answers neither, and the page must not offer the control. */
+    assert.equal(writeCachedFacts({ ...providerDefaults, sort: 'throughput' }, true), true)
+    const facts = readCachedFacts()
+    assert.equal(facts.facts.sort, 'throughput')
+    assert.equal(facts.sort, true)
+    writeCachedBody(storageKeys.facts, { facts: { uptime: false }, sort: false })
+    const older = readCachedFacts()
+    assert.equal(older.facts.uptime, false)
+    assert.equal(older.sort, false)
+
+    /* A 404 from the Host means the route is gone, so the answer behind it is dropped too:
+       the next mount must not seed a control whose write would 404. */
+    assert.equal(clearCachedFacts(), true)
+    assert.equal(readCachedFacts(), null)
+
+    /* A store that refuses to write costs the next mount a paint, never the page. */
+    define({
+      getItem: () => {
+        throw new Error('blocked')
+      },
+      setItem: () => {
+        throw new Error('full')
+      },
+    })
+    assert.equal(readCachedStatus(), null)
+    assert.equal(writeCachedStatus(body), false)
+  } finally {
+    Reflect.deleteProperty(globalThis, 'sessionStorage')
+  }
+  /* No storage at all - a sandboxed page - is the same "wait for the poll". */
+  assert.equal(readCachedStatus(), null)
+  assert.equal(readCachedFacts(), null)
+  assert.equal(writeCachedStatus({ ok: true }), false)
 })

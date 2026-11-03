@@ -5,6 +5,30 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [Unreleased]
+
+### Fixed
+
+- **The Settings page paints its last answer instead of drawing nothing.** The page is normally
+  opened over a Session that is still streaming, and a tab under that load can lose its first
+  `/status` read to the twelve-second timeout: `snapshot` stays `null`, every section is gated
+  on it, and the operator is shown the heading, the one-line intro and a "not answering" card —
+  no routes, no usage, no display controls. Writing a display preference made it likely, because
+  that write re-reads the status. The last successful answer is now kept per tab in
+  `sessionStorage` and painted on mount while the first poll is in flight; the poll replaces it
+  as soon as one lands. Nothing is trusted on the way back in — the cached body is put through
+  the same normaliser the wire answer is — and a store that is absent, full or forbidden simply
+  leaves the page waiting for the poll, as before. The paint covers every mount after this tab
+  has answered once; the very first open in a busy tab still has no answer to paint.
+- **A failed re-read no longer withdraws the display controls.** A 404 is the route being gone,
+  and that still withdraws the control — and the cached answer with it, so the next mount cannot
+  seed one whose write would 404. A 5xx, or the rebind that cuts the answer to the write that
+  caused it, leaves the section standing.
+- Hardening, not the fix above: the status poll schedules its next tick in a `finally`, and reads
+  the translate function through a ref so the effect depends on `refreshKey` alone. The page is
+  handed one stable bound `t` today, so neither changes behaviour now; neither can become a way
+  for the poll to stop.
+
 ## [0.7.0] — 2026-11-03
 
 **The endpoint menu can be ordered and searched, and it re-reads itself whenever it opens.** The
