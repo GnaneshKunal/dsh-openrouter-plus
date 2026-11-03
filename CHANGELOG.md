@@ -5,7 +5,7 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
-## [Unreleased]
+## [0.7.1] — 2026-11-03
 
 ### Fixed
 
