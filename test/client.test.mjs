@@ -81,6 +81,7 @@ const {
   writeCachedStatus,
   readCachedFacts,
   writeCachedFacts,
+  clearCachedFacts,
   readCachedBody,
   writeCachedBody,
   storageKeys,
@@ -1505,9 +1506,11 @@ test('a listing the Host did not answer reads as null, not as a model with no en
 })
 
 /* The page is usually opened over a Session that is still streaming, and a tab under that
-   load can lose its first /status read to the timeout: the request is aborted, snapshot stays
-   null, and the operator is shown a header and nothing else. The last answer is therefore kept
-   for the next mount, and painted while the first poll is in flight. */
+   load can lose its first /status read to the twelve-second timeout: the request is aborted,
+   snapshot stays null, and the operator is shown a header and nothing else. The last answer is
+   therefore kept for the next mount, and painted while the first poll is in flight. The rest of
+   the block pins hardening around that paint — the poll restarts only on refreshKey, and its
+   next tick is scheduled in a finally — not a diagnosed cause of the timeout. */
 test('the settings page paints its last answer and survives a re-render', async () => {
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
@@ -1515,12 +1518,16 @@ test('the settings page paints its last answer and survives a re-render', async 
   assert.match(source, /writeCachedStatus\(answer\.body\)/, 'and refreshes it on every poll')
   assert.match(source, /factsSeedRef/, 'the display section is seeded too')
   assert.match(source, /readCachedFacts\(\)/)
-  /* The poll is mount-scoped: a Host that hands the page a new translate function on a
-     re-render must not abort the request in flight, or the page never reaches "online". */
-  assert.match(source, /\}, \[refreshKey\]\);/, 'the poll does not restart on a new t')
+  /* The poll is mount-scoped and restarts for one reason: a refresh (a retry, or the re-read
+     after a write). The translate function travels through a ref so it cannot become a second
+     reason — hardening for a seat that ever hands the page a per-render function. */
+  assert.match(source, /\}, \[refreshKey\]\);/, 'the poll restarts on refreshKey alone')
   assert.doesNotMatch(source, /\}, \[refreshKey, t\]\);/)
   assert.match(source, /\} finally \{/, 'a failing poll still schedules the next one')
   assert.match(source, /schedule\(POLL_INTERVAL_MS\);\s*\}\s*\};/)
+  /* A 404 is the one refusal that withdraws the section: the route is gone. */
+  assert.match(source, /response\.status === 404/)
+  assert.match(source, /clearCachedFacts\(\)/)
 })
 
 test('the last answer survives the tab, and a store it cannot use is no answer', () => {
@@ -1528,6 +1535,7 @@ test('the last answer survives the tab, and a store it cannot use is no answer',
   const storage = {
     getItem: (key) => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
   }
   const define = (value) =>
     Object.defineProperty(globalThis, 'sessionStorage', { value, configurable: true })
@@ -1565,6 +1573,11 @@ test('the last answer survives the tab, and a store it cannot use is no answer',
     const older = readCachedFacts()
     assert.equal(older.facts.uptime, false)
     assert.equal(older.sort, false)
+
+    /* A 404 from the Host means the route is gone, so the answer behind it is dropped too:
+       the next mount must not seed a control whose write would 404. */
+    assert.equal(clearCachedFacts(), true)
+    assert.equal(readCachedFacts(), null)
 
     /* A store that refuses to write costs the next mount a paint, never the page. */
     define({

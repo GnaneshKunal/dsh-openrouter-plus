@@ -3740,6 +3740,18 @@ window.__ModuleLoader__.load({
       return writeCachedBody(STORAGE_FACTS_KEY, { facts: facts, sort: sort === true });
     }
 
+    /** Forget the cached facts: the Host has just said the route is not there. */
+    function clearCachedFacts() {
+      const storage = cacheStorage();
+      if (storage === null) return false;
+      try {
+        storage.removeItem(STORAGE_FACTS_KEY);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
     /**
      * The page body. Everything stateful lives here so the slot wrapper stays trivial and
      * unmounting the slot tears down every timer, fetch and listener this page owns.
@@ -3799,10 +3811,10 @@ window.__ModuleLoader__.load({
       const copyTimerRef = React.useRef(null);
       const widgetTimerRef = React.useRef(null);
       const factsRetryRef = React.useRef(null);
-      /* The poll and the facts read are mount-scoped, so the translate function and the
-         current facts are read through refs: a Host that hands the page a new `t` on a
-         re-render must not tear down a poll that has a request in flight, because that is
-         one more way for the page to end on "checking..." with nothing drawn. */
+      /* The poll and the facts read are mount-scoped, so both read `t` and the current facts
+         through refs and keep their effect dependencies about the data. The page is handed
+         one bound `t` for the plugin's lifetime today, so this changes nothing now; it keeps
+         the poll independent of prop identity if a seat ever passes a per-render one. */
       const tRef = React.useRef(t);
       tRef.current = t;
       const providerFactsRef = React.useRef(providerFacts);
@@ -3978,9 +3990,9 @@ window.__ModuleLoader__.load({
           pollTimer = null;
           abortAll();
         };
-        /* `t` is read through `tRef`, so it is deliberately not a dependency: a re-render
-           that hands the page a new translate function would otherwise abort the request
-           this poll has in flight. */
+        /* `refreshKey` is the one reason to restart the poll. `t` is read through `tRef`, so
+           it is deliberately not a dependency: hardening, not a fix — today the page is handed
+           a stable bound `t`, and this keeps a future per-render one from cancelling a poll. */
       }, [refreshKey]);
 
       /* Provider routes load once the relay is online and refresh after every mutation. */
@@ -4051,13 +4063,16 @@ window.__ModuleLoader__.load({
               signal: controller.signal,
             });
             if (!response.ok) {
-              /* The route is gone — an older Host, or a rebind that outlived the retry. Withdraw
-                 the control only when this page never had an answer: a read cut by the reload
-                 its own write caused must not take the controls off the page drawing them,
-                 and the cached answer is the one the operator was looking at. */
-              if (!cancelled && providerFactsRef.current === null) {
+              /* A 404 is the route being gone — an older Host, or a client bundle older than
+                 the Host it is talking to — so the control is withdrawn and the cached answer
+                 goes with it: a control whose write would 404 is worse than none. Any other
+                 refusal (a 5xx, a rebind cutting the answer its own write caused) is a Host
+                 that is merely busy, and the answer this tab already holds is still true, so
+                 it stays until a read lands. */
+              if (!cancelled && (response.status === 404 || providerFactsRef.current === null)) {
                 setProviderFacts(null);
                 setSortSupported(false);
+                clearCachedFacts();
               }
               return;
             }
@@ -8039,6 +8054,7 @@ window.__ModuleLoader__.load({
         writeCachedStatus,
         readCachedFacts,
         writeCachedFacts,
+        clearCachedFacts,
         readCachedBody,
         writeCachedBody,
         storageKeys: { status: STORAGE_STATUS_KEY, facts: STORAGE_FACTS_KEY },
