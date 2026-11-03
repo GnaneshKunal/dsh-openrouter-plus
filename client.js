@@ -211,10 +211,29 @@ window.__ModuleLoader__.load({
       throughput: true,
       latency: true,
       percentiles: 'p50',
+      sort: 'default',
     });
 
     /** The facts a row can state, in the order the row prints them and the page lists them. */
     const PROVIDER_FACT_KEYS = ['precision', 'price', 'uptime', 'throughput', 'latency'];
+
+    /**
+     * The orders the endpoint list can be read in.
+     *
+     * `default` is the Host's order (cheapest input first, then output), which is also what a
+     * listing without a single speed fact still reads as. Each other id names one fact, and
+     * the fact decides its own direction — throughput and uptime best-high, prices and latency
+     * best-low — so the menu never asks for a direction it can derive.
+     */
+    const PROVIDER_SORTS = Object.freeze([
+      'default',
+      'throughput',
+      'latency',
+      'uptime',
+      'input',
+      'output',
+      'cacheRead',
+    ]);
 
     /**
      * One `/provider-facts` answer, or the defaults.
@@ -235,7 +254,16 @@ window.__ModuleLoader__.load({
         /* Two percentiles of each speed fact, or the median alone. Anything else reads as
            the median: a misspelled value must not blank the row. */
         percentiles: stringValue(raw.percentiles).trim() === 'p50p90' ? 'p50p90' : 'p50',
+        /* The order the same list is read in — as tolerant as the flags beside it, so a Host
+           that predates the setting answers `default` and the pane keeps its shipped order. */
+        sort: normalizeProviderSort(raw.sort),
       };
+    }
+
+    /** One sort id, or `default` for anything unrecognised. */
+    function normalizeProviderSort(value) {
+      const sort = stringValue(value).trim();
+      return PROVIDER_SORTS.includes(sort) ? sort : 'default';
     }
 
     /**
@@ -494,6 +522,9 @@ window.__ModuleLoader__.load({
       'provider.hint':
         'A pinned endpoint bypasses OpenRouter routing for this Session only; its precision and price are fixed.',
       'provider.empty': 'This Host did not list any endpoint for the model.',
+      'provider.search': 'Search endpoints',
+      'provider.search.placeholder': 'Search by name or tag\u2026',
+      'provider.noMatch': 'No endpoint matches \u201c{query}\u201d.',
       'provider.stale': 'The pinned endpoint is no longer listed for this model.',
       'provider.error': 'Could not pin the endpoint: {message}',
       /* Which facts a provider row states, and how many percentiles of each. Five facts do
@@ -515,6 +546,18 @@ window.__ModuleLoader__.load({
       'provider.facts.saving': 'Saving\u2026',
       'provider.facts.saved': 'Saved.',
       'provider.facts.error': 'Could not save the display settings: {message}',
+      /* The order the same list reads in. Each id names the fact rather than a direction:
+         throughput and uptime read best-high, prices and latency best-low. */
+      'provider.facts.sort': 'Sort endpoints by',
+      'provider.facts.sort.hint':
+        'Applied inside each group, and only to the rows that report the fact. A listing read without a key reports no speed, so a speed sort reads as the Host\u2019s own order until the relay has seen a request for that model.',
+      'provider.sort.default': 'Cheapest first (Host order)',
+      'provider.sort.throughput': 'Fastest \u00b7 output tokens/s',
+      'provider.sort.latency': 'Lowest latency',
+      'provider.sort.uptime': 'Highest uptime',
+      'provider.sort.input': 'Cheapest input',
+      'provider.sort.output': 'Cheapest output',
+      'provider.sort.cacheRead': 'Lowest cache read',
 
       'recent.caption': 'Recent requests',
       'recent.hint': 'Newest relayed requests first.',
@@ -768,6 +811,9 @@ window.__ModuleLoader__.load({
       'provider.throughputP90': 'p90 {tps} token/秒',
       'provider.hint': '固定端点只对当前会话生效，并跳过 OpenRouter 的路由；其精度与价格随之固定。',
       'provider.empty': 'Host 未列出该模型的任何端点。',
+      'provider.search': '搜索端点',
+      'provider.search.placeholder': '按名称或标签搜索\u2026',
+      'provider.noMatch': '没有匹配\u201c{query}\u201d的端点。',
       'provider.stale': '已固定的端点不再出现在该模型的列表中。',
       'provider.error': '无法固定端点：{message}',
       'provider.facts.caption': '提供商列表显示',
@@ -786,6 +832,16 @@ window.__ModuleLoader__.load({
       'provider.facts.saving': '保存中…',
       'provider.facts.saved': '已保存。',
       'provider.facts.error': '无法保存显示设置：{message}',
+      'provider.facts.sort': '端点排序',
+      'provider.facts.sort.hint':
+        '在每个分组内排序，并且只对报告该指标的端点生效。没有密钥的列表不报告速度，所以按速度排序会等同于 Host 自身的顺序，直到中继见过该模型的请求。',
+      'provider.sort.default': '最便宜优先（Host 顺序）',
+      'provider.sort.throughput': '最快 \u00b7 输出 token/秒',
+      'provider.sort.latency': '延迟最低',
+      'provider.sort.uptime': '可用率最高',
+      'provider.sort.input': '输入价格最低',
+      'provider.sort.output': '输出价格最低',
+      'provider.sort.cacheRead': '缓存读取价格最低',
 
       'recent.caption': '最近请求',
       'recent.hint': '按时间倒序显示最近的中继请求。',
@@ -1535,6 +1591,79 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * What one sort reads off a row, and which way it reads it.
+     *
+     * Throughput and uptime read best-high, the two prices and latency best-low, so the fact
+     * carries its own direction rather than asking the menu for a second control. A speed
+     * fact sorts on its median and falls back to p90 when only the tail was reported: a row
+     * with a tail and no median is still a measured endpoint.
+     */
+    function providerSortFact(row, sort) {
+      if (sort === 'throughput') return { value: pairSpeed(row.throughput), descending: true };
+      if (sort === 'latency') return { value: pairSpeed(row.latency), descending: false };
+      if (sort === 'uptime') return { value: finiteNumber(row.uptime1d), descending: true };
+      if (sort === 'input') return { value: finiteNumber(row.inputPrice), descending: false };
+      if (sort === 'output') return { value: finiteNumber(row.outputPrice), descending: false };
+      if (sort === 'cacheRead') return { value: finiteNumber(row.cacheReadPrice), descending: false };
+      return { value: null, descending: false };
+    }
+
+    /** A percentile pair's median, or its tail when the median was not reported. */
+    function pairSpeed(pair) {
+      if (!isPlainObject(pair)) return null;
+      const p50 = finiteNumber(pair.p50);
+      return p50 === null ? finiteNumber(pair.p90) : p50;
+    }
+
+    /**
+     * One group's tags, in the operator's order.
+     *
+     * `default` leaves the Host's order alone — cheapest input first, then output, then tag.
+     * Every other sort puts the rows that do not report the fact last, in *both* directions:
+     * a listing read without a key reports no speed at all, so "sort by throughput" then
+     * reads exactly as `default` instead of inventing an order out of nulls. Ties keep the
+     * Host's order, so two endpoints at the same speed still read cheapest-first.
+     */
+    function sortProviderTags(tags, byTag, sort) {
+      const key = normalizeProviderSort(sort);
+      if (key === 'default') return tags;
+      const decorated = tags.map((tag, index) => {
+        const row = byTag.get(tag);
+        const fact = isPlainObject(row)
+          ? providerSortFact(row, key)
+          : { value: null, descending: false };
+        return { tag, index, value: finiteNumber(fact.value), descending: fact.descending === true };
+      });
+      decorated.sort((left, right) => {
+        if (left.value === null || right.value === null) {
+          if (left.value === null && right.value === null) return left.index - right.index;
+          return left.value === null ? 1 : -1;
+        }
+        if (left.value !== right.value) {
+          return left.descending ? right.value - left.value : left.value - right.value;
+        }
+        return left.index - right.index;
+      });
+      return decorated.map((entry) => entry.tag);
+    }
+
+    /**
+     * Whether an endpoint answers to what was typed into the pane's search box.
+     *
+     * The name and the tag both match: the tag is what a pin writes, and it is often the only
+     * place a region or a quantization is spelled (`deepinfra/fp8/us`).
+     */
+    function providerMatchesQuery(row, query) {
+      const needle = stringValue(query).trim().toLowerCase();
+      if (needle === '') return true;
+      if (!isPlainObject(row)) return false;
+      return (
+        stringValue(row.name).toLowerCase().includes(needle) ||
+        stringValue(row.tag).toLowerCase().includes(needle)
+      );
+    }
+
+    /**
      * The Provider pane: the row that clears a pin first, then one list per group the Host
      * declared. A group heading is a row of its own (`header: true`) so the pane stays the
      * one flat list the renderer and the keyboard walk in order; an endpoint OpenRouter
@@ -1546,6 +1675,11 @@ window.__ModuleLoader__.load({
       const providers = list !== null && Array.isArray(list.providers) ? list.providers : [];
       const groups = list !== null && Array.isArray(list.groups) ? list.groups : [];
       const pinnedTag = stringValue(isPlainObject(view) ? view.pinnedTag : '').trim();
+      /* The whole vocabulary at once: which facts a row states, the percentiles of each, and
+         the order the rows read in. All three are one preference object, so they are read once
+         here and passed down rather than re-normalised per row. */
+      const facts = normalizeProviderFacts(isPlainObject(view) ? view.providerFacts : null);
+      const query = stringValue(isPlainObject(view) ? view.query : '').trim();
       const rows = [
         {
           value: '',
@@ -1563,7 +1697,7 @@ window.__ModuleLoader__.load({
           value: row.tag,
           key: 'provider:' + row.tag,
           label: row.name,
-          hint: providerRowHint(t, row, isPlainObject(view) ? view.providerFacts : null),
+          hint: providerRowHint(t, row, facts),
           selected: row.tag === pinnedTag,
           header: false,
           kind: 'provider',
@@ -1571,11 +1705,18 @@ window.__ModuleLoader__.load({
         });
       };
       const byTag = new Map(providers.map((row) => [row.tag, row]));
+      const visible = (tag) => providerMatchesQuery(byTag.get(tag), query);
       const placed = new Set();
       for (const group of groups) {
         if (!isPlainObject(group)) continue;
-        const tags = (Array.isArray(group.tags) ? group.tags : []).filter(
-          (tag) => byTag.has(tag) && !placed.has(tag),
+        /* Filtered first, then ordered: a heading with nothing under it is dropped below, so
+           a search that empties a group takes its heading with it. */
+        const tags = sortProviderTags(
+          (Array.isArray(group.tags) ? group.tags : []).filter(
+            (tag) => byTag.has(tag) && !placed.has(tag) && visible(tag),
+          ),
+          byTag,
+          facts.sort,
         );
         if (tags.length === 0) continue;
         const label = providerGroupLabel(t, group.id);
@@ -1596,10 +1737,19 @@ window.__ModuleLoader__.load({
           emit(byTag.get(tag));
         }
       }
-      for (const row of providers) {
-        if (placed.has(row.tag)) continue;
-        placed.add(row.tag);
-        emit(row);
+      /* A row no group claimed is still an endpoint a Session could pin, so it is kept and
+         ordered like the rest — and filtered, because the search hides rows, never a heading
+         that still has one. */
+      const loose = sortProviderTags(
+        providers
+          .map((row) => row.tag)
+          .filter((tag) => !placed.has(tag) && byTag.has(tag) && visible(tag)),
+        byTag,
+        facts.sort,
+      );
+      for (const tag of loose) {
+        placed.add(tag);
+        emit(byTag.get(tag));
       }
       return rows;
     }
@@ -1608,9 +1758,16 @@ window.__ModuleLoader__.load({
      * The one line under the endpoint list: why a pin matters while none is set, that the
      * list is missing while the Host has not listed it, and that a set pin has outlived it.
      */
-    function providerPaneHint(t, list, pinnedTag) {
+    function providerPaneHint(t, list, pinnedTag, query) {
       const providers = isPlainObject(list) && Array.isArray(list.providers) ? list.providers : [];
       if (providers.length === 0) return t('provider.empty');
+      /* A search that matches nothing says so where the list's own note goes: the pane stays
+         open with the box still full, so the next keystroke is a narrower search rather than a
+         reopened menu. */
+      const needle = stringValue(query).trim();
+      if (needle !== '' && !providers.some((row) => providerMatchesQuery(row, needle))) {
+        return t('provider.noMatch', { query: needle });
+      }
       if (stringValue(pinnedTag).trim() !== '' && providerRowOf(list, pinnedTag) === null) {
         return t('provider.stale');
       }
@@ -1623,9 +1780,13 @@ window.__ModuleLoader__.load({
      * Matches the Host's own window, because the speed facts on a row are the reason the
      * cache can no longer be permanent: the first request for a model is what fills them in,
      * so a page-lifetime entry would keep showing the keyless list — price and uptime, no
-     * speed — for the rest of the session, which is exactly the "it does not work" reading
-     * the feature has to avoid. Ten minutes is when the Host re-reads an anonymous listing;
-     * an authenticated one is kept for thirty, so this is the shorter of the two windows.
+     * speed — for the rest of the session. Ten minutes is when the Host re-reads an anonymous
+     * listing; an authenticated one is kept for thirty, so this is the shorter of the two.
+     *
+     * This window only decides what a *mount* paints without asking: the provider pane
+     * re-reads on every open (see `refreshProviderPane`), because the effect that fills the
+     * list does not run again while the page lives, and a page open since before the model's
+     * first request would otherwise show that first keyless answer for the rest of the day.
      */
     const PROVIDER_LIST_CACHE_MS = 10 * 60 * 1000;
 
@@ -1660,6 +1821,35 @@ window.__ModuleLoader__.load({
         for (const [key] of ordered.slice(0, providerListCache.size - PROVIDER_LIST_CACHE_LIMIT)) {
           providerListCache.delete(key);
         }
+      }
+    }
+
+    /**
+     * One `/providers` read for a model: the normalised list, or null when the Host did not
+     * answer it — a Host that predates the route answers 404, the route itself answers 502,
+     * and a cut or aborted body is no answer either. Null rather than the empty list, because
+     * the two cases differ for the caller: an empty list is a model with nothing to list,
+     * while no answer must leave the rows already on screen alone.
+     */
+    async function readProviderList(origin, model, signal) {
+      try {
+        const response = await fetch(
+          origin + CONTROL_PREFIX + '/providers?model=' + encodeURIComponent(model),
+          {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: { accept: 'application/json' },
+            signal,
+          },
+        );
+        if (!response.ok) return null;
+        const payload = await readJsonSafe(response);
+        if (!isPlainObject(payload) || payload.ok === false) return null;
+        return normalizeProviderList(payload);
+      } catch (error) {
+        /* No answer is not an error state here: the caller keeps the list it has. */
+        return null;
       }
     }
 
@@ -2891,6 +3081,27 @@ window.__ModuleLoader__.load({
 
     const CHIP_CELL_CHEVRON_STYLE = { flex: '0 0 auto', color: COLORS.tertiary, font: FONTS.tiny };
 
+    /* The endpoint pane's search box: above the list it filters, one 28px line, drawn with the
+       menu's own border and hover tone so it reads as part of the pane rather than as a form
+       that wandered in. `appearance: none` drops the UA's search affordances, which would
+       otherwise add a second clear button beside the one the Escape key already is. */
+    const CHIP_SEARCH_STYLE = {
+      boxSizing: 'border-box',
+      width: 'auto',
+      minWidth: '100%',
+      margin: '0 0 2px',
+      padding: '0 8px',
+      height: '28px',
+      border: '1px solid ' + COLORS.border,
+      borderRadius: 'var(--dsw-radius-md, 8px)',
+      background: 'transparent',
+      color: COLORS.primary,
+      font: FONTS.small,
+      outline: 'none',
+      appearance: 'none',
+      WebkitAppearance: 'none',
+    };
+
     /* A group heading in the endpoint list: a label, not a control, so it is a plain div the
        keyboard's `[role="option"]` walk skips and the pane can still render in one flat run. */
     const CHIP_GROUP_STYLE = {
@@ -3441,6 +3652,11 @@ window.__ModuleLoader__.load({
          nothing is staged and while an older Host has no such route (no control is drawn for
          a preference that could not be saved). */
       const [providerFacts, setProviderFacts] = React.useState(null);
+      /* Whether this Host's answer carries the sort at all. The relay writes the whole
+         normalised object, so a Host from before the setting simply omits the key — and a
+         control whose write would be dropped is not offered, the same rule the whole section
+         followed before it existed. */
+      const [sortSupported, setSortSupported] = React.useState(false);
       const [factsDraft, setFactsDraft] = React.useState(null);
       const [factsBusy, setFactsBusy] = React.useState(false);
       const [factsError, setFactsError] = React.useState('');
@@ -3689,7 +3905,10 @@ window.__ModuleLoader__.load({
             if (!response.ok) {
               /* The route is gone — an older Host, or a rebind that outlived the retry. Withdraw
                  the control rather than keep drawing one whose write would 404. */
-              if (!cancelled) setProviderFacts(null);
+              if (!cancelled) {
+                setProviderFacts(null);
+                setSortSupported(false);
+              }
               return;
             }
             let payload = null;
@@ -3701,6 +3920,13 @@ window.__ModuleLoader__.load({
             const next = normalizeProviderFactsPayload(payload);
             if (cancelled || next === null) return;
             setProviderFacts(next);
+            if (!cancelled) {
+              setSortSupported(
+                isPlainObject(payload) &&
+                  isPlainObject(payload.providerFacts) &&
+                  hasOwn(payload.providerFacts, 'sort'),
+              );
+            }
             /* A write whose answer was cut by the reload it caused still landed, and this
                read is how the page finds out: a draft that now equals the server's answer is
                no longer a draft, so a checkbox stops looking unsaved. A draft that differs is
@@ -4783,6 +5009,48 @@ window.__ModuleLoader__.load({
                 ],
                 onChange: (value) => stage({ percentiles: value }),
               }),
+            ),
+          ),
+          /* The order the same list is read in. Its own row rather than a third checkbox: it
+             is a choice of one, and the pane applies it inside each group the Host declared,
+             so the "Standard / Flex / Not used" headings stay where they are. Drawn only when
+             the answer carries the field, because a Host that predates the setting would drop
+             the write and store what it already had. */
+          sortSupported
+            ? h(
+                'div',
+                { style: ROW_STYLE },
+                h(
+                  'div',
+                  { style: ROW_INFO_STYLE },
+                  h('span', { style: SUB_LABEL_STYLE }, t('provider.facts.sort')),
+                  h('span', { style: HINT_STYLE }, t('provider.facts.sort.hint')),
+                ),
+                h(
+                  'div',
+                  { style: ROW_CONTROL_STYLE },
+                  h(TierSelect, {
+                    value: shown.sort,
+                    disabled: factsBusy,
+                    ariaLabel: t('provider.facts.sort'),
+                    options: PROVIDER_SORTS.map((key) => ({
+                      value: key,
+                      label: t('provider.sort.' + key),
+                    })),
+                    onChange: (value) => stage({ sort: normalizeProviderSort(value) }),
+                  }),
+                ),
+              )
+            : null,
+          /* One Apply for the whole vocabulary: the flags, the percentiles and the order are
+             one config write, because each write rebinds the relay and empties its listings. */
+          h(
+            'div',
+            { style: ROW_STYLE },
+            h('div', { style: ROW_INFO_STYLE }),
+            h(
+              'div',
+              { style: ROW_CONTROL_STYLE },
               h(ActionButton, {
                 label: factsBusy ? t('provider.facts.saving') : t('provider.facts.apply'),
                 disabled: !dirty || factsBusy || busy !== null,
@@ -5793,12 +6061,20 @@ window.__ModuleLoader__.load({
          what the row stated before the preference existed, which is also what a Host that
          predates the route answers — a missing answer must not thin the menu. */
       const [providerFacts, setProviderFacts] = React.useState(DEFAULT_PROVIDER_FACTS);
+      /* What the endpoint pane's search box holds. It is view state, not preference: it dies
+         with the menu, so a menu opened tomorrow lists everything again. */
+      const [providerQuery, setProviderQuery] = React.useState('');
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
       const tierCellRef = React.useRef(null);
       const precisionCellRef = React.useRef(null);
       const providerCellRef = React.useRef(null);
+      /* The provider pane's read while it is open, and the model whose list the state holds:
+         one read at a time, and a late answer for a model the composer has since left is
+         dropped rather than written over the new model's rows. */
+      const providerRefreshRef = React.useRef(null);
+      const providerModelRef = React.useRef('');
       /* The cell each drilled pane hands its keyboard back to, by pane id. */
       const cellRefs = { tier: tierCellRef, precision: precisionCellRef, provider: providerCellRef };
       /* Where the next render should put the keyboard: the cell that opened the drilled
@@ -5828,6 +6104,14 @@ window.__ModuleLoader__.load({
             }
             actionRef.current = null;
           }
+          if (providerRefreshRef.current !== null) {
+            try {
+              providerRefreshRef.current.abort();
+            } catch (error) {
+              /* already settled */
+            }
+            providerRefreshRef.current = null;
+          }
         };
       }, []);
 
@@ -5843,6 +6127,7 @@ window.__ModuleLoader__.load({
         setPendingTier(null);
         setPendingPrecision(null);
         setPendingProvider(null);
+        setProviderQuery('');
         setError('');
         setAnchor(null);
       }, [providerKey]);
@@ -5966,6 +6251,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const origin = feedState.origin;
         const base = baseModelId(modelKey);
+        /* Which model the rows in state belong to, so the pane's own read can tell whether
+           the answer it is holding is still for the model on screen. */
+        providerModelRef.current = base;
         if (origin === null || base === '') {
           setProviderList(EMPTY_PROVIDER_LIST);
           return undefined;
@@ -5981,20 +6269,10 @@ window.__ModuleLoader__.load({
         setProviderList(EMPTY_PROVIDER_LIST);
         const controller = new AbortController();
         void (async () => {
-          try {
-            const response = await fetch(
-              origin + CONTROL_PREFIX + '/providers?model=' + encodeURIComponent(base),
-              { method: 'GET', mode: 'cors', cache: 'no-store', headers: { accept: 'application/json' }, signal: controller.signal },
-            );
-            const payload = await readJsonSafe(response);
-            if (!response.ok) return;
-            if (!isPlainObject(payload) || payload.ok === false) return;
-            const next = normalizeProviderList(payload);
-            rememberProviderList(cacheKey, next);
-            if (aliveRef.current) setProviderList(next);
-          } catch (error) {
-            /* No list is a usable state: the cell says `Auto`, the pane keeps its clear row. */
-          }
+          const next = await readProviderList(origin, base, controller.signal);
+          if (next === null) return;
+          rememberProviderList(cacheKey, next);
+          if (aliveRef.current) setProviderList(next);
         })();
         return () => {
           try {
@@ -6193,6 +6471,7 @@ window.__ModuleLoader__.load({
             providerList: providerList,
             providerFacts: providerFacts,
             pinnedTag: pinnedTag,
+            query: providerQuery,
           });
 
       /* One POST, no provider write: the Host records the choice for this Session and the
@@ -6390,6 +6669,40 @@ window.__ModuleLoader__.load({
         if (node !== null && node !== undefined && typeof node.focus === 'function') node.focus();
       };
 
+      /*
+       * Re-read this model's endpoints each time the provider pane opens.
+       *
+       * The mount read lands before the relay has ever spent a request's key on this model's
+       * listing, so a page that has just loaded is painted with the keyless answer — price and
+       * uptime, no speed — and the numbers only exist once a request has gone through the relay
+       * for that model. Nothing re-runs the mount effect afterwards (its inputs do not change),
+       * so without this read the first answer would stand for the life of the page and read as
+       * the speed facts being broken. The rows already on screen stay until the answer lands,
+       * and a refusal leaves them alone.
+       */
+      const refreshProviderPane = () => {
+        const origin = feedState.origin;
+        const base = baseModelId(modelKey);
+        if (origin === null || base === '') return;
+        if (providerRefreshRef.current !== null) return;
+        const cacheKey = origin + '|' + base;
+        const controller = new AbortController();
+        providerRefreshRef.current = controller;
+        void (async () => {
+          try {
+            const next = await readProviderList(origin, base, controller.signal);
+            if (next === null) return;
+            rememberProviderList(cacheKey, next);
+            /* The composer moved on while this read was open: its rows belong to a model that
+               is no longer on screen, so they are dropped rather than painted over the new one. */
+            if (providerModelRef.current !== base) return;
+            if (aliveRef.current) setProviderList(next);
+          } finally {
+            if (providerRefreshRef.current === controller) providerRefreshRef.current = null;
+          }
+        })();
+      };
+
       /** Drill into one list: the next render puts the keyboard on its ticked row. */
       const drill = (next) => {
         /* A cell a pin owns states the endpoint's value and has no list behind it: the
@@ -6401,6 +6714,10 @@ window.__ModuleLoader__.load({
         /* A stale failure belongs to the pane it happened in, not to this one. */
         setError('');
         setPane(next);
+        /* The endpoint rows are the only pane whose facts change without this page doing
+           anything: opening it re-reads them, which is what puts speed facts in a menu left
+           open since before the model was first used. */
+        if (next === 'provider') refreshProviderPane();
       };
 
       /** Leave a drilled pane for the root cells, handing the keyboard back to its cell. */
@@ -6414,6 +6731,9 @@ window.__ModuleLoader__.load({
         setOpen(false);
         setPane(CHIP_PANE_ROOT);
         pendingFocusRef.current = null;
+        /* A search belongs to the visit that typed it: reopening the menu lists everything,
+           so a filtered list is never mistaken for the endpoints a model actually has. */
+        setProviderQuery('');
         setError('');
         if (restoreFocus !== true) return;
         queueMicrotask(() => {
@@ -6433,6 +6753,14 @@ window.__ModuleLoader__.load({
          keys from the trigger and from the popover alike. */
       const onChipKeyDown = (event) => {
         if (!open) return;
+        /* A typed search is the innermost thing Escape can undo: one press empties the box and
+           keeps the pane, the next walks back to the cells as it always did. */
+        if (event.key === 'Escape' && pane === 'provider' && providerQuery !== '') {
+          event.preventDefault();
+          event.stopPropagation();
+          setProviderQuery('');
+          return;
+        }
         if (event.key === 'Escape' || (event.key === 'Tab' && event.shiftKey === true)) {
           event.preventDefault();
           event.stopPropagation();
@@ -6562,6 +6890,22 @@ window.__ModuleLoader__.load({
       const drilledPane = h(
         'div',
         { style: CHIP_PANE_STYLE },
+        /* The search box sits above the list it filters — and above the row that clears a pin,
+           so it stays one keystroke away from a pane holding forty-five endpoints. */
+        pane === 'provider'
+          ? h('input', {
+              key: 'provider-search',
+              type: 'search',
+              value: providerQuery,
+              placeholder: t('provider.search.placeholder'),
+              'aria-label': t('provider.search'),
+              autoComplete: 'off',
+              spellCheck: false,
+              'data-provider-search': 'true',
+              onChange: (event) => setProviderQuery(event.target.value),
+              style: CHIP_SEARCH_STYLE,
+            })
+          : null,
         h(
           'div',
           {
@@ -6577,7 +6921,7 @@ window.__ModuleLoader__.load({
           activeRows,
         ),
         pane === 'provider'
-          ? h('p', { style: CHIP_HINT_STYLE }, providerPaneHint(t, providerList, pinnedTag))
+          ? h('p', { style: CHIP_HINT_STYLE }, providerPaneHint(t, providerList, pinnedTag, providerQuery))
           : pane === 'precision'
             ? shownUnknown
               ? h('p', { style: CHIP_HINT_STYLE }, t('precision.unknownAdmitted'))
@@ -7463,12 +7807,23 @@ window.__ModuleLoader__.load({
            empty list a Host with nothing to list does, so the readers are the difference
            between a degraded menu and a broken one. */
         normalizeProviderList,
+        /* The listing read itself: a refusal has to read as "no answer" rather than as an
+           empty endpoint list, since the pane keeps its rows on the one and replaces them on
+           the other. */
+        readProviderList,
         normalizeProviderState,
         normalizeProviderPin,
         providerPinForModel,
         baseModelId,
         pinnedProviderLabel,
         providerHint: providerRowHint,
+        /* Ordering and search are decisions, not rendering: the pane's rows are these two
+           functions applied to what the Host listed, so they are pinned directly. */
+        sortProviderTags,
+        providerMatchesQuery,
+        providerPaneHint,
+        normalizeProviderSort,
+        providerSorts: PROVIDER_SORTS,
         /* Which facts that hint states, and the reader behind the preference: a page that
            offers five checkboxes has to answer the same defaults the chip renders with. */
         providerFacts: normalizeProviderFacts,

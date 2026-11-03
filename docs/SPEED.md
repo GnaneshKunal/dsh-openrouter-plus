@@ -240,14 +240,26 @@ The plan above, with the decisions from §9 applied:
 - **Persistence: the config row.** Consistent with `usageWidget`, at the cost of one relay rebind
   per apply — hence the single batch write rather than a write per checkbox.
 - **No suppression.** A low `request_count` is not carried and no number is hidden because of it.
+- **Sorting is a display preference, not a routing one.** The pane's `sort` lives in
+  `providerFacts` beside the checkboxes and reorders rows the Host has already listed; it never
+  reaches a request body. `provider.sort: "throughput"` — the **Fastest** preset — is the one that
+  changes routing. Mixing the two would let a menu click silently re-route traffic.
+- **A fact is a filter, not a column.** The search box filters the rows already in hand; the Host
+  learns nothing about it and no listing read is re-issued for a keystroke.
 
 ## 10. Still open
 
 - **Aging the numbers in the UI.** `fetchedAt` and `cached` are on the wire and still unrendered;
   with speed on the row, “as of four minutes ago” is the missing half of the sentence.
-- ~~The client cache TTL.~~ Fixed in the same change: `providerListCache` now expires after ten
-  minutes (the Host's own window) and holds at most eight models, because a page-lifetime entry
-  would keep showing the keyless list — no speed — for the rest of the session.
+- ~~The client cache TTL.~~ `providerListCache` now expires after ten minutes (the Host's own
+  window) and holds at most eight models, because a page-lifetime entry would keep showing the
+  keyless list — no speed — for the rest of the session. **The TTL was not the whole fix.** A page
+  loaded before the model's first relayed request still showed no speed for the life of the tab: the
+  window only decides what a *remount* paints, and opening the menu is not a remount — the effect
+  that fills the list runs once, on mount, and its inputs never change again. The provider pane now
+  re-reads its listing every time it opens (`refreshProviderPane`, one read at a time, rows kept
+  until the answer lands), which is what turns "the model has been used and it still says nothing"
+  into a number on the next open.
 - **A fast floor.** §7 is now one write away: the same authenticated listing could feed
   `provider.preferred_min_throughput` / `preferred_max_latency`, which deprioritise rather than
   exclude, exactly like the precision floor.

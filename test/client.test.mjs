@@ -65,6 +65,12 @@ const {
   precisionShortLabel,
   precisionWireLevels,
   providerHint,
+  readProviderList,
+  normalizeProviderSort,
+  providerMatchesQuery,
+  providerPaneHint,
+  providerSorts,
+  sortProviderTags,
   providerFacts,
   providerFactsPayload,
   providerDefaults,
@@ -835,6 +841,145 @@ test('the endpoint pane lists the clear row, then every group the host ordered',
   assert.equal(zhRows[0].label, '\u81ea\u52a8\uff08OpenRouter \u8def\u7531\uff09')
 })
 
+test('the endpoint pane reads in the order the operator chose', () => {
+  /* Sorting is a view decision applied to the rows the Host listed: the headings keep their
+     order, the rows inside each one move. A fact the listing does not report sorts last in
+     both directions, because a keyless listing reports no speed at all — sorting by throughput
+     there has to read exactly as the Host order rather than invent one out of nulls. */
+  const list = normalizeProviderList({
+    ok: true,
+    providers: [
+      {
+        tag: 'cheap/slow',
+        name: 'Cheap Slow',
+        inputPrice: 0.01,
+        outputPrice: 1,
+        cacheReadPrice: 0.001,
+        uptime1d: 90,
+        latency: { p50: 3000, p90: 4000 },
+        throughput: { p50: 20, p90: 10 },
+      },
+      {
+        tag: 'pricey/fast',
+        name: 'Pricey Fast',
+        inputPrice: 0.5,
+        outputPrice: 2,
+        cacheReadPrice: 0.2,
+        uptime1d: 99.9,
+        latency: { p50: 200, p90: 500 },
+        throughput: { p50: 300, p90: 100 },
+      },
+      {
+        tag: 'middle/quiet',
+        name: 'Middle',
+        inputPrice: 0.1,
+        outputPrice: 1.5,
+        uptime1d: 99,
+        latency: { p50: 800 },
+        throughput: null,
+      },
+    ],
+    groups: [{ id: 'standard', tags: ['cheap/slow', 'pricey/fast', 'middle/quiet'] }],
+  })
+  const byTag = new Map(list.providers.map((row) => [row.tag, row]))
+  const tags = ['cheap/slow', 'pricey/fast', 'middle/quiet']
+  const order = (sort) => sortProviderTags(tags, byTag, sort)
+
+  /* The shipped order is the Host's: cheapest input first, then output. */
+  assert.deepEqual(order('default'), tags)
+  assert.deepEqual(order('nonsense'), tags, 'an unknown id is the Host order, not a guess')
+  /* Throughput reads best-high; the endpoint that reports none goes last. */
+  assert.deepEqual(order('throughput'), ['pricey/fast', 'cheap/slow', 'middle/quiet'])
+  /* Latency and the prices read best-low. */
+  assert.deepEqual(order('latency'), ['pricey/fast', 'middle/quiet', 'cheap/slow'])
+  assert.deepEqual(order('uptime'), ['pricey/fast', 'middle/quiet', 'cheap/slow'])
+  assert.deepEqual(order('input'), ['cheap/slow', 'middle/quiet', 'pricey/fast'])
+  assert.deepEqual(order('output'), ['cheap/slow', 'middle/quiet', 'pricey/fast'])
+  /* A row with no cache-read price is missing a fact, so it sorts last rather than first. */
+  assert.deepEqual(order('cacheRead'), ['cheap/slow', 'pricey/fast', 'middle/quiet'])
+  /* Ties keep the Host's order: the sort is an order, not a lottery. */
+  const tied = new Map([
+    ['a', { tag: 'a', throughput: { p50: 50, p90: 10 } }],
+    ['b', { tag: 'b', throughput: { p50: 50, p90: 10 } }],
+  ])
+  assert.deepEqual(sortProviderTags(['b', 'a'], tied, 'throughput'), ['b', 'a'])
+
+  /* A keyless listing is every row missing the fact: the order must not move. */
+  const keyless = new Map([
+    ['a', { tag: 'a', throughput: null }],
+    ['b', { tag: 'b', throughput: null }],
+  ])
+  assert.deepEqual(sortProviderTags(['b', 'a'], keyless, 'throughput'), ['b', 'a'])
+
+  /* The pane applies that order inside each group it drew. */
+  const view = (overrides) =>
+    ({ providerList: list, pinnedTag: '', providerFacts: { sort: 'throughput' }, ...(overrides || {}) })
+  const rows = chipFacetRows(en, 'provider', view())
+  assert.deepEqual(
+    rows.map((row) => (row.header === true ? '#' + row.label : row.label)),
+    ['Auto (OpenRouter routing)', '#Standard', 'Pricey Fast', 'Cheap Slow', 'Middle'],
+  )
+  assert.equal(normalizeProviderSort('throughput'), 'throughput')
+  assert.equal(normalizeProviderSort(''), 'default')
+  assert.deepEqual(
+    [...providerSorts],
+    ['default', 'throughput', 'latency', 'uptime', 'input', 'output', 'cacheRead'],
+  )
+})
+
+test('the endpoint pane filters by name or tag, and says so when nothing matches', () => {
+  const list = normalizeProviderList({
+    ok: true,
+    providers: [
+      { tag: 'relace/fp4', name: 'Relace', inputPrice: 0.035, outputPrice: 0.5 },
+      { tag: 'wafer/us', name: 'Wafer', inputPrice: 0.038, outputPrice: 0.5 },
+      { tag: 'deepinfra/fp8', name: 'DeepInfra', inputPrice: 0.1, outputPrice: 0.6 },
+    ],
+    groups: [
+      { id: 'standard', tags: ['relace/fp4', 'wafer/us'] },
+      { id: 'flex', tags: ['deepinfra/fp8'] },
+    ],
+  })
+  const view = (query, overrides) =>
+    ({ providerList: list, pinnedTag: '', query, ...(overrides || {}) })
+
+  /* A display name matches, case-insensitively, and so does the tag — which is where a region
+     or a quantization is spelled, and what a pin actually writes. */
+  assert.equal(providerMatchesQuery({ name: 'Relace', tag: 'relace/fp4' }, 'RELA'), true)
+  assert.equal(providerMatchesQuery({ name: 'Relace', tag: 'relace/fp4' }, 'fp4'), true)
+  assert.equal(providerMatchesQuery({ name: 'Relace', tag: 'relace/fp4' }, 'wafer'), false)
+  assert.equal(providerMatchesQuery({ name: 'Relace', tag: 'relace/fp4' }, '   '), true)
+  assert.equal(providerMatchesQuery(null, ''), true)
+  assert.equal(providerMatchesQuery(null, 'x'), false)
+
+  /* The clear row survives every search — it is how a pin is undone, and hiding it would make
+     an accidental pin unremovable while the box is full. */
+  const relace = chipFacetRows(en, 'provider', view('relace'))
+  assert.deepEqual(
+    relace.map((row) => (row.header === true ? '#' + row.label : row.label)),
+    ['Auto (OpenRouter routing)', '#Standard', 'Relace'],
+    'a group with nothing left takes its heading with it',
+  )
+  assert.equal(relace[0].value, '', 'the clear row posts the empty tag')
+  assert.equal(relace[0].selected, true)
+
+  /* Matching by tag works the same way, and takes the row out of its own heading. */
+  const byTag = chipFacetRows(en, 'provider', view('fp8'))
+  assert.deepEqual(byTag.map((row) => (row.header === true ? '#' + row.label : row.label)), [
+    'Auto (OpenRouter routing)',
+    '#Flex',
+    'DeepInfra',
+  ])
+
+  /* Nothing matches: the pane is the clear row alone, and the note under it says why. */
+  const none = chipFacetRows(en, 'provider', view('zzz'))
+  assert.deepEqual(none.map((row) => row.label), ['Auto (OpenRouter routing)'])
+  assert.equal(providerPaneHint(en, list, '', 'zzz'), 'No endpoint matches \u201czzz\u201d.')
+  assert.equal(providerPaneHint(zh, list, '', 'zzz'), '没有匹配\u201czzz\u201d的端点。')
+  /* Without a query the hint is the one that was already there. */
+  assert.match(providerPaneHint(en, list, '', ''), /pinned endpoint bypasses/)
+})
+
 test('the endpoint readers absorb an older host instead of throwing', () => {
   /* Every refusal — a 404 from a Host that predates the route, the route's own 502, a body
      that is not this API — has to read as "nothing listed", because the Provider cell then
@@ -1041,6 +1186,10 @@ test('the chip is one trigger over a two-level root-cell menu that drills in', a
   /* Opening always lands on the root pane, and each cell drills into its own list. */
   assert.match(chip, /useState\(CHIP_PANE_ROOT\)/)
   assert.match(chip, /const drill = \(next\) => \{/)
+  /* Opening the endpoint pane re-reads its listing: the mount read lands before the relay has
+     spent a key on the model, and nothing else would ever replace that keyless answer. */
+  assert.match(chip, /const refreshProviderPane = \(\) => \{/)
+  assert.match(chip, /if \(next === 'provider'\) refreshProviderPane\(\)/)
   assert.match(chip, /drill\('tier'\)/)
   assert.match(chip, /drill\('precision'\)/)
   assert.match(chip, /chipPaneAfterKey\(pane, event\.key/)
@@ -1051,14 +1200,24 @@ test('the chip is one trigger over a two-level root-cell menu that drills in', a
     'a drill focuses the ticked row',
   )
 
+  /* The endpoint pane searches its own list, and Escape undoes a search before it leaves:
+     the pane keeps the heading rows, so a filtered list has to stay grouped. */
+  assert.match(chip, /'data-provider-search': 'true'/)
+  assert.match(chip, /setProviderQuery\(event\.target\.value\)/)
+  assert.match(chip, /providerQuery !== ''/)
+  assert.match(chip, /providerPaneHint\(t, providerList, pinnedTag, providerQuery\)/)
+
   /* Both cells address the control API on this page origin, and neither writes config. */
   assert.match(chip, /CONTROL_PREFIX \+ '\/precision\?session='/)
   assert.match(chip, /postControl\('\/precision'/)
   assert.match(chip, /postControl\('\/tier'/)
 
   /* The endpoint facet addresses both of its routes, asks for the base model id, and joins
-     the same one-mutation guard: a pin and a floor can never be written at once. */
-  assert.match(chip, /CONTROL_PREFIX \+ '\/providers\?model='/)
+     the same one-mutation guard: a pin and a floor can never be written at once. The listing
+     read lives beside the client cache as `readProviderList`, so the URL is pinned on the
+     module and the chip is pinned to the call that uses it. */
+  assert.match(source, /CONTROL_PREFIX \+ '\/providers\?model='/)
+  assert.match(chip, /readProviderList\(origin, base, controller\.signal\)/)
   assert.match(chip, /CONTROL_PREFIX \+ '\/provider\?session='/)
   assert.match(chip, /postControl\('\/provider'/)
   assert.match(chip, /baseModelId\(modelKey\)/)
@@ -1167,6 +1326,7 @@ test('the display preference is tolerant, and a Host without the route is not of
     throughput: false,
     latency: true,
     percentiles: 'p50',
+    sort: 'default',
   })
   /* Only an explicit `false` hides; junk reads as the default, the way the config readers
      treat every other preference. */
@@ -1181,6 +1341,18 @@ test('the display preference is tolerant, and a Host without the route is not of
   assert.equal(providerFactsPayload({ ok: true }), null)
   assert.equal(providerFactsPayload(null), null)
   assert.equal(providerFactsPayload({ ok: true, providerFacts: { uptime: false } }).uptime, false)
+})
+
+test('the display settings offer the sort only when the Host reports one', async () => {
+  /* The control is built from the ids the normaliser accepts, and gated on the answer carrying
+     the field: the relay stores the whole normalised object, so a Host from before the setting
+     omits the key — and a control whose write would be dropped is not offered. */
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /PROVIDER_SORTS\.map\(\(key\) => \(\{/)
+  assert.match(source, /sortSupported\s*\? h\(/)
+  assert.match(source, /setSortSupported\(/)
+  assert.match(source, /stage\(\{ sort: normalizeProviderSort\(value\) \}\)/)
 })
 
 test('the row reader carries both speed facts, and null when the Host reported none', () => {
@@ -1201,4 +1373,54 @@ test('the row reader carries both speed facts, and null when the Host reported n
   assert.equal(junk.latency, null, 'an object with no usable percentile is no statement')
   assert.equal(junk.throughput, null)
   assert.deepEqual(half.latency, { p50: 100, p90: null }, 'one percentile is still a fact')
+})
+
+/* The pane re-reads its listing every time it opens, so the read has to distinguish "the Host
+   did not answer" from "the model has no endpoints": the first keeps the rows already on screen
+   (a Host upgraded mid-page must not be blanked by its own refusal), the second replaces them.
+   Reading a refusal as an empty list is the version of this that looks like the menu is broken. */
+test('a listing the Host did not answer reads as null, not as a model with no endpoints', async () => {
+  const original = globalThis.fetch
+  const calls = []
+  const reply = (body) => async (url, init) => {
+    calls.push({ url, init })
+    return { ok: true, status: 200, json: async () => body }
+  }
+  try {
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, init })
+      return { ok: false, status: 404, json: async () => ({ ok: false }) }
+    }
+    assert.equal(await readProviderList('http://127.0.0.1:8791', 'vendor/model'), null)
+
+    globalThis.fetch = reply({ ok: false, error: { message: 'upstream down' } })
+    assert.equal(await readProviderList('http://127.0.0.1:8791', 'vendor/model'), null)
+
+    globalThis.fetch = async () => {
+      throw new Error('connection cut')
+    }
+    assert.equal(await readProviderList('http://127.0.0.1:8791', 'vendor/model'), null)
+
+    globalThis.fetch = reply({
+      ok: true,
+      model: 'vendor/model',
+      providers: [
+        { tag: 'a/fp4', latency: { p50: 930, p90: 3769 }, throughput: { p50: 101, p90: 35 } },
+      ],
+      groups: [{ id: 'standard', tags: ['a/fp4'] }],
+    })
+    const list = await readProviderList('http://127.0.0.1:8791', 'vendor/model')
+    assert.equal(list.model, 'vendor/model')
+    assert.deepEqual(list.providers[0].throughput, { p50: 101, p90: 35 })
+    assert.deepEqual(list.providers[0].latency, { p50: 930, p90: 3769 })
+    assert.deepEqual(list.groups, [{ id: 'standard', tags: ['a/fp4'] }])
+  } finally {
+    globalThis.fetch = original
+  }
+  assert.match(
+    calls[0].url,
+    /\/__openrouter-plus\/providers\?model=vendor%2Fmodel$/,
+    'the model is the one query the Host reads, encoded',
+  )
+  assert.equal(calls[0].init.cache, 'no-store')
 })
