@@ -549,6 +549,8 @@ window.__ModuleLoader__.load({
       /* The order the same list reads in. Each id names the fact rather than a direction:
          throughput and uptime read best-high, prices and latency best-low. */
       'provider.facts.sort': 'Sort endpoints by',
+      'provider.facts.sort.pending':
+        'Sorting appears once the relay restarts on this plugin version: the Host answering this page does not know the setting yet.',
       'provider.facts.sort.hint':
         'Applied inside each group, and only to the rows that report the fact. A listing read without a key reports no speed, so a speed sort reads as the Host\u2019s own order until the relay has seen a request for that model.',
       'provider.sort.default': 'Cheapest first (Host order)',
@@ -833,6 +835,8 @@ window.__ModuleLoader__.load({
       'provider.facts.saved': '已保存。',
       'provider.facts.error': '无法保存显示设置：{message}',
       'provider.facts.sort': '端点排序',
+      'provider.facts.sort.pending':
+        '排序会在中继以该插件版本重启后出现：当前响应页面的 Host 还不认识这个设置。',
       'provider.facts.sort.hint':
         '在每个分组内排序，并且只对报告该指标的端点生效。没有密钥的列表不报告速度，所以按速度排序会等同于 Host 自身的顺序，直到中继见过该模型的请求。',
       'provider.sort.default': '最便宜优先（Host 顺序）',
@@ -5041,7 +5045,14 @@ window.__ModuleLoader__.load({
                   }),
                 ),
               )
-            : null,
+            : /* Nothing to save until the Host is restarted on this version: the setting is a
+                 config key, and a Host from before it would drop the write and store what it
+                 already had. Saying so is better than an empty space where a control should be. */
+              h(
+                'p',
+                { key: 'sort-pending', style: HINT_STYLE },
+                t('provider.facts.sort.pending'),
+              ),
           /* One Apply for the whole vocabulary: the flags, the percentiles and the order are
              one config write, because each write rebinds the relay and empties its listings. */
           h(
