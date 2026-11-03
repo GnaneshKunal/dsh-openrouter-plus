@@ -5,15 +5,17 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
-## [Unreleased]
+## [0.7.0] — 2026-11-03
 
-**The endpoint menu re-reads itself whenever it opens, so a page that was loaded before a model was
-first routed stops showing price and uptime without speed for the life of the tab.** The composer
-read a model's listing once, at mount, and held it in component state; the numbers only exist on an
-authenticated read, which the relay makes on the first request that names the model. A page loaded
-before that request therefore painted the keyless answer and kept it — the ten-minute client cache
-below only decided what a *remount* painted, and opening the menu is not a remount, so the effect
-that fills the list never ran again.
+**The endpoint menu can be ordered and searched, and it re-reads itself whenever it opens.** The
+first half is the setting the list always lacked: forty-five rows had exactly one order (cheapest
+first) and no way to narrow them, so `providerFacts` now carries a sort and the pane carries a
+search box. The second half is a repair. The composer read a model's listing once, at mount, and
+held it in component state; the numbers only exist on an authenticated read, which the relay makes
+on the first request that names the model. A page loaded before that request therefore painted the
+keyless answer — price and uptime, no speed — and kept it for the life of the tab: the ten-minute
+client cache below only decided what a *remount* painted, and opening the menu is not a remount, so
+the effect that fills the list never ran again.
 
 ### Added
 
@@ -43,6 +45,11 @@ that fills the list never ran again.
 - **A refused listing is "no answer", not "no endpoints".** A 404 from a Host that predates the
   route, a 502 from the route itself, and a cut or aborted body all read as `null`, so an outage
   leaves the rows that are still true on screen instead of blanking the pane.
+- **An empty listing no longer blanks the pane either.** The Host caches a failed upstream read as
+  an empty listing and answers it `200` with no `error`, so a broken upstream and a model with no
+  endpoints are the same body on the wire. Over rows already on screen that answer now reads as no
+  answer and is not cached over them; with nothing on screen it is still the only truth available.
+  Reads are also numbered as they start, so a slower earlier read cannot paint over a newer one.
 
 ## [0.6.0] — 2026-11-02
 
