@@ -67,6 +67,7 @@ const {
   providerHint,
   readProviderList,
   normalizeProviderSort,
+  nextProviderList,
   providerMatchesQuery,
   providerPaneHint,
   providerSorts,
@@ -927,6 +928,62 @@ test('the endpoint pane reads in the order the operator chose', () => {
   )
 })
 
+/* An empty answer over rows already held is not "this model has no endpoints": the Host
+   caches a failed upstream read as an empty listing and answers it 200 with no error, so the
+   two are the same body on the wire. Blanking a working menu for a transient outage is exactly
+   the failure the pane's re-read exists to avoid, so the rows stay. */
+test('the order is applied inside each group, and a tail-only speed still sorts', () => {
+  /* Two groups, so "inside each group" is actually what is asserted: the headings keep the
+     Host's order and only the rows move. One row reports p90 and no median — a measured
+     endpoint the listing could not put a middle on — and it sorts on that tail. */
+  const list = normalizeProviderList({
+    ok: true,
+    providers: [
+      { tag: 'std/fast', name: 'Std Fast', throughput: { p50: 200, p90: 50 }, inputPrice: 0.1 },
+      { tag: 'std/tail', name: 'Std Tail', throughput: { p50: null, p90: 90 }, inputPrice: 0.2 },
+      { tag: 'std/slow', name: 'Std Slow', throughput: { p50: 20, p90: 10 }, inputPrice: 0.3 },
+      { tag: 'flex/faster', name: 'Flex Faster', throughput: { p50: 300, p90: 80 }, inputPrice: 0.4 },
+      { tag: 'flex/slowest', name: 'Flex Slowest', throughput: { p50: 10, p90: 5 }, inputPrice: 0.5 },
+    ],
+    groups: [
+      { id: 'standard', tags: ['std/fast', 'std/tail', 'std/slow'] },
+      { id: 'flex', tags: ['flex/faster', 'flex/slowest'] },
+    ],
+  })
+  const rows = chipFacetRows(en, 'provider', {
+    providerList: list,
+    pinnedTag: '',
+    providerFacts: { sort: 'throughput' },
+  })
+  assert.deepEqual(
+    rows.map((row) => (row.header === true ? '#' + row.label : row.label)),
+    [
+      'Auto (OpenRouter routing)',
+      '#Standard',
+      'Std Fast',
+      'Std Tail',
+      'Std Slow',
+      '#Flex',
+      'Flex Faster',
+      'Flex Slowest',
+    ],
+    'each group is ordered on its own, and 300 tok/s under Flex does not jump the Standard heading',
+  )
+})
+
+test('an empty listing keeps the rows on screen, and is never cached over them', () => {
+  const held = { providers: [{ tag: 'a/fp4' }, { tag: 'b/fp8' }], groups: [] }
+  const empty = { providers: [], groups: [] }
+  const next = { providers: [{ tag: 'c/fp4' }], groups: [] }
+  const nothing = { providers: [], groups: [] }
+
+  assert.equal(nextProviderList(held, empty), null, 'nothing on the wire may erase rows that are still true')
+  assert.equal(nextProviderList(held, null), null, 'no answer is no answer')
+  assert.deepEqual(nextProviderList(nothing, empty), empty, 'with nothing on screen the empty answer is taken')
+  assert.deepEqual(nextProviderList(nothing, next), next)
+  assert.deepEqual(nextProviderList(held, next), next, 'a real answer always replaces')
+})
+
 test('the endpoint pane filters by name or tag, and says so when nothing matches', () => {
   const list = normalizeProviderList({
     ok: true,
@@ -1341,6 +1398,19 @@ test('the display preference is tolerant, and a Host without the route is not of
   assert.equal(providerFactsPayload({ ok: true }), null)
   assert.equal(providerFactsPayload(null), null)
   assert.equal(providerFactsPayload({ ok: true, providerFacts: { uptime: false } }).uptime, false)
+  /* The sort travels with the flags: the chip reads one object, so an answer that carries it
+     produces it, and a Host from before the field still answers something usable. */
+  assert.equal(providerFactsPayload({ ok: true, providerFacts: { sort: 'latency' } }).sort, 'latency')
+  assert.equal(providerFactsPayload({ ok: true, providerFacts: {} }).sort, 'default')
+})
+
+test('the Host and the client agree on the sort vocabulary, id for id', async () => {
+  /* The two lists are deliberately separate — the client must not import the Host — so a drift
+     between them would ship as a menu that offers an order the Host cannot store, or hides one
+     it can. The Host's list is the contract; the client's is what the page draws. */
+  const host = await import('../index.js')
+  assert.deepEqual([...providerSorts], [...host.PROVIDER_SORTS])
+  assert.ok(providerSorts.includes(providerDefaults.sort), 'the default order is one of the ids')
 })
 
 test('the display settings offer the sort only when the Host reports one', async () => {

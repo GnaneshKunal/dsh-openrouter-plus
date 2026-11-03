@@ -2508,13 +2508,14 @@ export function apply(ctx, rawConfig) {
     }),
 
     /**
-     * Which facts a provider row states, and how many percentiles it prints.
+     * Which facts a provider row states, how many percentiles it prints, and the order the
+     * list reads in.
      *
      * A sibling of `/widget` rather than a field of `/status`: the sidebar card polls that
      * endpoint and has no use for this, while the provider menu needs it at the moment it
-     * paints a row. `GET` answers all five flags and the percentile choice whether the row
-     * wrote a subset or nothing at all; `POST { providerFacts }` stores the normalised
-     * object, so the next boot reads back exactly what the page just sent.
+     * paints a row. `GET` answers the whole vocabulary whether the row wrote a subset or
+     * nothing at all; `POST { providerFacts }` stores the normalised object, so the next boot
+     * reads back exactly what the page just sent.
      */
     [`${CONTROL_PREFIX}/provider-facts`]: controlRoute(async (req, res) => {
       if (req.method === 'GET') {

@@ -508,9 +508,19 @@ test('the provider-facts preference is read and written through the control API'
   // instance, whose config was read before the write.
   assert.deepEqual(normalizeConfig(editor.writes[0].next).providerFacts, expected)
 
+  // The sort travels in the same object, and is written by the same call: it is what makes
+  // the menu's order a preference rather than a per-page choice.
+  const sorted = { ...defaults, sort: 'throughput' }
+  const sortWrite = await postJson(factsUrl, { providerFacts: { sort: 'throughput' } })
+  assert.equal(sortWrite.status, 200)
+  assert.deepEqual(await sortWrite.json(), { ok: true, providerFacts: sorted })
+  assert.deepEqual(normalizeConfig(editor.writes[1].next).providerFacts.sort, 'throughput')
+
   // Nonsense in a field is not a reason to refuse the write: it normalises to the default,
   // which is how a hand-edited row keeps working.
-  const tolerant = await postJson(factsUrl, { providerFacts: { price: 'no', percentiles: 'p99' } })
+  const tolerant = await postJson(factsUrl, {
+    providerFacts: { price: 'no', percentiles: 'p99', sort: 'fastest' },
+  })
   assert.equal(tolerant.status, 200)
   assert.deepEqual(await tolerant.json(), { ok: true, providerFacts: defaults })
 })

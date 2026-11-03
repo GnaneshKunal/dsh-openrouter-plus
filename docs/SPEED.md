@@ -225,7 +225,8 @@ The plan above, with the decisions from §9 applied:
    listing, and the pre-existing rule holds (“a missing fact is dropped, never printed as a dash”).
    Speed prints in whole units: `134 tok/s · 498 ms`, or with the tail `p50 134 · p90 58 tok/s`.
 5. **The preference.** `providerFacts` on the plugin's own row — five booleans, all on — plus
-   `percentiles: 'p50' | 'p50p90'`, read and written through `GET`/`POST
+   `percentiles: 'p50' | 'p50p90'` and `sort` (which of the facts orders the list, or `default`
+   for the Host's own order), read and written through `GET`/`POST
    /__openrouter-plus/provider-facts`. The settings page stages the edit and applies it in one
    write, because a config write re-applies the plugin and rebinds the relay. The composer chip
    reads the same object in its own request, so a Settings change reaches an open composer without

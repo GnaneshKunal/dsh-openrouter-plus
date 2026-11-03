@@ -1857,6 +1857,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * What one listing answer should replace the rows with — or null to keep what is on screen.
+     *
+     * An empty answer is not "this model has no endpoints". The Host caches a *failed* upstream
+     * read as an empty listing for its own row TTL and answers it `200` with no `error`, so on
+     * the wire a broken upstream and an empty model are the same body. Over rows we already
+     * hold, that body is therefore no answer: blanking a working menu for a transient outage is
+     * the failure this read exists to avoid, and the rows it would erase are still true. With
+     * nothing on screen the empty answer is the only truth available, and it is taken.
+     */
+    function nextProviderList(current, incoming) {
+      if (incoming === null) return null;
+      const held = isPlainObject(current) && Array.isArray(current.providers) ? current.providers.length : 0;
+      const arrived = isPlainObject(incoming) && Array.isArray(incoming.providers) ? incoming.providers.length : 0;
+      if (arrived === 0 && held > 0) return null;
+      return incoming;
+    }
+
     /** `<preset label> · <precision short label>`, or the preset label alone for `any`. */
     function chipBadgeLabel(t, presetLabel, precision, provider) {
       const parts = chipBadgeParts(t, presetLabel, precision, provider);
@@ -3098,12 +3116,25 @@ window.__ModuleLoader__.load({
       height: '28px',
       border: '1px solid ' + COLORS.border,
       borderRadius: 'var(--dsw-radius-md, 8px)',
-      background: 'transparent',
+      /* Sticky, because the menu is the scroll container: a forty-five row list would
+         otherwise scroll the filter out of reach exactly when it is being used. The solid
+         layer is what stops rows showing through the pinned line. */
+      position: 'sticky',
+      top: '0',
+      zIndex: 1,
+      background: COLORS.layerTwo,
       color: COLORS.primary,
       font: FONTS.small,
       outline: 'none',
       appearance: 'none',
       WebkitAppearance: 'none',
+    };
+
+    /* Inline styles cannot carry :focus, so the ring is a state: the border takes the brand
+       ink and the soft fill beneath it, which is the same pair the shell's own inputs use. */
+    const CHIP_SEARCH_FOCUS_STYLE = {
+      borderColor: COLORS.brand,
+      boxShadow: '0 0 0 2px ' + COLORS.fill,
     };
 
     /* A group heading in the endpoint list: a label, not a control, so it is a plain div the
@@ -6075,6 +6106,9 @@ window.__ModuleLoader__.load({
       /* What the endpoint pane's search box holds. It is view state, not preference: it dies
          with the menu, so a menu opened tomorrow lists everything again. */
       const [providerQuery, setProviderQuery] = React.useState('');
+      /* Focus is state, not CSS: these controls are styled inline, and an input with no visible
+         focus ring is unusable from the keyboard. */
+      const [searchFocused, setSearchFocused] = React.useState(false);
 
       const chipRef = React.useRef(null);
       const menuRef = React.useRef(null);
@@ -6086,6 +6120,20 @@ window.__ModuleLoader__.load({
          dropped rather than written over the new model's rows. */
       const providerRefreshRef = React.useRef(null);
       const providerModelRef = React.useRef('');
+      /* Reads are numbered as they start and applied in that order only: the mount read and
+         the pane's read can be open at once, and the slower one must not paint over the newer
+         answer — an anonymous mount read landing after an authenticated refresh would put the
+         keyless rows back. */
+      const providerSeqRef = React.useRef(0);
+      const providerAppliedRef = React.useRef(0);
+      /* The rows actually on screen, readable from a callback that was closed over an older
+         render — the pane's read needs the list as it is when the answer lands, not as it was
+         when the pane opened. */
+      const providerListRef = React.useRef(EMPTY_PROVIDER_LIST);
+      const applyProviderList = (next) => {
+        providerListRef.current = next;
+        if (aliveRef.current) setProviderList(next);
+      };
       /* The cell each drilled pane hands its keyboard back to, by pane id. */
       const cellRefs = { tier: tierCellRef, precision: precisionCellRef, provider: providerCellRef };
       /* Where the next render should put the keyboard: the cell that opened the drilled
@@ -6266,7 +6314,7 @@ window.__ModuleLoader__.load({
            the answer it is holding is still for the model on screen. */
         providerModelRef.current = base;
         if (origin === null || base === '') {
-          setProviderList(EMPTY_PROVIDER_LIST);
+          applyProviderList(EMPTY_PROVIDER_LIST);
           return undefined;
         }
         /* Keyed by origin as well as model: a rebind puts the page in front of a different
@@ -6274,16 +6322,23 @@ window.__ModuleLoader__.load({
         const cacheKey = origin + '|' + base;
         const cached = cachedProviderList(cacheKey);
         if (cached !== null) {
-          setProviderList(cached);
+          applyProviderList(cached);
           return undefined;
         }
-        setProviderList(EMPTY_PROVIDER_LIST);
+        applyProviderList(EMPTY_PROVIDER_LIST);
         const controller = new AbortController();
+        const seq = providerSeqRef.current + 1;
+        providerSeqRef.current = seq;
         void (async () => {
-          const next = await readProviderList(origin, base, controller.signal);
+          const answer = await readProviderList(origin, base, controller.signal);
+          /* A read that started earlier may land later: the pane's own read is newer, so its
+             answer stands and this one is dropped rather than painted over it. */
+          if (providerAppliedRef.current > seq) return;
+          const next = nextProviderList(EMPTY_PROVIDER_LIST, answer);
           if (next === null) return;
+          providerAppliedRef.current = seq;
           rememberProviderList(cacheKey, next);
-          if (aliveRef.current) setProviderList(next);
+          applyProviderList(next);
         })();
         return () => {
           try {
@@ -6699,15 +6754,22 @@ window.__ModuleLoader__.load({
         const cacheKey = origin + '|' + base;
         const controller = new AbortController();
         providerRefreshRef.current = controller;
+        const seq = providerSeqRef.current + 1;
+        providerSeqRef.current = seq;
         void (async () => {
           try {
-            const next = await readProviderList(origin, base, controller.signal);
-            if (next === null) return;
-            rememberProviderList(cacheKey, next);
+            const answer = await readProviderList(origin, base, controller.signal);
             /* The composer moved on while this read was open: its rows belong to a model that
                is no longer on screen, so they are dropped rather than painted over the new one. */
             if (providerModelRef.current !== base) return;
-            if (aliveRef.current) setProviderList(next);
+            if (providerAppliedRef.current > seq) return;
+            /* An empty answer over rows we already hold is a failed read wearing an empty
+               listing's clothes (see `nextProviderList`), so it keeps them. */
+            const next = nextProviderList(providerListRef.current, answer);
+            if (next === null) return;
+            providerAppliedRef.current = seq;
+            rememberProviderList(cacheKey, next);
+            applyProviderList(next);
           } finally {
             if (providerRefreshRef.current === controller) providerRefreshRef.current = null;
           }
@@ -6806,6 +6868,10 @@ window.__ModuleLoader__.load({
         setError('');
         pendingFocusRef.current = null;
         setPane(CHIP_PANE_ROOT);
+        /* Every visit starts unfiltered. Resetting on the way *in* rather than only on the way
+           out is what makes that true for the outside-press and document-key closes too, which
+           never pass through `closeMenu`. */
+        setProviderQuery('');
         setOpen(true);
       };
 
@@ -6914,7 +6980,11 @@ window.__ModuleLoader__.load({
               spellCheck: false,
               'data-provider-search': 'true',
               onChange: (event) => setProviderQuery(event.target.value),
-              style: CHIP_SEARCH_STYLE,
+              onFocus: () => setSearchFocused(true),
+              onBlur: () => setSearchFocused(false),
+              style: searchFocused
+                ? Object.assign({}, CHIP_SEARCH_STYLE, CHIP_SEARCH_FOCUS_STYLE)
+                : CHIP_SEARCH_STYLE,
             })
           : null,
         h(
@@ -7831,6 +7901,9 @@ window.__ModuleLoader__.load({
         /* Ordering and search are decisions, not rendering: the pane's rows are these two
            functions applied to what the Host listed, so they are pinned directly. */
         sortProviderTags,
+        /* An empty answer over rows already on screen is a failed read, not an empty model:
+           the decision is one line and the whole outage behaviour hangs off it. */
+        nextProviderList,
         providerMatchesQuery,
         providerPaneHint,
         normalizeProviderSort,
