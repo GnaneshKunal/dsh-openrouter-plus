@@ -513,6 +513,25 @@ the median alone and the median beside p90. All five are on by default, and savi
 report is still dropped rather than shown as a dash, which is why turning speed on changes nothing
 until a model has actually been used.
 
+### Ordering and searching the list
+
+The same section carries **Sort endpoints by**: cheapest first (the Host's own order), throughput,
+latency, uptime, input price, output price, or cache-read price. Each id names a fact and the fact
+owns its direction — throughput and uptime read best-high, the prices and latency best-low — so
+there is no second "ascending" control to get wrong. The order applies *inside* each group, so the
+Standard / Flex / Not used headings stay where they are, and a row that does not report the fact
+sorts last in both directions: on a listing read without a key nothing reports speed, so a speed
+sort reads exactly as the Host's order instead of inventing one out of nulls.
+
+This is a **display** order, not `provider.sort`: it changes the menu, never the request. Routing
+by speed is the **Fastest** preset, which writes `provider.sort: "throughput"` on the wire.
+
+The endpoint pane also has a search box above its first row. It matches a display name or a tag
+(where a region or a quantization is spelled, and what a pin actually writes), and it hides rows
+rather than groups: a group whose rows all filtered out takes its heading with it, the "Auto
+(OpenRouter routing)" row always stays so an accidental pin is always clearable, and Escape empties
+the box before it leaves the pane. The box is view state — it dies with the menu.
+
 The two speed facts do not read alike in the paired form: a latency p90 is *worse* than its p50,
 while a throughput p90 sits *below* its p50 — a throughput percentile is a speed that N% of
 requests reached or exceeded, so its p90 is the slow tail. That is why the pair is labelled
@@ -541,8 +560,8 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | `POST /__openrouter-plus/provider` | `{ session, provider, model? }` — pin one endpoint slug; `provider: null` clears it. A slug the model does not list answers `404`. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` — show/hide the sidebar spend card; a config write |
-| `GET /__openrouter-plus/provider-facts` | `{ providerFacts }` — which facts an endpoint row states, and whether it prints the median alone or with p90 |
-| `POST /__openrouter-plus/provider-facts` | `{ providerFacts }` — the same object; a config write on the `providerFacts` key |
+| `GET /__openrouter-plus/provider-facts` | `{ providerFacts }` — which facts an endpoint row states, whether it prints the median alone or with p90, and the order it sorts in |
+| `POST /__openrouter-plus/provider-facts` | `{ providerFacts }` — the same object; a config write on the `providerFacts` key. A Host from before `sort` omits it, and the page then draws no sort control |
 | `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
 | `POST /__openrouter-plus/models/add` | `{ route, upstream?, models: [], remove: [], confirmRemove? }` — add/remove an explicit selection; a removal requires `confirmRemove: true` |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` |
@@ -598,7 +617,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier for new sessions** on the settings page |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 | `usageWidget` | `{ enabled: true }` | draw the sidebar spend card. A bare `false` is accepted; hiding the card hides nothing else — the settings page still shows every number |
-| `providerFacts` | all `true`, `percentiles: p50` | which facts an endpoint row states (`precision`, `price`, `uptime`, `throughput`, `latency`) and whether speed prints the median alone (`p50`) or with the tail (`p50p90`). Only an explicit `false` hides a fact. Written by **Provider list display** on the settings page; display only — the relay never reads it |
+| `providerFacts` | all `true`, `percentiles: p50`, `sort: default` | which facts an endpoint row states (`precision`, `price`, `uptime`, `throughput`, `latency`), whether speed prints the median alone (`p50`) or with the tail (`p50p90`), and the order the list reads in: `default` (cheapest first), `throughput`, `latency`, `uptime`, `input`, `output`, `cacheRead`. Only an explicit `false` hides a fact, and an unknown sort reads as `default`. Written by **Provider list display** on the settings page; display only — the relay never reads it, and the menu's order is not `provider.sort` |
 
 ## Security model
 

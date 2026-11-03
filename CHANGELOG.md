@@ -5,6 +5,45 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [Unreleased]
+
+**The endpoint menu re-reads itself whenever it opens, so a page that was loaded before a model was
+first routed stops showing price and uptime without speed for the life of the tab.** The composer
+read a model's listing once, at mount, and held it in component state; the numbers only exist on an
+authenticated read, which the relay makes on the first request that names the model. A page loaded
+before that request therefore painted the keyless answer and kept it — the ten-minute client cache
+below only decided what a *remount* painted, and opening the menu is not a remount, so the effect
+that fills the list never ran again.
+
+### Added
+
+- **Sort endpoints by** — one choice in **Provider list display**: `default` (the Host's own
+  cheapest-first order), `throughput`, `latency`, `uptime`, `input`, `output` or `cacheRead`.
+  Each id names a fact and the fact owns its direction — throughput and uptime read best-high, the
+  prices and latency best-low — so the menu never asks for a second "ascending" control. The order is
+  applied *inside* each group the Host declared, so the Standard / Flex / Not used headings stay put,
+  and a row that does not report the fact sorts last in both directions: on a keyless listing nothing
+  reports speed, so a speed sort reads exactly as `default` instead of inventing an order out of
+  nulls. This is a display order, not `provider.sort`: it never changes a request. The control is
+  drawn only when the Host's `/provider-facts` answer carries `sort`, because a Host from before
+  the field would drop the write and store what it already had.
+- **A search box above the endpoint list.** Matches a display name or a tag, hides rows rather than
+  groups (a group emptied by the filter takes its heading with it), and always keeps the "Auto
+  (OpenRouter routing)" row so an accidental pin is always clearable. Escape empties the box before
+  it leaves the pane; the query is view state and dies with the menu. Nothing is asked of the Host:
+  it filters the listing the pane already holds.
+
+### Fixed
+
+- **The Provider pane re-reads its listing on open.** `readProviderList(origin, model, signal)` is
+  now the one place the client asks for a model's endpoints: the mount effect paints from the client
+  cache when it has one, and the pane's own open (`refreshProviderPane`) asks again — one read at a
+  time, the rows already on screen kept until the answer lands, and a late answer for a model the
+  composer has since left is dropped rather than written over the new model's rows.
+- **A refused listing is "no answer", not "no endpoints".** A 404 from a Host that predates the
+  route, a 502 from the route itself, and a cut or aborted body all read as `null`, so an outage
+  leaves the rows that are still true on screen instead of blanking the pane.
+
 ## [0.6.0] — 2026-11-02
 
 **The endpoint menu can say how fast a provider answers, not only what it charges.** OpenRouter

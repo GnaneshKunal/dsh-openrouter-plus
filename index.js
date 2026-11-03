@@ -234,10 +234,14 @@ export function normalizeUsageWidget(value) {
  * speed fields, and `p50p90` adds the tail. Anything else falls back to `p50`, which is the
  * narrower answer and the one a label can always fit.
  *
+ * `sort` is the one field here that is not a fact: it is the order the same list is read in,
+ * so it belongs with the vocabulary rather than beside the routing presets — one Apply writes
+ * both, and the page that decides what a row says also decides which row comes first.
+ *
  * @param {unknown} raw
  * @returns {{
  *   precision: boolean, price: boolean, uptime: boolean, throughput: boolean,
- *   latency: boolean, percentiles: 'p50' | 'p50p90',
+ *   latency: boolean, percentiles: 'p50' | 'p50p90', sort: ReturnType<typeof normalizeProviderSort>,
  * }}
  */
 export function normalizeProviderFacts(raw) {
@@ -249,7 +253,36 @@ export function normalizeProviderFacts(raw) {
     throughput: facts.throughput !== false,
     latency: facts.latency !== false,
     percentiles: facts.percentiles === 'p50p90' ? 'p50p90' : 'p50',
+    sort: normalizeProviderSort(facts.sort),
   }
+}
+
+/**
+ * The orders an endpoint list may be read in.
+ *
+ * `default` is the Host's own order — cheapest input first, then output — and is what a
+ * listing with no speed facts still reads as. Every other id names one fact, and the fact
+ * carries its own direction: throughput and uptime read best-high, the prices and latency
+ * best-low, so there is no second "ascending" control to get wrong.
+ */
+export const PROVIDER_SORTS = Object.freeze([
+  'default',
+  'throughput',
+  'latency',
+  'uptime',
+  'input',
+  'output',
+  'cacheRead',
+])
+
+/**
+ * Normalise a sort id, tolerating anything a hand-edited row may hold.
+ * @param {unknown} value
+ * @returns {(typeof PROVIDER_SORTS)[number]}
+ */
+export function normalizeProviderSort(value) {
+  const sort = typeof value === 'string' ? value.trim() : ''
+  return PROVIDER_SORTS.find((known) => known === sort) ?? 'default'
 }
 
 /**
@@ -1218,7 +1251,8 @@ export function apply(ctx, rawConfig) {
    * Another preference in the plugin's own row, for the same reason as the sidebar flag:
    * it decides what a row *shows*, never what the relay sends, so nothing on the request
    * path has any use for it. The object written is the normalised one, so the row reads
-   * back with five named flags on the next boot instead of whatever subset the page sent.
+   * back with five named flags, a percentile choice and a sort on the next boot instead of
+   * whatever subset the page sent.
    *
    * @param {ReturnType<typeof normalizeProviderFacts>} next
    */
@@ -2474,13 +2508,14 @@ export function apply(ctx, rawConfig) {
     }),
 
     /**
-     * Which facts a provider row states, and how many percentiles it prints.
+     * Which facts a provider row states, how many percentiles it prints, and the order the
+     * list reads in.
      *
      * A sibling of `/widget` rather than a field of `/status`: the sidebar card polls that
      * endpoint and has no use for this, while the provider menu needs it at the moment it
-     * paints a row. `GET` answers all five flags and the percentile choice whether the row
-     * wrote a subset or nothing at all; `POST { providerFacts }` stores the normalised
-     * object, so the next boot reads back exactly what the page just sent.
+     * paints a row. `GET` answers the whole vocabulary whether the row wrote a subset or
+     * nothing at all; `POST { providerFacts }` stores the normalised object, so the next boot
+     * reads back exactly what the page just sent.
      */
     [`${CONTROL_PREFIX}/provider-facts`]: controlRoute(async (req, res) => {
       if (req.method === 'GET') {

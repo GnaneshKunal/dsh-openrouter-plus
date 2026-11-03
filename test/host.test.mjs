@@ -16,6 +16,7 @@ import {
   normalizeConfig,
   normalizeProviderFacts,
   normalizeRoutes,
+  PROVIDER_SORTS,
   normalizeSessionPrecisions,
   normalizeUsageWidget,
 } from '../index.js'
@@ -231,6 +232,7 @@ test('the provider list states every fact it has unless one was switched off', (
     throughput: true,
     latency: true,
     percentiles: 'p50',
+    sort: 'default',
   })
   assert.deepEqual(normalizeConfig(undefined).providerFacts, normalizeProviderFacts(undefined))
   assert.equal(normalizeProviderFacts({ latency: false }).latency, false, 'an explicit false is the only off')
@@ -245,6 +247,14 @@ test('the provider list states every fact it has unless one was switched off', (
   assert.equal(normalizeProviderFacts({ percentiles: 'P50P90' }).percentiles, 'p50')
   assert.equal(normalizeProviderFacts({ percentiles: 'p99' }).percentiles, 'p50')
   assert.equal(normalizeProviderFacts({}).percentiles, 'p50')
+  // The sort is the second value with a vocabulary of its own. It is not a fact: it decides
+  // the order the same rows read in, and anything unrecognised falls back to the Host's own
+  // order rather than to a sort nobody asked for.
+  for (const sort of PROVIDER_SORTS) {
+    assert.equal(normalizeProviderFacts({ sort }).sort, sort)
+  }
+  assert.equal(normalizeProviderFacts({ sort: 'fastest' }).sort, 'default')
+  assert.equal(normalizeProviderFacts({ sort: 'THROUGHPUT' }).sort, 'default')
 })
 
 test('boots the relay, serves control endpoints, and stops cleanly', async (t) => {
@@ -469,7 +479,7 @@ test('the provider-facts preference is read and written through the control API'
   })
 
   const factsUrl = `${origin}/__openrouter-plus/provider-facts`
-  const defaults = { precision: true, price: true, uptime: true, throughput: true, latency: true, percentiles: 'p50' }
+  const defaults = { precision: true, price: true, uptime: true, throughput: true, latency: true, percentiles: 'p50', sort: 'default' }
   // The page reads the whole object even when the row wrote nothing at all.
   assert.deepEqual(await (await fetch(factsUrl)).json(), { ok: true, providerFacts: defaults })
   // It is a display preference, so it stays off the endpoint the sidebar card polls.
@@ -498,9 +508,19 @@ test('the provider-facts preference is read and written through the control API'
   // instance, whose config was read before the write.
   assert.deepEqual(normalizeConfig(editor.writes[0].next).providerFacts, expected)
 
+  // The sort travels in the same object, and is written by the same call: it is what makes
+  // the menu's order a preference rather than a per-page choice.
+  const sorted = { ...defaults, sort: 'throughput' }
+  const sortWrite = await postJson(factsUrl, { providerFacts: { sort: 'throughput' } })
+  assert.equal(sortWrite.status, 200)
+  assert.deepEqual(await sortWrite.json(), { ok: true, providerFacts: sorted })
+  assert.deepEqual(normalizeConfig(editor.writes[1].next).providerFacts.sort, 'throughput')
+
   // Nonsense in a field is not a reason to refuse the write: it normalises to the default,
   // which is how a hand-edited row keeps working.
-  const tolerant = await postJson(factsUrl, { providerFacts: { price: 'no', percentiles: 'p99' } })
+  const tolerant = await postJson(factsUrl, {
+    providerFacts: { price: 'no', percentiles: 'p99', sort: 'fastest' },
+  })
   assert.equal(tolerant.status, 200)
   assert.deepEqual(await tolerant.json(), { ok: true, providerFacts: defaults })
 })
