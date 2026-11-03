@@ -5,6 +5,27 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [Unreleased]
+
+### Fixed
+
+- **The Settings page no longer draws an empty page when its first read is lost.** The page is
+  normally opened over a Session that is still streaming, and a tab under that load can miss its
+  first `/status` read: the request is aborted at the twelve-second timeout, `snapshot` stays
+  `null`, and the operator is shown the heading and nothing else — no mounts, no routes, no
+  display controls, and nothing to retry from but the banner. Writing a display preference made
+  it likely, because that write re-reads the status. The last successful answer is now kept in
+  `sessionStorage` and painted on mount while the first poll is in flight, so the page always
+  has true numbers to show; the poll replaces them as soon as one of its own lands. Nothing is
+  trusted on the way back in — the cached body is put through the same normaliser the wire
+  answer is — and a store that is absent, full or forbidden simply leaves the page waiting for
+  the poll, which is what it did before. The display section keeps its controls across a failed
+  re-read too, and is withdrawn only when this Host has never answered.
+- **The status poll can no longer be shut down by a re-render.** The translate function now
+  travels through a ref and is no longer an effect dependency, so a Host that hands the page a
+  new `t` on every render cannot abort the request in flight; the next tick is scheduled in a
+  `finally`, so a failure path that throws cannot leave a page that never recovers by itself.
+
 ## [0.7.0] — 2026-11-03
 
 **The endpoint menu can be ordered and searched, and it re-reads itself whenever it opens.** The

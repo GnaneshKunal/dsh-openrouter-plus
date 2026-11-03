@@ -3655,6 +3655,91 @@ window.__ModuleLoader__.load({
       return { title: !inPlugins, intro: !inPlugins };
     }
 
+    /* --------------------------------------------------- the last answer this tab read */
+
+    /**
+     * The last '/status' body and '/provider-facts' answer this tab managed to read.
+     *
+     * The page is usually opened over a Session that is still streaming, and a tab under
+     * that load can miss its first read: the request is aborted at the timeout, `snapshot`
+     * stays null, and the operator is shown a header and nothing else — no mounts, no
+     * routes, no display controls, and nothing but the banner to retry from. The last
+     * answer is therefore kept in `sessionStorage` and painted on mount while the first
+     * poll is in flight; the poll replaces it as soon as one lands.
+     *
+     * Nothing is trusted on the way back in. The cached status body goes through the same
+     * normaliser the wire answer does, and the cached facts through the same payload
+     * reader, so a tab reopened on an older Host cannot paint a shape this build does not
+     * understand. A store that is absent, full or forbidden is not an error: the page then
+     * waits for the poll, which is exactly what it did before.
+     */
+    const STORAGE_STATUS_KEY = 'openrouter-plus.cached-status';
+    const STORAGE_FACTS_KEY = 'openrouter-plus.cached-facts';
+
+    /** `sessionStorage` when the page may use it, else null. */
+    function cacheStorage() {
+      try {
+        const storage = globalThis.sessionStorage;
+        if (storage === undefined || storage === null) return null;
+        return typeof storage.getItem === 'function' && typeof storage.setItem === 'function'
+          ? storage
+          : null;
+      } catch (error) {
+        /* A blocked storage throws on the property read itself. */
+        return null;
+      }
+    }
+
+    /** One cached body, or null when it is absent or unreadable. */
+    function readCachedBody(key) {
+      const storage = cacheStorage();
+      if (storage === null) return null;
+      try {
+        const text = storage.getItem(key);
+        if (typeof text !== 'string' || text === '') return null;
+        const parsed = JSON.parse(text);
+        return isPlainObject(parsed) ? parsed.body : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    /** Keep one body for the next mount. A refused write is not an error. */
+    function writeCachedBody(key, body) {
+      const storage = cacheStorage();
+      if (storage === null) return false;
+      try {
+        storage.setItem(key, JSON.stringify({ body: body }));
+        return true;
+      } catch (error) {
+        /* Full, or forbidden between the two calls: the poll is the fallback either way. */
+        return false;
+      }
+    }
+
+    /** The last /status body, normalised, or null. */
+    function readCachedStatus() {
+      return normalizeStatusPayload(readCachedBody(STORAGE_STATUS_KEY));
+    }
+
+    /** Keep the wire body behind the last successful status read. */
+    function writeCachedStatus(payload) {
+      return writeCachedBody(STORAGE_STATUS_KEY, payload);
+    }
+
+    /** The last /provider-facts answer as { facts, sort }, or null. */
+    function readCachedFacts() {
+      const body = readCachedBody(STORAGE_FACTS_KEY);
+      if (!isPlainObject(body)) return null;
+      const facts = normalizeProviderFactsPayload({ ok: true, providerFacts: body.facts });
+      return facts === null ? null : { facts: facts, sort: body.sort === true };
+    }
+
+    /** Keep one /provider-facts answer for the next mount. */
+    function writeCachedFacts(facts, sort) {
+      return writeCachedBody(STORAGE_FACTS_KEY, { facts: facts, sort: sort === true });
+    }
+
     /**
      * The page body. Everything stateful lives here so the slot wrapper stays trivial and
      * unmounting the slot tears down every timer, fetch and listener this page owns.
@@ -3666,7 +3751,11 @@ window.__ModuleLoader__.load({
       /* One base, because the control API is mounted on this page's own origin. */
       const origin = CONTROL_BASE;
       const [connection, setConnection] = React.useState('checking');
-      const [snapshot, setSnapshot] = React.useState(null);
+      /* Painted from the last answer this tab read, before the first poll completes: a tab
+         that is streaming a reply can miss that read entirely, and a page that draws
+         nothing until it lands is a page that shows an operator nothing at all. The poll
+         replaces these numbers as soon as one of its own lands. */
+      const [snapshot, setSnapshot] = React.useState(readCachedStatus);
       const [statusError, setStatusError] = React.useState('');
       const [refreshKey, setRefreshKey] = React.useState(0);
       const [targets, setTargets] = React.useState({ status: 'idle', data: null, error: '' });
@@ -3686,12 +3775,18 @@ window.__ModuleLoader__.load({
          and rebinds the relay — five checkboxes must cost one reload, not five. `null` while
          nothing is staged and while an older Host has no such route (no control is drawn for
          a preference that could not be saved). */
-      const [providerFacts, setProviderFacts] = React.useState(null);
+      /* The facts this tab saw last are the first paint too, for the same reason: a read
+         cut by the timeout must not take the controls off the page that draws them.
+         `null` still means "this Host has never answered", which is what withdraws them. */
+      const factsSeedRef = React.useRef(null);
+      if (factsSeedRef.current === null) factsSeedRef.current = { cache: readCachedFacts() };
+      const factsSeed = factsSeedRef.current.cache;
+      const [providerFacts, setProviderFacts] = React.useState(factsSeed === null ? null : factsSeed.facts);
       /* Whether this Host's answer carries the sort at all. The relay writes the whole
          normalised object, so a Host from before the setting simply omits the key — and a
          control whose write would be dropped is not offered, the same rule the whole section
          followed before it existed. */
-      const [sortSupported, setSortSupported] = React.useState(false);
+      const [sortSupported, setSortSupported] = React.useState(factsSeed === null ? false : factsSeed.sort);
       const [factsDraft, setFactsDraft] = React.useState(null);
       const [factsBusy, setFactsBusy] = React.useState(false);
       const [factsError, setFactsError] = React.useState('');
@@ -3704,6 +3799,14 @@ window.__ModuleLoader__.load({
       const copyTimerRef = React.useRef(null);
       const widgetTimerRef = React.useRef(null);
       const factsRetryRef = React.useRef(null);
+      /* The poll and the facts read are mount-scoped, so the translate function and the
+         current facts are read through refs: a Host that hands the page a new `t` on a
+         re-render must not tear down a poll that has a request in flight, because that is
+         one more way for the page to end on "checking..." with nothing drawn. */
+      const tRef = React.useRef(t);
+      tRef.current = t;
+      const providerFactsRef = React.useRef(providerFacts);
+      providerFactsRef.current = providerFacts;
 
       /* Track mount state and clear every owned timer/request on unmount. */
       React.useEffect(() => {
@@ -3808,7 +3911,7 @@ window.__ModuleLoader__.load({
             cache: 'no-store',
             headers: { accept: 'application/json' },
           });
-          if (!response.ok) throw httpError(t, response.status);
+          if (!response.ok) throw httpError(tRef.current, response.status);
           const payload = await readJson(response);
           const normalized = normalizeStatusPayload(payload);
           if (normalized === null) {
@@ -3816,9 +3919,12 @@ window.__ModuleLoader__.load({
                `error` string; surface that instead of the generic shape complaint. */
             const relayError =
               isPlainObject(payload) && payload.ok === false ? stringValue(payload.error).trim() : '';
-            throw new Error(relayError === '' ? t('error.badStatus') : relayError);
+            throw new Error(relayError === '' ? tRef.current('error.badStatus') : relayError);
           }
-          return normalized;
+          /* The wire body is what the next mount paints from, so it is kept beside the
+             normalised answer: re-normalising it on the way back in is what keeps a stale
+             cache from a different build out of this page. */
+          return { snapshot: normalized, body: payload };
         };
 
         /* Consecutive failures. `setStatusError`/`setConnection` are driven off this rather
@@ -3828,17 +3934,18 @@ window.__ModuleLoader__.load({
         const tick = async () => {
           if (cancelled) return;
           try {
-            const normalized = await loadStatus();
+            const answer = await loadStatus();
             if (cancelled) return;
             misses = 0;
-            setSnapshot(normalized);
+            setSnapshot(answer.snapshot);
+            writeCachedStatus(answer.body);
             setStatusError('');
             setConnection('online');
             /* The widget write reloads the plugin, so its flag can trail the response by a
                poll or two; the optimistic value stands until the relay reports it, and
                `WIDGET_SETTLE_MS` stops it from outliving a write that never landed. */
             setWidgetPending((pending) =>
-              pending !== null && normalized.usageWidget.enabled === pending ? null : pending,
+              pending !== null && answer.snapshot.usageWidget.enabled === pending ? null : pending,
             );
           } catch (error) {
             if (cancelled) return;
@@ -3853,11 +3960,14 @@ window.__ModuleLoader__.load({
             /* Below the threshold the page keeps the numbers it already has and says
                nothing: a reload, a route edit or a busy turn all fail a poll or two. */
             if (misses >= CONNECT_FAIL_THRESHOLD) {
-              setStatusError(errorMessage(t, error));
+              setStatusError(errorMessage(tRef.current, error));
               setConnection('offline');
             }
+          } finally {
+            /* In `finally` on purpose: a failure path that throws must still schedule the
+               next tick, or one bad poll leaves a page that never recovers by itself. */
+            schedule(POLL_INTERVAL_MS);
           }
-          schedule(POLL_INTERVAL_MS);
         };
 
         schedule(0);
@@ -3868,7 +3978,10 @@ window.__ModuleLoader__.load({
           pollTimer = null;
           abortAll();
         };
-      }, [refreshKey, t]);
+        /* `t` is read through `tRef`, so it is deliberately not a dependency: a re-render
+           that hands the page a new translate function would otherwise abort the request
+           this poll has in flight. */
+      }, [refreshKey]);
 
       /* Provider routes load once the relay is online and refresh after every mutation. */
       React.useEffect(() => {
@@ -3939,8 +4052,10 @@ window.__ModuleLoader__.load({
             });
             if (!response.ok) {
               /* The route is gone — an older Host, or a rebind that outlived the retry. Withdraw
-                 the control rather than keep drawing one whose write would 404. */
-              if (!cancelled) {
+                 the control only when this page never had an answer: a read cut by the reload
+                 its own write caused must not take the controls off the page drawing them,
+                 and the cached answer is the one the operator was looking at. */
+              if (!cancelled && providerFactsRef.current === null) {
                 setProviderFacts(null);
                 setSortSupported(false);
               }
@@ -3954,14 +4069,15 @@ window.__ModuleLoader__.load({
             }
             const next = normalizeProviderFactsPayload(payload);
             if (cancelled || next === null) return;
+            const withSort =
+              isPlainObject(payload) &&
+              isPlainObject(payload.providerFacts) &&
+              hasOwn(payload.providerFacts, 'sort');
             setProviderFacts(next);
-            if (!cancelled) {
-              setSortSupported(
-                isPlainObject(payload) &&
-                  isPlainObject(payload.providerFacts) &&
-                  hasOwn(payload.providerFacts, 'sort'),
-              );
-            }
+            setSortSupported(withSort);
+            /* Kept for the next mount, so a page reopened over a busy tab paints the display
+               section before this read has had a chance to land. */
+            writeCachedFacts(next, withSort);
             /* A write whose answer was cut by the reload it caused still landed, and this
                read is how the page finds out: a draft that now equals the server's answer is
                no longer a draft, so a checkbox stops looking unsaved. A draft that differs is
@@ -4033,7 +4149,10 @@ window.__ModuleLoader__.load({
             }
             const saved = normalizeProviderFactsPayload(payload);
             if (!mountedRef.current) return;
-            if (saved !== null) setProviderFacts(saved);
+            if (saved !== null) {
+              setProviderFacts(saved);
+              writeCachedFacts(saved, sortSupported);
+            }
             setFactsDraft(null);
             setFactsNotice(t('provider.facts.saved'));
             /* The relay rebinds, so ask again rather than trust a body that crossed it. */
@@ -7913,6 +8032,16 @@ window.__ModuleLoader__.load({
         providerFacts: normalizeProviderFacts,
         providerFactsPayload: normalizeProviderFactsPayload,
         providerDefaults: DEFAULT_PROVIDER_FACTS,
+        /* The page keeps its last good answer so a tab that misses the first poll still
+           paints; the readers are pinned with the storage they tolerate, not through a
+           render, because that is where a version skew would surface. */
+        readCachedStatus,
+        writeCachedStatus,
+        readCachedFacts,
+        writeCachedFacts,
+        readCachedBody,
+        writeCachedBody,
+        storageKeys: { status: STORAGE_STATUS_KEY, facts: STORAGE_FACTS_KEY },
         providerTiers: PROVIDER_TIERS,
         providerPrecisions: PROVIDER_PRECISIONS,
         chipBadgeParts,
