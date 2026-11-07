@@ -16,12 +16,13 @@ sessions, while the chip keeps choosing for one Session.
 ### Added
 
 - **Precision floor for new sessions** — a picker in Settings → OpenRouter Plus with the four
-  floors the composer offers (`Any`, `No four-bit`, `Eight-bit up`, `Full width`), naming the
-  wire levels each admits exactly as the chip does, plus **Admit endpoints with unknown precision**
-  for the `includeUnknown` half of the policy. It writes the plugin's own row on
-  `precisionFloor` through `POST /__openrouter-plus/precision/default` — the route the feature
-  already had; this is its control — so the choice survives a restart and every Session that has
-  not chosen its own floor inherits it.
+  floors the composer offers (`Any`, `No four-bit`, `Eight-bit up`, `Full width`), a hint naming
+  the wire levels the selected floor admits, and **Admit endpoints with unknown precision** for the
+  `includeUnknown` half of the policy. It writes the plugin's own row on `precisionFloor` through
+  `POST /__openrouter-plus/precision/default` — the route the feature already had; this is its
+  control — so the choice survives a restart and every Session that has not chosen its own floor
+  inherits it. Like the preset default, the save is a config write, so the plugin reloads and the
+  per-Session floors held in memory are dropped; the docs say so.
 - **`GET /__openrouter-plus/targets` carries both profile defaults.** It gains
   `precision: { default, floors }` beside `tier: { default, presets }`, because the page reads
   them in the answer it already loads. A Host from before the field answers none, and the page does

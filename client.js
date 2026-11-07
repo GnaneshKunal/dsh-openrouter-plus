@@ -3740,6 +3740,84 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The two settings rows that carry the profile precision floor, or null when the Host
+     * predates the preference. It reads only its arguments and returns elements, which is what
+     * lets the suite execute the row for a floor other than `any` without a browser: the
+     * "wire levels" line is the one a bare identifier once broke in exactly this scope.
+     */
+    function precisionDefaultControls(t, view) {
+      const table = isPlainObject(view) && isPlainObject(view.table) ? view.table : null;
+      if (table === null || !isPlainObject(table.default)) return null;
+      const busy = view.busy === true;
+      const onChange = typeof view.onChange === 'function' ? view.onChange : () => {};
+      const floor = precisionFloorOf(table.default.floor);
+      const includeUnknown =
+        typeof table.default.includeUnknown === 'boolean'
+          ? table.default.includeUnknown
+          : precisionIncludeUnknownDefault(floor);
+      const floors = precisionFloorList(table.floors);
+      const levels =
+        floor === 'any'
+          ? t('precision.row.any.hint')
+          : t('precision.wireLevels', { levels: PRECISION_WIRE_LEVELS[floor].join(', ') });
+      return {
+        choice: h(
+          'div',
+          { key: 'precision-default', style: ROW_STYLE },
+          h(
+            'div',
+            { style: ROW_INFO_STYLE },
+            h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultPrecisionCaption')),
+            h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionHint')),
+            h('span', { style: HINT_STYLE }, levels),
+          ),
+          h(
+            'div',
+            { style: ROW_CONTROL_STYLE },
+            h(TierSelect, {
+              value: floor,
+              options: floors.map((id) => ({
+                value: id,
+                label: t('precision.row.' + id),
+              })),
+              ariaLabel: t('providers.defaultPrecisionAria'),
+              disabled: busy,
+              onChange: (id) =>
+                onChange({
+                  floor: id,
+                  includeUnknown: precisionIncludeUnknownDefault(id),
+                }),
+            }),
+          ),
+        ),
+        unknown: h(
+          'div',
+          { key: 'precision-unknown', style: ROW_STYLE },
+          h(
+            'div',
+            { style: ROW_INFO_STYLE },
+            h(
+              'label',
+              { style: USAGE_TOGGLE_STYLE },
+              h('input', {
+                type: 'checkbox',
+                checked: floor === 'any' ? false : includeUnknown,
+                disabled: busy || floor === 'any',
+                onChange: (event) =>
+                  onChange({ floor: floor, includeUnknown: event.target.checked }),
+              }),
+              h('span', null, t('providers.defaultPrecisionUnknown')),
+            ),
+            h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionUnknownHint')),
+          ),
+          h('div', { style: ROW_CONTROL_STYLE }),
+        ),
+      };
+    }
+
+
+
+    /**
      * Which page chrome this seat draws.
      *
      * The same body answers two seats, and the frames around them are not the same height.
@@ -5221,83 +5299,15 @@ window.__ModuleLoader__.load({
               )
             : null;
         /* The floor an unchosen Session inherits, beside the preset for the same reason:
-           both are profile preferences, while the composer chip chooses for one Session. A
-           Host that predates this field answers no table, and the rows are then not drawn at
-           all — offering a control whose write would 404 is worse than an empty space. */
-        const precisionTable = targetsData.precision;
-        const precisionDefault = precisionTable === null ? null : precisionTable.default;
-        const precisionChoice =
-          precisionTable !== null && precisionDefault !== null
-            ? h(
-                'div',
-                { key: 'precision-default', style: ROW_STYLE },
-                h(
-                  'div',
-                  { style: ROW_INFO_STYLE },
-                  h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultPrecisionCaption')),
-                  h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionHint')),
-                  h(
-                    'span',
-                    { style: HINT_STYLE },
-                    precisionDefault.floor === 'any'
-                      ? t('precision.row.any.hint')
-                      : t('precision.wireLevels', {
-                          levels: precisionWireLevels[precisionDefault.floor].join(', '),
-                        }),
-                  ),
-                ),
-                h(
-                  'div',
-                  { style: ROW_CONTROL_STYLE },
-                  h(TierSelect, {
-                    value: precisionDefault.floor,
-                    options: precisionTable.floors.map((floor) => ({
-                      value: floor,
-                      label: t('precision.row.' + floor),
-                    })),
-                    ariaLabel: t('providers.defaultPrecisionAria'),
-                    disabled: busy !== null,
-                    onChange: (floor) =>
-                      runDefaultPrecision({
-                        floor: floor,
-                        includeUnknown: precisionIncludeUnknownDefault(floor),
-                      }),
-                  }),
-                ),
-              )
-            : null;
-        /* The second half of the same preference: whether endpoints that declare no
-           precision stay eligible. `any` sends no list, so the checkbox has nothing to
-           append to and is disabled there rather than pretending to filter. */
-        const precisionUnknown =
-          precisionTable !== null && precisionDefault !== null
-            ? h(
-                'div',
-                { key: 'precision-unknown', style: ROW_STYLE },
-                h(
-                  'div',
-                  { style: ROW_INFO_STYLE },
-                  h(
-                    'label',
-                    { style: USAGE_TOGGLE_STYLE },
-                    h('input', {
-                      type: 'checkbox',
-                      checked:
-                        precisionDefault.floor === 'any' ? false : precisionDefault.includeUnknown,
-                      disabled: busy !== null || precisionDefault.floor === 'any',
-                      onChange: (event) =>
-                        runDefaultPrecision({
-                          floor: precisionDefault.floor,
-                          includeUnknown: event.target.checked,
-                        }),
-                    }),
-                    h('span', null, t('providers.defaultPrecisionUnknown')),
-                  ),
-                  h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionUnknownHint')),
-                ),
-                h('div', { style: ROW_CONTROL_STYLE }),
-              )
-            : null;
+           both are profile preferences, while the composer chip chooses for one Session. The
+           rows live in one builder (see `precisionDefaultControls`) so the suite can execute
+           them for a floor other than `any` — a Host that predates the field answers no table
+           and the rows are then not drawn at all, rather than offering a 404ing write. */
+        const precisionControls = precisionDefaultControls(t, {
+          table: targetsData.precision,
+          busy: busy !== null,
+          onChange: runDefaultPrecision,
+        });
         /* What each preset actually sends, written once where it can be read calmly. The
            composer menu deliberately carries labels only: a picker that explains itself in
            nine paragraphs is not a picker. */
@@ -5326,8 +5336,8 @@ window.__ModuleLoader__.load({
           { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
           h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
           presetChoice,
-          precisionChoice,
-          precisionUnknown,
+          precisionControls === null ? null : precisionControls.choice,
+          precisionControls === null ? null : precisionControls.unknown,
           presetGlossary,
           rows,
           repair,
@@ -8283,6 +8293,9 @@ window.__ModuleLoader__.load({
         /* The other profile default, read from the same `/targets` answer: null when the
            Host predates it, which is the page's gate on offering the control at all. */
         normalizePrecisionTable,
+        /* The settings rows the profile floor is drawn from, returned as elements so a
+           non-`any` default is executed by the suite rather than only grepped for. */
+        precisionDefaultControls,
         normalizePresetState,
         normalizeMounts,
         pinnedMounts,

@@ -48,9 +48,10 @@ precision nobody declared is not a floor.
 That switch is also what the settings page sets for the profile. **Precision floor for new sessions**
 picks the floor an unchosen Session inherits and carries `includeUnknown` as a checkbox beside it.
 It is neither a preset nor a Session choice: a Session that picks a floor in the composer overrides
-the profile for that Session (like every runtime choice, until the Host restarts), and the pane's
-**Profile default** row hands it back. Without this preference every new conversation started on
-`any` — the behaviour the floor otherwise only changed after a manual pick in each one.
+the profile for that Session (like every runtime choice, until the Host restarts; saving the profile
+default is a config write that reloads the plugin, so it clears those per-Session choices too), and
+the pane's **Profile default** row hands it back. Without this preference every new conversation
+started on `any` — the behaviour the floor otherwise only changed after a manual pick in each one.
 
 ## Why the filter is not always sent
 

@@ -24,7 +24,14 @@ class ReactComponent {
 }
 const reactStub = {
   Component: ReactComponent,
-  createElement: () => null,
+  /* Elements, not null: the settings rows are returned as plain React trees, and a test that
+     executes them has to be able to read the text and the props back. Nothing here reconciles
+     or invokes a component, so no hooks run through this stub. */
+  createElement: (type, props, ...children) => ({
+    type,
+    props: props === null || props === undefined ? {} : props,
+    children,
+  }),
   useState: (value) => [value, () => {}],
   useEffect: () => {},
   useRef: (value) => ({ current: value }),
@@ -61,6 +68,7 @@ const {
   normalizeProviderState,
   pinnedProviderLabel,
   precisionClearBody,
+  precisionDefaultControls,
   precisionFloorOf,
   precisionFloors,
   precisionPostBody,
@@ -106,6 +114,42 @@ const translate = (dictionary) => (key, vars) => {
 }
 const en = translate(dictionaries.en)
 const zh = translate(dictionaries.zh)
+
+/** Every string in a tree the React stub built. */
+const elementText = (node) => {
+  if (node === null || node === undefined || node === false) return []
+  if (typeof node === 'string') return [node]
+  if (Array.isArray(node)) return node.flatMap(elementText)
+  return elementText(node.children)
+}
+
+/** The first element a predicate accepts, or null. */
+const findElementWhere = (node, accept) => {
+  if (node === null || node === undefined || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElementWhere(child, accept)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (accept(node)) return node
+  return findElementWhere(node.children, accept)
+}
+
+/** The first element of a given tag in a tree, or null. */
+const findElement = (node, type) => {
+  if (node === null || node === undefined || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, type)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (node.type === type) return node
+  return findElement(node.children, type)
+}
 
 /** The preset ids the tier facet lists, inherit excluded. */
 const PRESET_ROWS = [
@@ -212,6 +256,82 @@ test('the settings page sets the floor new sessions inherit, not just one sessio
   assert.match(source, /precision: normalizePrecisionTable\(payload\.precision\)/)
   assert.match(source, /providers\.defaultPrecisionCaption/)
   assert.match(source, /runDefaultPrecision/)
+})
+
+test('the precision-default rows execute for a floor other than any', () => {
+  /* The regression this pins: the wire-levels line named `precisionWireLevels` — the
+     `__test` export key — instead of the module constant. Nothing executed the row, so CI
+     stayed green until the first successful save of a real floor re-read `/targets`, at
+     which point PageBoundary replaced the whole page with its error card. */
+  const table = {
+    floors: [...precisionFloors],
+    default: { floor: 'eight-bit-up', includeUnknown: false },
+  }
+  const calls = []
+  const controls = precisionDefaultControls(en, {
+    table: table,
+    busy: false,
+    onChange: (choice) => calls.push(choice),
+  })
+  assert.ok(controls !== null, 'a Host that carries the table gets both rows')
+  assert.ok(
+    elementText(controls.choice).includes(en('providers.defaultPrecisionCaption')),
+    'the row names the preference',
+  )
+  assert.ok(
+    elementText(controls.choice).includes(
+      en('precision.wireLevels', { levels: precisionWireLevels['eight-bit-up'].join(', ') }),
+    ),
+    'the selected floor states what it admits',
+  )
+
+  /* The picker is the `TierSelect` element, not a raw `<select>`: the tag is built inside
+     that component when React renders it, which this stub deliberately does not do. Its props
+     are the row's contract either way. */
+  const select = findElementWhere(
+    controls.choice,
+    (element) =>
+      Array.isArray(element.props.options) &&
+      element.props.ariaLabel === en('providers.defaultPrecisionAria'),
+  )
+  assert.deepEqual(select.props.options.map((option) => option.value), [...precisionFloors])
+  assert.equal(select.props.disabled, false)
+  /* Picking a floor carries that floor's own unknown default, exactly like the chip's POST. */
+  select.props.onChange('full-width')
+  assert.deepEqual(calls.shift(), { floor: 'full-width', includeUnknown: false })
+
+  const box = findElement(controls.unknown, 'input')
+  assert.equal(box.props.type, 'checkbox')
+  assert.equal(box.props.checked, false, 'the stored includeUnknown is what the box shows')
+  assert.equal(box.props.disabled, false)
+  box.props.onChange({ target: { checked: true } })
+  assert.deepEqual(calls.shift(), { floor: 'eight-bit-up', includeUnknown: true })
+
+  /* `any` sends no list: the box has nothing to append to, so it is off and disabled. */
+  const anyControls = precisionDefaultControls(en, {
+    table: Object.assign({}, table, { default: { floor: 'any', includeUnknown: true } }),
+    busy: false,
+    onChange: () => {},
+  })
+  assert.ok(elementText(anyControls.choice).includes(en('precision.row.any.hint')))
+  const anyBox = findElement(anyControls.unknown, 'input')
+  assert.equal(anyBox.props.checked, false)
+  assert.equal(anyBox.props.disabled, true)
+
+  /* A write in flight locks both rows; a Host without the table gets no rows at all. */
+  const busyControls = precisionDefaultControls(en, { table: table, busy: true, onChange: () => {} })
+  assert.equal(
+    findElementWhere(
+      busyControls.choice,
+      (element) =>
+        Array.isArray(element.props.options) &&
+        element.props.ariaLabel === en('providers.defaultPrecisionAria'),
+    ).props.disabled,
+    true,
+  )
+  assert.equal(findElement(busyControls.unknown, 'input').props.disabled, true)
+  assert.equal(precisionDefaultControls(en, null), null)
+  assert.equal(precisionDefaultControls(en, { table: null, busy: false }), null)
 })
 
 test('the chip reads both answer shapes', () => {
