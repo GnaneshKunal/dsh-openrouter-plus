@@ -86,7 +86,7 @@ dispatch call, not a second implementation.
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
 | `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, precision: { default, floorBypassed: { count, byModel } }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
-| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, reasoning: { fill, levels } }` | |
+| `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, precision: { default: { floor, includeUnknown, allow }, floors }, reasoning: { fill, levels } }` — the two profile preferences ride the answer the settings page already loads | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
 | `GET /__openrouter-plus/models?route=&upstream=` | — | the live catalogue for one route, each model marked `inRoute` |

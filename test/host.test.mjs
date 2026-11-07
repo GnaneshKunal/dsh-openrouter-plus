@@ -1199,6 +1199,13 @@ test('the precision control API reports, sets and persists the floor', async (t)
   // The next boot reads it back as the normalised shape.
   assert.deepEqual(normalizeConfig(editor.writes[0].next).precisionFloor, defaultBody.default)
 
+  // The same preference rides `/targets` beside the preset, so the settings page reads
+  // both defaults in the answer it already loads instead of a second request for one.
+  // (The fake editor does not re-apply this plugin's row the way the Loader would, so the
+  // live default is read in the boot test below rather than here.)
+  const targetsAfter = await (await fetch(`${origin}/__openrouter-plus/targets`)).json()
+  assert.deepEqual(targetsAfter.precision.floors, ['any', 'no-four-bit', 'eight-bit-up', 'full-width'])
+
   const refused = await postJson(`${origin}/__openrouter-plus/precision/default`, { precision: { floor: 'turbo' } })
   assert.equal(refused.status, 400)
   assert.equal(editor.writes.length, 1, 'a refused default writes nothing')
@@ -1209,6 +1216,44 @@ test('the precision control API reports, sets and persists the floor', async (t)
   assert.equal((await reset.json()).default.floor, 'any')
   assert.equal(editor.writes.length, 2)
   assert.deepEqual(editor.writes[1].next.precisionFloor, { floor: 'any', includeUnknown: false })
+})
+
+test('the settings page reads both profile defaults from /targets', async (t) => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({})])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(dispose)
+  apply(ctx, {
+    host: '127.0.0.1',
+    port,
+    portFallback: false,
+    defaultPreset: 'cheapest',
+    precisionFloor: { floor: 'eight-bit-up', includeUnknown: false },
+  })
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  /* One answer carries both preferences, because they are the two things the page lets an
+     operator decide for Sessions that have not chosen yet. The precision side is the whole
+     point: without it the page could only offer `any` and the floor stayed hand-edited
+     config for every new conversation. */
+  const targets = await (await fetch(`${origin}/__openrouter-plus/targets`)).json()
+  assert.equal(targets.tier.default, 'cheapest')
+  assert.equal(targets.tier.presets.includes('cheapest'), true)
+  assert.deepEqual(targets.precision, {
+    default: {
+      floor: 'eight-bit-up',
+      includeUnknown: false,
+      allow: ['int8', 'fp8', 'mxfp8', 'fp16', 'bf16', 'fp32'],
+    },
+    floors: ['any', 'no-four-bit', 'eight-bit-up', 'full-width'],
+  })
 })
 
 test('the floor is only sent once a model is known to have an endpoint above it', async (t) => {

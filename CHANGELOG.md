@@ -5,6 +5,38 @@ Notable changes to `dsh-openrouter-plus`. Format follows
 [SemVer](https://semver.org/), and the project stays below 1.0 while the routing presets and
 the config keys can still change.
 
+## [Unreleased]
+
+**The precision floor can be set once for the profile, instead of once per new conversation.**
+The floor was a Session choice in the composer chip, and the profile key behind it
+(`precisionFloor`) could only be edited by hand, so every new Session started on `any` and the
+same choice had to be made again. Settings → OpenRouter Plus now sets it beside the preset for new
+sessions, while the chip keeps choosing for one Session.
+
+### Added
+
+- **Precision floor for new sessions** — a picker in Settings → OpenRouter Plus with the four
+  floors the composer offers (`Any`, `No four-bit`, `Eight-bit up`, `Full width`), naming the
+  wire levels each admits exactly as the chip does, plus **Admit endpoints with unknown precision**
+  for the `includeUnknown` half of the policy. It writes the plugin's own row on
+  `precisionFloor` through `POST /__openrouter-plus/precision/default` — the route the feature
+  already had; this is its control — so the choice survives a restart and every Session that has
+  not chosen its own floor inherits it.
+- **`GET /__openrouter-plus/targets` carries both profile defaults.** It gains
+  `precision: { default, floors }` beside `tier: { default, presets }`, because the page reads
+  them in the answer it already loads. A Host from before the field answers none, and the page does
+  not draw the control: a preference whose write would 404 is worse than an empty space.
+- **A floor change carries that floor's unknown-precision answer** — `no-four-bit` and
+  `eight-bit-up` admit undeclared endpoints, `full-width` and `any` do not — and the checkbox
+  overrides it explicitly. `Any` disables the checkbox: it sends no `quantizations` list, so
+  there is nothing to append to.
+- **The composer's Precision pane can hand a Session back to the profile default.** It now opens
+  with `Profile default (…)` beside the four floors, the first row Tier has always had; picking it
+  clears the Session's floor (`precision: null`) so the profile default applies again. Without it
+  the new preference would be a one-way door: once a profile default stopped being `any`, picking
+  `Any` in the composer would become an explicit Session choice, and there was no way back to
+  inheriting short of a Host restart.
+
 ## [0.7.1] — 2026-11-03
 
 ### Fixed

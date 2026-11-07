@@ -2,7 +2,7 @@
   "name": "dsh-openrouter-plus",
   "version": "0.7.1",
   "type": "module",
-  "description": "OpenRouter routing presets for DeepSeek Harness \u2014 a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) and an optional precision floor (provider.quantizations) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset.",
+  "description": "OpenRouter routing presets for DeepSeek Harness \u2014 a loopback relay that applies a preset (service_tier, provider.sort or the :floor model variant) and an optional precision floor (provider.quantizations) to each Session at request time, a live status API, and an OpenRouter Plus settings page that points one provider row at the relay and stores a default preset and precision floor.",
   "keywords": [
     "deepseek",
     "harness",
