@@ -24,7 +24,14 @@ class ReactComponent {
 }
 const reactStub = {
   Component: ReactComponent,
-  createElement: () => null,
+  /* Elements, not null: the settings rows are returned as plain React trees, and a test that
+     executes them has to be able to read the text and the props back. Nothing here reconciles
+     or invokes a component, so no hooks run through this stub. */
+  createElement: (type, props, ...children) => ({
+    type,
+    props: props === null || props === undefined ? {} : props,
+    children,
+  }),
   useState: (value) => [value, () => {}],
   useEffect: () => {},
   useRef: (value) => ({ current: value }),
@@ -37,6 +44,7 @@ const module = definition.factory((id) => {
 })
 const {
   normalizeMounts,
+  normalizePrecisionTable,
   normalizePresetTable,
   normalizePresetState,
   normalizeUsageRecent,
@@ -59,6 +67,8 @@ const {
   normalizeProviderPin,
   normalizeProviderState,
   pinnedProviderLabel,
+  precisionClearBody,
+  precisionDefaultControls,
   precisionFloorOf,
   precisionFloors,
   precisionPostBody,
@@ -104,6 +114,42 @@ const translate = (dictionary) => (key, vars) => {
 }
 const en = translate(dictionaries.en)
 const zh = translate(dictionaries.zh)
+
+/** Every string in a tree the React stub built. */
+const elementText = (node) => {
+  if (node === null || node === undefined || node === false) return []
+  if (typeof node === 'string') return [node]
+  if (Array.isArray(node)) return node.flatMap(elementText)
+  return elementText(node.children)
+}
+
+/** The first element a predicate accepts, or null. */
+const findElementWhere = (node, accept) => {
+  if (node === null || node === undefined || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElementWhere(child, accept)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (accept(node)) return node
+  return findElementWhere(node.children, accept)
+}
+
+/** The first element of a given tag in a tree, or null. */
+const findElement = (node, type) => {
+  if (node === null || node === undefined || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, type)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (node.type === type) return node
+  return findElement(node.children, type)
+}
 
 /** The preset ids the tier facet lists, inherit excluded. */
 const PRESET_ROWS = [
@@ -163,6 +209,129 @@ test('the settings table degrades to the built-in list instead of throwing', () 
   // A default outside the advertised list falls back to a preset that is in it.
   const narrowed = normalizePresetTable({ default: 'ultra', presets: ['none', 'floor'] })
   assert.equal(narrowed.default, 'none')
+})
+
+test('the default precision table is offered only when the Host carries it', () => {
+  /* A Host from before the preference has no field: no control, because its write would
+     404. That is the same gate the provider-facts sort follows. */
+  for (const absent of [undefined, null, 'eight-bit-up', 42, []]) {
+    assert.equal(normalizePrecisionTable(absent), null)
+  }
+
+  const modern = normalizePrecisionTable({
+    default: { floor: 'eight-bit-up', includeUnknown: false },
+    floors: ['any', 'no-four-bit', 'eight-bit-up', 'full-width'],
+  })
+  assert.deepEqual(modern, {
+    floors: ['any', 'no-four-bit', 'eight-bit-up', 'full-width'],
+    default: { floor: 'eight-bit-up', includeUnknown: false },
+  })
+
+  // A missing boolean takes the floor's own default, which is what the relay stores.
+  assert.equal(normalizePrecisionTable({ default: { floor: 'no-four-bit' } }).default.includeUnknown, true)
+  assert.equal(normalizePrecisionTable({ default: { floor: 'full-width' } }).default.includeUnknown, false)
+  assert.equal(normalizePrecisionTable({ default: { floor: 'any' } }).default.includeUnknown, false)
+
+  // A misspelled default reads as `any` rather than blanking the picker, and stays
+  // selectable even when the Host's own list did not name it.
+  const stray = normalizePrecisionTable({ default: { floor: 'turbo' }, floors: ['full-width'] })
+  assert.equal(stray.default.floor, 'any')
+  assert.deepEqual(stray.floors, ['any', 'full-width'])
+
+  // Junk in the list falls back to the shipped four, and a repeated id appears once.
+  assert.deepEqual(normalizePrecisionTable({ floors: [1, 'nope'] }).floors, precisionFloors.slice())
+  assert.deepEqual(
+    normalizePrecisionTable({ floors: ['full-width', 'full-width', 'any'] }).floors,
+    ['full-width', 'any'],
+  )
+})
+
+test('the settings page sets the floor new sessions inherit, not just one session', async () => {
+  /* The profile route is the whole point of the control: a chip-shaped `POST /precision`
+     would set the floor for one conversation and leave every new Session on `any`, which
+     is the bug this setting exists to stop repeating by hand. */
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /CONTROL_PREFIX \+ '\/precision\/default'/)
+  assert.match(source, /precision: normalizePrecisionTable\(payload\.precision\)/)
+  assert.match(source, /providers\.defaultPrecisionCaption/)
+  assert.match(source, /runDefaultPrecision/)
+})
+
+test('the precision-default rows execute for a floor other than any', () => {
+  /* The regression this pins: the wire-levels line named `precisionWireLevels` — the
+     `__test` export key — instead of the module constant. Nothing executed the row, so CI
+     stayed green until the first successful save of a real floor re-read `/targets`, at
+     which point PageBoundary replaced the whole page with its error card. */
+  const table = {
+    floors: [...precisionFloors],
+    default: { floor: 'eight-bit-up', includeUnknown: false },
+  }
+  const calls = []
+  const controls = precisionDefaultControls(en, {
+    table: table,
+    busy: false,
+    onChange: (choice) => calls.push(choice),
+  })
+  assert.ok(controls !== null, 'a Host that carries the table gets both rows')
+  assert.ok(
+    elementText(controls.choice).includes(en('providers.defaultPrecisionCaption')),
+    'the row names the preference',
+  )
+  assert.ok(
+    elementText(controls.choice).includes(
+      en('precision.wireLevels', { levels: precisionWireLevels['eight-bit-up'].join(', ') }),
+    ),
+    'the selected floor states what it admits',
+  )
+
+  /* The picker is the `TierSelect` element, not a raw `<select>`: the tag is built inside
+     that component when React renders it, which this stub deliberately does not do. Its props
+     are the row's contract either way. */
+  const select = findElementWhere(
+    controls.choice,
+    (element) =>
+      Array.isArray(element.props.options) &&
+      element.props.ariaLabel === en('providers.defaultPrecisionAria'),
+  )
+  assert.deepEqual(select.props.options.map((option) => option.value), [...precisionFloors])
+  assert.equal(select.props.disabled, false)
+  /* Picking a floor carries that floor's own unknown default, exactly like the chip's POST. */
+  select.props.onChange('full-width')
+  assert.deepEqual(calls.shift(), { floor: 'full-width', includeUnknown: false })
+
+  const box = findElement(controls.unknown, 'input')
+  assert.equal(box.props.type, 'checkbox')
+  assert.equal(box.props.checked, false, 'the stored includeUnknown is what the box shows')
+  assert.equal(box.props.disabled, false)
+  box.props.onChange({ target: { checked: true } })
+  assert.deepEqual(calls.shift(), { floor: 'eight-bit-up', includeUnknown: true })
+
+  /* `any` sends no list: the box has nothing to append to, so it is off and disabled. */
+  const anyControls = precisionDefaultControls(en, {
+    table: Object.assign({}, table, { default: { floor: 'any', includeUnknown: true } }),
+    busy: false,
+    onChange: () => {},
+  })
+  assert.ok(elementText(anyControls.choice).includes(en('precision.row.any.hint')))
+  const anyBox = findElement(anyControls.unknown, 'input')
+  assert.equal(anyBox.props.checked, false)
+  assert.equal(anyBox.props.disabled, true)
+
+  /* A write in flight locks both rows; a Host without the table gets no rows at all. */
+  const busyControls = precisionDefaultControls(en, { table: table, busy: true, onChange: () => {} })
+  assert.equal(
+    findElementWhere(
+      busyControls.choice,
+      (element) =>
+        Array.isArray(element.props.options) &&
+        element.props.ariaLabel === en('providers.defaultPrecisionAria'),
+    ).props.disabled,
+    true,
+  )
+  assert.equal(findElement(busyControls.unknown, 'input').props.disabled, true)
+  assert.equal(precisionDefaultControls(en, null), null)
+  assert.equal(precisionDefaultControls(en, { table: null, busy: false }), null)
 })
 
 test('the chip reads both answer shapes', () => {
@@ -461,7 +630,9 @@ test('the two drilled panes are two distinct lists', () => {
     presetLabel: (id) => en('preset.' + id),
     profileDefault: 'standard',
     chosenPreset: 'cheapest',
-    precisionFloor: 'eight-bit-up',
+    chosenPrecision: 'eight-bit-up',
+    profileDefaultFloor: 'no-four-bit',
+    precisionFloors: [...precisionFloors],
   }
   const tier = chipFacetRows(en, 'tier', view)
   const precision = chipFacetRows(en, 'precision', view)
@@ -473,8 +644,12 @@ test('the two drilled panes are two distinct lists', () => {
   assert.deepEqual(tier.filter((row) => row.selected).map((row) => row.value), ['cheapest'])
   assert.equal(tier[1].hint, '', 'a preset row stays one line')
 
-  assert.deepEqual(precision.map((row) => row.value), [...precisionFloors])
-  assert.deepEqual(precision.map((row) => row.label), [
+  assert.equal(precision.length, precisionFloors.length + 1, 'inherit, then every floor')
+  assert.equal(precision[0].value, '', 'the inherit row is the empty value the clear expects')
+  assert.equal(precision[0].label, 'Profile default (No four-bit)')
+  assert.equal(precision[0].hint, '', 'the inherit row stays one line, like Tier\u2019s')
+  assert.deepEqual(precision.slice(1).map((row) => row.value), [...precisionFloors])
+  assert.deepEqual(precision.slice(1).map((row) => row.label), [
     'Any',
     'No four-bit',
     'Eight-bit up',
@@ -484,14 +659,20 @@ test('the two drilled panes are two distinct lists', () => {
     'eight-bit-up',
   ])
   /* Every row names what it admits, from the relay's own wire vocabulary. */
-  assert.equal(precision[0].hint, 'No filter: every endpoint stays eligible.')
+  assert.equal(precision[1].hint, 'No filter: every endpoint stays eligible.')
   assert.equal(
-    precision[1].hint,
+    precision[2].hint,
     'Admits ' + precisionWireLevels['no-four-bit'].join(', '),
     'fp6 is 4-bit-adjacent but above it: the no-four-bit floor admits it',
   )
-  assert.equal(precision[2].hint, 'Admits ' + precisionWireLevels['eight-bit-up'].join(', '))
-  assert.equal(precision[3].hint, 'Admits ' + precisionWireLevels['full-width'].join(', '))
+  assert.equal(precision[3].hint, 'Admits ' + precisionWireLevels['eight-bit-up'].join(', '))
+  assert.equal(precision[4].hint, 'Admits ' + precisionWireLevels['full-width'].join(', '))
+
+  /* A Session that has chosen nothing ticks the inherit row, not a floor: `Any` there is a
+     real choice that survives this Session, not the absence of one. */
+  const inherited = chipFacetRows(en, 'precision', Object.assign({}, view, { chosenPrecision: '' }))
+  assert.deepEqual(inherited.filter((row) => row.selected).map((row) => row.value), [''])
+  assert.equal(inherited[0].label, 'Profile default (No four-bit)')
   /* Each floor is a strictly narrower list than the one before it. */
   assert.ok(precisionWireLevels['full-width'].length < precisionWireLevels['eight-bit-up'].length)
   assert.ok(precisionWireLevels['eight-bit-up'].length < precisionWireLevels['no-four-bit'].length)
@@ -504,7 +685,7 @@ test('the two drilled panes are two distinct lists', () => {
   )
   /* The Chinese chip renders Chinese facet and row copy, not English. */
   assert.equal(zh('chip.facet.precision'), '精度')
-  assert.equal(chipFacetRows(zh, 'precision', view)[1].label, '不含四位')
+  assert.equal(chipFacetRows(zh, 'precision', view)[2].label, '不含四位')
 })
 
 test('the precision POST names the floor and that floor\u2019s own unknown default', () => {
@@ -537,6 +718,10 @@ test('the precision POST names the floor and that floor\u2019s own unknown defau
   assert.equal(precisionPostBody('s', 'full-width').precision.includeUnknown, false)
   assert.equal(precisionPostBody('sess-1', 'nonsense').precision.floor, 'any')
   assert.equal(Object.prototype.hasOwnProperty.call(precisionPostBody('s', 'any').precision, 'allow'), false)
+
+  /* Handing the Session back is not a fifth floor: the wire says `null`, and the Host forgets
+     the choice instead of storing `any` as an explicit preference. */
+  assert.deepEqual(precisionClearBody('sess-1'), { session: 'sess-1', precision: null })
 })
 
 test('a failed precision fetch leaves the chip exactly as it shipped', () => {
@@ -562,7 +747,27 @@ test('a failed precision fetch leaves the chip exactly as it shipped', () => {
     allow: ['int8', 'fp8'],
     inherited: true,
     source: 'session',
+    /* The inherit row needs the profile floor and the list before any write: the Host
+       answers both on every read, and a relay that named no default falls back to `any`. */
+    default: { floor: 'any', includeUnknown: false },
+    floors: [...precisionFloors],
   })
+
+  const withDefaults = normalizePrecisionState({
+    precision: { floor: 'eight-bit-up', includeUnknown: true },
+    inherited: true,
+    default: { floor: 'full-width', includeUnknown: false },
+    floors: ['full-width', 'eight-bit-up'],
+  })
+  assert.deepEqual(withDefaults.default, { floor: 'full-width', includeUnknown: false })
+  assert.deepEqual(withDefaults.floors, ['full-width', 'eight-bit-up'])
+  /* A default the Host did not list still has to be selectable in the inherit row. */
+  const strayFloors = normalizePrecisionState({
+    precision: { floor: 'any' },
+    default: { floor: 'eight-bit-up' },
+    floors: ['full-width'],
+  })
+  assert.deepEqual(strayFloors.floors, ['eight-bit-up', 'full-width'])
   /* A relay that reports the floor without the switch still gets the documented default. */
   assert.equal(normalizePrecisionState({ precision: { floor: 'full-width' } }).includeUnknown, false)
   assert.equal(normalizePrecisionState({ precision: { floor: 'no-four-bit' } }).includeUnknown, true)

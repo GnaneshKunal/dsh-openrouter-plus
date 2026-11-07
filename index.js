@@ -2177,6 +2177,11 @@ export function apply(ctx, rawConfig) {
         // The preset is a Session-level runtime choice, so the page only needs to know
         // what new Sessions inherit and which presets a Session may pick.
         tier: { default: defaultPreset(), presets: PRESET_IDS },
+        // The precision floor is the same kind of preference as the preset above: the page
+        // sets the one an unchosen Session inherits, while the chip chooses for one Session.
+        // Sending it with the tier table is what lets both controls be read — and written
+        // back — from the same answer, instead of a second request for one preference.
+        precision: { default: defaultPrecision(), floors: PRECISION_IDS },
         // What a repair would fill: `false` = never, `null` = only from evidence
         // already declared elsewhere in the profile, object = the fallback map.
         reasoning: {

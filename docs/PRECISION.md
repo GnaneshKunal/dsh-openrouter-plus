@@ -45,6 +45,14 @@ the pool for people who never asked for that.
 `full-width` defaults it **off**: a floor that says "full width" and then admits endpoints whose
 precision nobody declared is not a floor.
 
+That switch is also what the settings page sets for the profile. **Precision floor for new sessions**
+picks the floor an unchosen Session inherits and carries `includeUnknown` as a checkbox beside it.
+It is neither a preset nor a Session choice: a Session that picks a floor in the composer overrides
+the profile for that Session (like every runtime choice, until the Host restarts; saving the profile
+default is a config write that reloads the plugin, so it clears those per-Session choices too), and
+the pane's **Profile default** row hands it back. Without this preference every new conversation
+started on `any` — the behaviour the floor otherwise only changed after a manual pick in each one.
+
 ## Why the filter is not always sent
 
 Excluding every eligible provider is a hard failure upstream, not a silent fallback: the request
@@ -103,5 +111,13 @@ POST /__openrouter-plus/precision/default  { precision: { floor, includeUnknown 
 `allow` is the materialised wire list — `null` for `any`, which is what makes "sends nothing" a
 value rather than an absence. `inherited` distinguishes a Session that chose this floor from one
 that is simply reading the profile default; the chip renders the same badge either way.
+
+The profile default is served with the preset table on `GET /__openrouter-plus/targets` instead of
+being read on its own, so the settings page draws both preferences from the answer it already loads:
+
+```
+GET /__openrouter-plus/targets
+     -> { ..., tier: { default, presets }, precision: { default: { floor, includeUnknown, allow }, floors } }
+```
 
 [exacto]: https://openrouter.ai/docs/guides/routing/auto-exacto

@@ -121,7 +121,8 @@
           sort: default
 
         # The precision floor every Session inherits until it picks its own in the
-        # composer chip. `any` sends nothing at all, so this default is byte-identical
+        # composer chip. Written by **Precision floor for new sessions** on the
+        # settings page. `any` sends nothing at all, so this default is byte-identical
         # to a profile that predates the feature. The other three name a pool
         # constraint: no-four-bit, eight-bit-up or full-width — see docs/PRECISION.md.
         # The relay only attaches the filter after confirming that at least one

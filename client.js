@@ -160,8 +160,19 @@ window.__ModuleLoader__.load({
       'full-width': false,
     });
 
-    /** What the chip badges while the Host has not (yet) told it a floor. */
-    const DEFAULT_PRECISION_CHOICE = Object.freeze({ floor: 'any', includeUnknown: false });
+    /**
+     * What the chip badges while the Host has not (yet) told it a floor. The profile default
+     * travels with it because the chip lists that default as a row: a Session can hand its
+     * floor back, and the row has to name what it would inherit before the first answer.
+     */
+    const DEFAULT_PRECISION_CHOICE = Object.freeze({
+      floor: 'any',
+      includeUnknown: false,
+      default: Object.freeze({ floor: 'any', includeUnknown: false }),
+      floors: PRECISION_FLOORS,
+      inherited: true,
+      source: 'default',
+    });
 
     /**
      * The upstream tiers an endpoint row may declare. The words are the preset table's own
@@ -397,6 +408,13 @@ window.__ModuleLoader__.load({
       'providers.defaultTierAria': 'Preset for new sessions',
       'providers.presetCaption': 'What each preset sends',
       'providers.noticeDefaultTier': 'Saved the preset for new sessions.',
+      'providers.defaultPrecisionCaption': 'Precision floor for new sessions',
+      'providers.defaultPrecisionHint': 'A session inherits this until it picks its own floor in the composer.',
+      'providers.defaultPrecisionAria': 'Precision floor for new sessions',
+      'providers.defaultPrecisionUnknown': 'Admit endpoints with unknown precision',
+      'providers.defaultPrecisionUnknownHint':
+        'Endpoints that declare no precision stay eligible only while this is on. It has nothing to filter when the floor is Any.',
+      'providers.noticeDefaultPrecision': 'Saved the precision floor for new sessions.',
       'providers.routeMeta': '{source} · {tier} · {count} models',
       'providers.routeBase': 'Base URL: {url}',
       'providers.remove': 'Remove',
@@ -482,6 +500,7 @@ window.__ModuleLoader__.load({
       'precision.wireLevels': 'Admits {levels}',
       'precision.unknownAdmitted': 'Unknown precision is admitted',
       'precision.listAria': 'Precision floor for {name}',
+      'precision.inherit': 'Profile default ({floor})',
       /* Bit-width shorthand for the collapsed badge; `any` has none and is not looked up. */
       'precision.short.no-four-bit': '\u22656-bit',
       'precision.short.eight-bit-up': '\u22658-bit',
@@ -703,6 +722,12 @@ window.__ModuleLoader__.load({
       'providers.defaultTierAria': '新会话的预设',
       'providers.presetCaption': '各预设实际发送什么',
       'providers.noticeDefaultTier': '已保存新会话的预设。',
+      'providers.defaultPrecisionCaption': '新会话的精度下限',
+      'providers.defaultPrecisionHint': '会话会继承该设置，直到在输入框中选定自己的精度下限。',
+      'providers.defaultPrecisionAria': '新会话的精度下限',
+      'providers.defaultPrecisionUnknown': '允许未声明精度的端点',
+      'providers.defaultPrecisionUnknownHint': '未声明精度的端点仅在此项开启时保留；下限为“不限”时此项不起作用。',
+      'providers.noticeDefaultPrecision': '已保存新会话的精度下限。',
       'providers.routeMeta': '{source} · {tier} · {count} 个模型',
       'providers.routeBase': '基址：{url}',
       'providers.remove': '移除',
@@ -787,6 +812,7 @@ window.__ModuleLoader__.load({
       'precision.wireLevels': '可用精度：{levels}',
       'precision.unknownAdmitted': '未声明精度的端点同样可用',
       'precision.listAria': '{name} 的精度下限',
+      'precision.inherit': '配置默认值（{floor}）',
       /* 收起时徽标里的位宽简写，两种语言都保持技术缩写。 */
       'precision.short.no-four-bit': '\u22656位',
       'precision.short.eight-bit-up': '\u22658位',
@@ -1242,23 +1268,43 @@ window.__ModuleLoader__.load({
       return levels.length === 0 ? null : levels;
     }
 
+    /** The floors a picker may offer: the Host's list, filtered to the vocabulary, or the shipped four. */
+    function precisionFloorList(value) {
+      const advertised = Array.isArray(value) ? value : [];
+      const floors = [];
+      for (const id of advertised) {
+        if (typeof id === 'string' && PRECISION_FLOORS.includes(id) && floors.indexOf(id) === -1) {
+          floors.push(id);
+        }
+      }
+      return floors.length > 0 ? floors : PRECISION_FLOORS.slice();
+    }
+
     /**
      * `/precision` bodies, normalised: `floor` is the current choice, `includeUnknown`
      * whether endpoints that declare nothing stay eligible, `allow` the wire list the relay
-     * would send (`null` on `any`). Null means the Host answered something that is not this
-     * API, and the chip then keeps the badge it shipped with instead of breaking.
+     * would send (`null` on `any`). `default` and `floors` are what the pane's inherit row
+     * needs — without them a Session could take the profile floor but never give it back.
+     * Null means the Host answered something that is not this API, and the chip then keeps
+     * the badge it shipped with instead of breaking.
      */
     function normalizePrecisionState(payload) {
       if (!isPlainObject(payload)) return null;
       if (payload.ok === false) return null;
       if (!isPlainObject(payload.precision)) return null;
       const choice = normalizePrecisionChoice(payload.precision);
+      const fallback = isPlainObject(payload.default)
+        ? normalizePrecisionChoice(payload.default)
+        : DEFAULT_PRECISION_CHOICE.default;
+      const floors = precisionFloorList(payload.floors);
       return {
         floor: choice.floor,
         includeUnknown: choice.includeUnknown,
         allow: normalizePrecisionAllow(payload.precision.allow),
         inherited: payload.inherited === true,
         source: payload.source === 'session' ? 'session' : 'default',
+        default: fallback,
+        floors: floors.includes(fallback.floor) ? floors : [fallback.floor].concat(floors),
       };
     }
 
@@ -1273,6 +1319,15 @@ window.__ModuleLoader__.load({
         session: sessionId,
         precision: { floor: known, includeUnknown: precisionIncludeUnknownDefault(known) },
       };
+    }
+
+    /**
+     * The POST body that stops choosing for a Session: `precision: null` hands it back to the
+     * profile default. A sibling of {@link precisionPostBody}, because "inherit" is not a
+     * fifth floor — it is the absence of one, and the wire says so with `null`.
+     */
+    function precisionClearBody(sessionId) {
+      return { session: sessionId, precision: null };
     }
 
     /** The collapsed badge's second half; empty for `any`, which keeps the chip as released. */
@@ -1914,18 +1969,35 @@ window.__ModuleLoader__.load({
     function chipFacetRows(t, facet, view) {
       if (facet === 'provider') return providerFacetRows(t, view);
       if (facet === 'precision') {
-        return PRECISION_FLOORS.map((floor) => ({
-          value: floor,
-          key: floor,
-          label: t('precision.row.' + floor),
-          hint:
-            floor === 'any'
-              ? t('precision.row.any.hint')
-              : t('precision.wireLevels', {
-                  levels: PRECISION_WIRE_LEVELS[floor].join(', '),
-                }),
-          selected: floor === view.precisionFloor,
-        }));
+        /* The inherit row mirrors Tier's: it stops choosing for this Session and names the
+           floor it would take from the profile. Without it a Session that once picked a floor
+           could never hand itself back — which was invisible while the profile default was
+           always `any` and `Any` meant the same thing. */
+        const chosen = stringValue(view.chosenPrecision).trim();
+        const profileFloor = precisionFloorOf(view.profileDefaultFloor);
+        const floors = Array.isArray(view.precisionFloors) ? view.precisionFloors : PRECISION_FLOORS;
+        return [
+          {
+            value: '',
+            key: 'inherit',
+            label: t('precision.inherit', { floor: t('precision.row.' + profileFloor) }),
+            hint: '',
+            selected: chosen === '',
+          },
+        ].concat(
+          floors.map((floor) => ({
+            value: floor,
+            key: floor,
+            label: t('precision.row.' + floor),
+            hint:
+              floor === 'any'
+                ? t('precision.row.any.hint')
+                : t('precision.wireLevels', {
+                    levels: PRECISION_WIRE_LEVELS[floor].join(', '),
+                  }),
+            selected: chosen !== '' && floor === chosen,
+          })),
+        );
       }
       return [
         {
@@ -2031,6 +2103,33 @@ window.__ModuleLoader__.load({
       return {
         presets: known,
         default: known.includes(fallback) ? fallback : known[0],
+      };
+    }
+
+    /**
+     * The precision table `/targets` carries: which floors a picker offers, and the one
+     * every unchosen Session inherits. Null means the Host predates the field, so the page
+     * does not offer a control whose write would 404 — the same rule the provider-facts
+     * sort follows.
+     *
+     * The default keeps the floor's own unknown-precision answer when the Host names no
+     * boolean, because that is what the relay's normaliser would store: the page must show
+     * the preference that is actually in force, not a second reading of it.
+     */
+    function normalizePrecisionTable(value) {
+      if (!isPlainObject(value)) return null;
+      const known = precisionFloorList(value.floors);
+      const raw = isPlainObject(value.default) ? value.default : {};
+      const floor = precisionFloorOf(raw.floor);
+      const includeUnknown =
+        typeof raw.includeUnknown === 'boolean'
+          ? raw.includeUnknown
+          : precisionIncludeUnknownDefault(floor);
+      return {
+        /* A default floor the Host did not list still has to be selectable, or the picker
+           would open on a value it cannot name. */
+        floors: known.includes(floor) ? known : [floor].concat(known),
+        default: { floor: floor, includeUnknown: includeUnknown },
       };
     }
 
@@ -2494,6 +2593,9 @@ window.__ModuleLoader__.load({
         custom,
         reasoning,
         tier: { default: tierDefault, tiers: tiers },
+        /* The other profile preference: the floor an unchosen Session inherits. Absent on
+           a Host that predates it, and the page then draws no control for it. */
+        precision: normalizePrecisionTable(payload.precision),
       };
     }
 
@@ -3638,6 +3740,84 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The two settings rows that carry the profile precision floor, or null when the Host
+     * predates the preference. It reads only its arguments and returns elements, which is what
+     * lets the suite execute the row for a floor other than `any` without a browser: the
+     * "wire levels" line is the one a bare identifier once broke in exactly this scope.
+     */
+    function precisionDefaultControls(t, view) {
+      const table = isPlainObject(view) && isPlainObject(view.table) ? view.table : null;
+      if (table === null || !isPlainObject(table.default)) return null;
+      const busy = view.busy === true;
+      const onChange = typeof view.onChange === 'function' ? view.onChange : () => {};
+      const floor = precisionFloorOf(table.default.floor);
+      const includeUnknown =
+        typeof table.default.includeUnknown === 'boolean'
+          ? table.default.includeUnknown
+          : precisionIncludeUnknownDefault(floor);
+      const floors = precisionFloorList(table.floors);
+      const levels =
+        floor === 'any'
+          ? t('precision.row.any.hint')
+          : t('precision.wireLevels', { levels: PRECISION_WIRE_LEVELS[floor].join(', ') });
+      return {
+        choice: h(
+          'div',
+          { key: 'precision-default', style: ROW_STYLE },
+          h(
+            'div',
+            { style: ROW_INFO_STYLE },
+            h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultPrecisionCaption')),
+            h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionHint')),
+            h('span', { style: HINT_STYLE }, levels),
+          ),
+          h(
+            'div',
+            { style: ROW_CONTROL_STYLE },
+            h(TierSelect, {
+              value: floor,
+              options: floors.map((id) => ({
+                value: id,
+                label: t('precision.row.' + id),
+              })),
+              ariaLabel: t('providers.defaultPrecisionAria'),
+              disabled: busy,
+              onChange: (id) =>
+                onChange({
+                  floor: id,
+                  includeUnknown: precisionIncludeUnknownDefault(id),
+                }),
+            }),
+          ),
+        ),
+        unknown: h(
+          'div',
+          { key: 'precision-unknown', style: ROW_STYLE },
+          h(
+            'div',
+            { style: ROW_INFO_STYLE },
+            h(
+              'label',
+              { style: USAGE_TOGGLE_STYLE },
+              h('input', {
+                type: 'checkbox',
+                checked: floor === 'any' ? false : includeUnknown,
+                disabled: busy || floor === 'any',
+                onChange: (event) =>
+                  onChange({ floor: floor, includeUnknown: event.target.checked }),
+              }),
+              h('span', null, t('providers.defaultPrecisionUnknown')),
+            ),
+            h('span', { style: HINT_STYLE }, t('providers.defaultPrecisionUnknownHint')),
+          ),
+          h('div', { style: ROW_CONTROL_STYLE }),
+        ),
+      };
+    }
+
+
+
+    /**
      * Which page chrome this seat draws.
      *
      * The same body answers two seats, and the frames around them are not the same height.
@@ -4256,12 +4436,12 @@ window.__ModuleLoader__.load({
       /* The tier every unchosen Session inherits. One profile-level preference, so it
          writes the plugin row (unlike a Session's choice, which is runtime state). */
       /*
-       * Read back the profile default from the relay. It is a config write, so the Loader
+       * Read back the profile defaults from the relay. Both are config writes, so the Loader
        * re-applies this plugin's row and the POST's own response can be cut mid-rebind.
        * The answer that matters is in `/targets`, read again with small gaps because the
        * listener may still be coming back up.
        */
-      const readDefaultTier = async (controller) => {
+      const readTargetsAfterWrite = async (controller) => {
         for (let attempt = 0; attempt < RECONCILE_DELAYS_MS.length; attempt += 1) {
           await sleepUntil(RECONCILE_DELAYS_MS[attempt], controller === undefined ? null : controller.signal);
           if (!mountedRef.current) return null;
@@ -4331,7 +4511,7 @@ window.__ModuleLoader__.load({
             failure = errorMessage(t, error);
           }
 
-          const fresh = await readDefaultTier(controller);
+          const fresh = await readTargetsAfterWrite(controller);
           if (!mountedRef.current) return;
           if (fresh !== null) {
             const landed = fresh.tier === null ? null : fresh.tier.default;
@@ -4346,6 +4526,84 @@ window.__ModuleLoader__.load({
             return;
           }
           setNotice(t('providers.noticeDefaultTier'));
+          setTargetsKey((key) => key + 1);
+          if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current);
+          noticeTimerRef.current = setTimeout(() => {
+            noticeTimerRef.current = null;
+            if (mountedRef.current) setNotice('');
+          }, NOTICE_MS);
+        })();
+      };
+
+      /*
+       * The precision floor every unchosen Session inherits — the sibling preference to the
+       * preset above, and the same kind of write: one config key, one plugin reload, and the
+       * re-read decides. A floor change carries that floor's own unknown-precision answer, so
+       * moving from `full-width` to `eight-bit-up` does not keep the narrower one; the
+       * checkbox beside the picker overrides it explicitly, and that is the one difference
+       * from the chip, which has a single power switch.
+       */
+      const runDefaultPrecision = (choice) => {
+        if (busy !== null || busyRef.current !== null) return;
+        const wanted = normalizePrecisionChoice(choice);
+        const controller = new AbortController();
+        busyRef.current = 'precision-default';
+        actionControllerRef.current = controller;
+        setBusy({ kind: 'precision-default', key: 'precision-default' });
+        setActionError('');
+        setNotice('');
+        (async () => {
+          let failure = '';
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/precision/default', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: JSON.stringify({
+                precision: { floor: wanted.floor, includeUnknown: wanted.includeUnknown },
+              }),
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            if (!response.ok) {
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+          } catch (error) {
+            if (error && error.name === 'AbortError') return;
+            failure = errorMessage(t, error);
+          }
+
+          const fresh = await readTargetsAfterWrite(controller);
+          if (!mountedRef.current) return;
+          if (fresh !== null) {
+            const landed = fresh.precision === null ? null : fresh.precision.default;
+            setTargets({ status: 'ready', data: fresh, error: '' });
+            if (
+              landed !== null &&
+              landed.floor === wanted.floor &&
+              landed.includeUnknown === wanted.includeUnknown
+            ) {
+              failure = '';
+            }
+          }
+          busyRef.current = null;
+          setBusy(null);
+          if (actionControllerRef.current === controller) actionControllerRef.current = null;
+          if (failure !== '') {
+            setActionError(t('providers.actionFailed', { message: failure }));
+            return;
+          }
+          setNotice(t('providers.noticeDefaultPrecision'));
           setTargetsKey((key) => key + 1);
           if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current);
           noticeTimerRef.current = setTimeout(() => {
@@ -5040,6 +5298,16 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null;
+        /* The floor an unchosen Session inherits, beside the preset for the same reason:
+           both are profile preferences, while the composer chip chooses for one Session. The
+           rows live in one builder (see `precisionDefaultControls`) so the suite can execute
+           them for a floor other than `any` — a Host that predates the field answers no table
+           and the rows are then not drawn at all, rather than offering a 404ing write. */
+        const precisionControls = precisionDefaultControls(t, {
+          table: targetsData.precision,
+          busy: busy !== null,
+          onChange: runDefaultPrecision,
+        });
         /* What each preset actually sends, written once where it can be read calmly. The
            composer menu deliberately carries labels only: a picker that explains itself in
            nine paragraphs is not a picker. */
@@ -5068,6 +5336,8 @@ window.__ModuleLoader__.load({
           { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
           h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
           presetChoice,
+          precisionControls === null ? null : precisionControls.choice,
+          precisionControls === null ? null : precisionControls.unknown,
           presetGlossary,
           rows,
           repair,
@@ -6622,10 +6892,21 @@ window.__ModuleLoader__.load({
          so the badge and the ticked row move on the press; the read-back then replaces it,
          or reverts to the confirmed floor when the POST fails. */
       const precisionChoice = precisionState === null ? DEFAULT_PRECISION_CHOICE : precisionState;
-      const shownFloor = pendingPrecision === null ? precisionChoice.floor : pendingPrecision;
+      /* `''` is a pending hand-back to the profile default: the chip then paints that floor,
+         not the one the Session is leaving, and the read-back settles either way. */
+      const shownInherited = pendingPrecision === null
+        ? precisionChoice.inherited === true
+        : pendingPrecision === '';
+      const shownFloor = pendingPrecision === null
+        ? precisionChoice.floor
+        : pendingPrecision === ''
+          ? precisionChoice.default.floor
+          : pendingPrecision;
       const shownUnknown = pendingPrecision === null
         ? precisionChoice.includeUnknown
-        : precisionIncludeUnknownDefault(pendingPrecision);
+        : pendingPrecision === ''
+          ? precisionChoice.default.includeUnknown
+          : precisionIncludeUnknownDefault(pendingPrecision);
       /* The pin the chip displays, read the same optimistic way: a pending write stands in
          for the confirmed one until the read-back settles it, and `''` is a pending clear.
          A pin owns the tier and the floor, so these two lines decide all three cells. */
@@ -6667,7 +6948,11 @@ window.__ModuleLoader__.load({
             presetLabel: presetLabel,
             profileDefault: profileDefault,
             chosenPreset: chosenPreset,
-            precisionFloor: shownFloor,
+            /* The pane ticks the inherit row when the Session has chosen nothing, and the
+               floor row only when that floor is the Session's own choice. */
+            chosenPrecision: shownInherited ? '' : shownFloor,
+            profileDefaultFloor: precisionChoice.default.floor,
+            precisionFloors: precisionChoice.floors,
             providerList: providerList,
             providerFacts: providerFacts,
             pinnedTag: pinnedTag,
@@ -6728,7 +7013,10 @@ window.__ModuleLoader__.load({
       /* The body names both halves of the floor; the wire list is materialised by the relay
          on read, so the client never sends `allow` and never derives it itself. */
       const postPrecision = async (floor) => {
-        const payload = await postControl('/precision', precisionPostBody(sessionId, floor));
+        /* `''` is the clear: the Host forgets this Session's floor and it inherits again.
+           `null` is the documented "hand back" body, not a missing field. */
+        const body = floor === '' ? precisionClearBody(sessionId) : precisionPostBody(sessionId, floor);
+        const payload = await postControl('/precision', body);
         const next = normalizePrecisionState(payload);
         if (next === null) throw new Error(t('strip.stalled'));
         return next;
@@ -6779,8 +7067,10 @@ window.__ModuleLoader__.load({
 
       const switchPrecision = async (floor) => {
         if (busy) return;
-        const target = precisionFloorOf(floor);
-        if (target === precisionChoice.floor) {
+        const inherit = floor === '';
+        const target = inherit ? '' : precisionFloorOf(floor);
+        const alreadyInherited = precisionChoice.inherited === true;
+        if (inherit ? alreadyInherited : !alreadyInherited && target === precisionChoice.floor) {
           setError('');
           return;
         }
@@ -8000,6 +8290,12 @@ window.__ModuleLoader__.load({
          the DOM, and the loader ignores extra fields on a module object. */
       __test: {
         normalizePresetTable,
+        /* The other profile default, read from the same `/targets` answer: null when the
+           Host predates it, which is the page's gate on offering the control at all. */
+        normalizePrecisionTable,
+        /* The settings rows the profile floor is drawn from, returned as elements so a
+           non-`any` default is executed by the suite rather than only grepped for. */
+        precisionDefaultControls,
         normalizePresetState,
         normalizeMounts,
         pinnedMounts,
@@ -8017,6 +8313,7 @@ window.__ModuleLoader__.load({
         normalizePrecisionChoice,
         precisionFloorOf,
         precisionPostBody,
+        precisionClearBody,
         precisionShortLabel,
         /* The provider facet's readers: a Host that predates the route answers the same
            empty list a Host with nothing to list does, so the readers are the difference
