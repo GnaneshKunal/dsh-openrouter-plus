@@ -13,6 +13,11 @@ The floor was a Session choice in the composer chip, and the profile key behind 
 same choice had to be made again. Settings → OpenRouter Plus now sets it beside the preset for new
 sessions, while the chip keeps choosing for one Session.
 
+### Changed
+
+- The existing new-session preset setting is labelled **Service tier preset for new sessions** so
+  its purpose is easier to find. Composer choices remain session-specific.
+
 ### Added
 
 - **Precision floor for new sessions** — a picker in Settings → OpenRouter Plus with the four
