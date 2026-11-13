@@ -246,6 +246,21 @@ test('the default precision table is offered only when the Host carries it', () 
   )
 })
 
+test('the settings page offers a profile tier default for new sessions', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  // The settings picker must write the profile preference, not the Session-only route.
+  assert.match(source, /CONTROL_PREFIX \+ '\/tier\/default'/)
+  assert.match(source, /body: JSON\.stringify\(\{ preset: preset \}\)/)
+  assert.match(source, /const presetTable = normalizePresetTable\(targetsData\.tier\)/)
+  assert.match(source, /onChange: runDefaultPreset/)
+  assert.match(source, /providers\.defaultTierCaption/)
+  assert.match(source, /providers\.defaultTierHint/)
+  assert.match(source, /providers\.defaultTierAria/)
+  assert.match(en('providers.defaultTierCaption'), /new sessions/i)
+  assert.match(en('providers.defaultTierHint'), /composer/i)
+})
+
 test('the settings page sets the floor new sessions inherit, not just one session', async () => {
   /* The profile route is the whole point of the control: a chip-shaped `POST /precision`
      would set the floor for one conversation and leave every new Session on `any`, which

@@ -853,6 +853,75 @@ test('switching a Session tier writes no config; only the default is persisted',
   await dispose()
 })
 
+test('a saved tier default survives reload and routes new Sessions without overriding their choices', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+  const bodies = []
+  const upstream = http.createServer(async (req, res) => {
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => {
+    upstream.closeAllConnections?.()
+    upstream.close(() => resolve(undefined))
+  }))
+
+  const editor = createFakeEditor([ownRow({
+    host: '127.0.0.1', port, portFallback: false,
+    upstream: `http://127.0.0.1:${upstreamPort}/v1`,
+  })])
+  const first = createFakeContext({ configEditor: editor })
+  let firstStopped = false
+  t.after(async () => { if (!firstStopped) await first.dispose() })
+  apply(first.ctx, editor.rows[0].entry.options.config)
+  const origin = `http://127.0.0.1:${port}`
+  const ready = () => waitFor(async () => {
+    try { return (await fetch(`${origin}/__openrouter-plus/health`)).ok } catch { return false }
+  })
+  await ready()
+  assert.equal((await postJson(`${origin}/__openrouter-plus/tier`, { session: 'old', preset: 'flex' })).status, 200)
+  const saved = await postJson(`${origin}/__openrouter-plus/tier/default`, { preset: 'priority' })
+  assert.equal(saved.status, 200)
+  assert.equal((await saved.json()).default, 'priority')
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].entry, editor.rows[0].entry)
+  assert.equal(editor.rows[0].entry.options.config.defaultPreset, 'priority')
+  await first.dispose()
+  firstStopped = true
+
+  // Re-apply the exact row written by the editor, as the loader does on reload.
+  const reloaded = createFakeContext({ configEditor: editor })
+  t.after(reloaded.dispose)
+  apply(reloaded.ctx, editor.rows[0].entry.options.config)
+  await ready()
+  const tier = async (session) => (await fetch(`${origin}/__openrouter-plus/tier?session=${session}`)).json()
+  const fresh = await tier('new')
+  assert.equal(fresh.default, 'priority')
+  assert.equal(fresh.preset, 'priority')
+  assert.equal(fresh.chosen, null)
+  assert.deepEqual(fresh.wire, { serviceTier: 'priority', sort: null, variant: null })
+  assert.equal((await tier('old')).chosen, null, 'per-Session choices do not survive reload')
+  assert.equal((await (await fetch(`${origin}/__openrouter-plus/targets`)).json()).tier.default, 'priority')
+
+  const chat = (session) => fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': session },
+    body: JSON.stringify({ model: 'example/model', messages: [] }),
+  })
+  assert.equal((await chat('new')).status, 200)
+  assert.equal(bodies[0].service_tier, 'priority')
+  assert.equal((await postJson(`${origin}/__openrouter-plus/tier`, { session: 'chosen', preset: 'flex' })).status, 200)
+  assert.equal((await chat('chosen')).status, 200)
+  assert.equal(bodies[1].service_tier, 'flex')
+  assert.equal((await chat('another-new')).status, 200)
+  assert.equal(bodies[2].service_tier, 'priority')
+  assert.equal((await tier('chosen')).chosen, 'flex')
+  assert.equal((await tier('another-new')).chosen, null)
+  assert.equal(editor.writes.length, 1, 'Session overrides do not write the profile')
+})
+
 test('lists live models and adds only the ones the caller picks', async (t) => {
   const port = await freePort()
   const upstreamPort = await freePort()

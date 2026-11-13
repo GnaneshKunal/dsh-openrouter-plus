@@ -235,9 +235,10 @@ tag, which is how most of the community ships.
 Nothing else to create, and nothing to clean up: the provider row is the only row that ever existed,
 and the preset is a per-Session choice rather than a provider.
 
-The settings page manages the profile-level **Preset for new sessions** and **Precision floor for
-new sessions** — with a short table of what each preset sends — and lists the routes that currently
-point at this relay (with **Remove** for the ones you no longer want).
+In **Settings → OpenRouter Plus**, choose **Service tier preset for new sessions** and
+**Precision floor for new sessions**. Both persist across restarts and apply to Sessions that have
+not chosen their own values in the composer. The page explains each preset and lists the routes that
+currently point at this relay (with **Remove** for the ones you no longer want).
 
 ### From a provider row (the switch)
 
@@ -619,7 +620,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `generationLookup` | `true` | reconcile a response that did not name its provider or its bill against OpenRouter's generation record — one authenticated GET per affected request, after the response has been sent. `false` disables it |
 | `reasoningEfforts` | `false`-able map | levels written onto relay routes' models; `false` disables, omit for evidence-only |
 | `autoRepairReasoning` | boolean, default `true` | re-apply that fill whenever the profile changes, so editing a route's models cannot silently strip the effort selector |
-| `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Preset for new sessions** on the settings page |
+| `defaultPreset` | `none` | the preset an unchosen Session inherits; `none` pins nothing. A tier-era `defaultTier` is read forward onto the equivalent preset. Written by **Service tier preset for new sessions** on the settings page |
 | `precisionFloor` | `any` | the precision floor an unchosen Session inherits: a bare floor id (`any`, `no-four-bit`, `eight-bit-up`, `full-width`) or `{ floor, includeUnknown }`. `includeUnknown` says whether endpoints that declare no precision stay eligible; it follows the floor's own answer when omitted (on for the two middle floors, off for `full-width` and `any`). Written by **Precision floor for new sessions** on the settings page; a Session's own composer choice overrides it for that Session only |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 | `usageWidget` | `{ enabled: true }` | draw the sidebar spend card. A bare `false` is accepted; hiding the card hides nothing else — the settings page still shows every number |
@@ -658,7 +659,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | Settings → OpenRouter Plus works on the desktop but not on another machine or a phone | Should not happen any more: the page calls its own origin. If it does, the Host is too old to mount the API on the web server — update it, or reach the loopback copy on the relay port. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
 | Requests work but nothing is steered | The Session is on **No pin** (or the profile default is), the mount is a bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
-| The chip shows a preset, but another Session still bills full price | Every preset is per Session by design. Set it in that Session's composer, or set a profile **Preset for new sessions**. |
+| The chip shows a preset, but another Session still bills full price | Every preset is per Session by design. Set it in that Session's composer, or set a profile **Service tier preset for new sessions**. |
 | New Sessions still start on `Any` precision | The floor is a profile preference: set **Precision floor for new sessions** on the settings page, not in the composer chip — the chip's choice applies to that Session only. A Session that has already chosen keeps its floor until a Host restart (runtime state, like the preset) — and saving this default is itself a plugin reload, so it clears every Session's explicit floor, exactly like saving the preset default. A new Session inherits the profile default. |
 | The chip disappeared after a Host restart | Choices are runtime state and the memory table is dropped on restart (and on a default-preset write, which reloads the plugin). Re-pick it, or set the profile default. |
 | `Flex` still bills full price | The provider decides which endpoint served; a preset only decides which ones may be asked. Confirm the served endpoint with `usage` or the OpenRouter dashboard. |
