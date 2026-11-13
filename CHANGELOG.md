@@ -7,6 +7,8 @@ the config keys can still change.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-13
+
 **The precision floor can be set once for the profile, instead of once per new conversation.**
 The floor was a Session choice in the composer chip, and the profile key behind it
 (`precisionFloor`) could only be edited by hand, so every new Session started on `any` and the
@@ -42,6 +44,12 @@ sessions, while the chip keeps choosing for one Session.
   the new preference would be a one-way door: once a profile default stopped being `any`, picking
   `Any` in the composer would become an explicit Session choice, and there was no way back to
   inheriting short of a Host restart.
+
+### Notes
+
+- The precision floor is not a hard guarantee: requests go unfiltered while a model’s endpoint
+  listing is unavailable or when no listed endpoint satisfies the floor. Bypasses are counted on
+  the settings page. See [Precision](https://github.com/GnaneshKunal/dsh-openrouter-plus/blob/v0.8.0/docs/PRECISION.md) for the admission policy.
 
 ## [0.7.1] — 2026-11-03
 
