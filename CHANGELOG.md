@@ -7,6 +7,8 @@ the config keys can still change.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-14
+
 **Some endpoints only accept requests that name a user, and the relay can now send one.**
 OpenRouter's `user` field is the optional identifier a provider uses to isolate abuse per end user.
 A model whose data policy says *Anonymity: Requires user IDs* needs it: without one, every request

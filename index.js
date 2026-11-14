@@ -124,7 +124,7 @@ const LEGACY_TIER_PRESET = Object.freeze({
 
 /* Kept equal to package.json's version: `/health` reports it and a release commit is the
    one moment this literal and the manifest must agree. */
-const VERSION = '0.8.0'
+const VERSION = '0.9.0'
 
 /**
  * How long a burst of relayed calls is coalesced before the usage snapshot is written.
