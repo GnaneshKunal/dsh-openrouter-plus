@@ -648,6 +648,21 @@ window.__ModuleLoader__.load({
       'usage.toggleHint':
         'A collapsible card at the sidebar foot shows today\'s spend and the models that used it. Turning it on reloads the relay.',
       'usage.toggleFailed': 'Could not change the sidebar card: {message}',
+
+      /* The optional OpenRouter `user` field. Some endpoints carry a data policy that
+         requires a user identity; without one, every request shares the account-level
+         identity upstream, so one blocked end user can block the account. Off by default:
+         it is the one field this plugin sends about the person rather than the request. */
+      'userTracking.caption': 'User tracking',
+      'userTracking.hint':
+        'Some endpoints only serve requests that carry a user identity; OpenRouter folds the value into the hash it sends upstream. Turning this on sends one identifier, for this installation, on every relayed JSON request body.',
+      'userTracking.toggle': 'Send a user identifier with every request',
+      'userTracking.off':
+        'Off: requests carry no identifier, so OpenRouter sees one account-level identity for all of them. A provider block triggered by one request can then affect the whole account.',
+      'userTracking.on':
+        'On: every relayed JSON request body carries {id} — a stable identifier for this installation, holding no account, session, key or machine name.',
+      'userTracking.onPending': 'On: the identifier is being generated, and will ride the next request body.',
+      'userTracking.toggleFailed': 'Could not change user tracking: {message}',
     };
 
     /** Simplified Chinese dictionary, complete against the English key set. */
@@ -936,6 +951,20 @@ window.__ModuleLoader__.load({
       'usage.toggleSettings': '在侧边栏显示费用卡片',
       'usage.toggleHint': '侧边栏底部会显示可折叠的费用卡片，包含今日花费与使用的模型。开启会重新加载中继。',
       'usage.toggleFailed': '无法修改侧边栏卡片：{message}',
+
+      /* 可选的 OpenRouter `user` 字段。部分端点的数据政策要求请求带有用户身份；没有时，
+         所有请求在上游共用一个账户级身份，一个用户被拦截就可能影响整个账户。默认关闭：
+         这是本插件唯一一个关于"人"而不是关于"请求"的字段。 */
+      'userTracking.caption': '用户标识',
+      'userTracking.hint':
+        '部分端点只接受带有用户身份的请求，OpenRouter 会把它并入发往上游的哈希值。开启后，每个经中继的 JSON 请求体都会携带本安装的同一个标识。',
+      'userTracking.toggle': '在每个请求中发送用户标识',
+      'userTracking.off':
+        '关闭：请求不携带标识，OpenRouter 对所有请求只看到一个账户级身份，某次请求触发的提供商封禁可能影响整个账户。',
+      'userTracking.on':
+        '开启：每个经中继的 JSON 请求体都携带 {id}，这是本安装的稳定标识，不含账户、会话、密钥或机器名。',
+      'userTracking.onPending': '开启：标识正在生成，将从下一个请求体开始携带。',
+      'userTracking.toggleFailed': '无法修改用户标识设置：{message}',
     };
 
     /* ------------------------------------------------------------------ helpers */
@@ -2307,6 +2336,14 @@ window.__ModuleLoader__.load({
         usageWidget: {
           available: isPlainObject(payload.usageWidget),
           enabled: isPlainObject(payload.usageWidget) && payload.usageWidget.enabled === true,
+        },
+        /* The optional `user` identifier, read the same way: a Host that predates the
+           preference answers no object at all, and the page then offers no checkbox for a
+           write that would 404. `id` is shown so the operator can see what is sent. */
+        userTracking: {
+          available: isPlainObject(payload.userTracking),
+          enabled: isPlainObject(payload.userTracking) && payload.userTracking.enabled === true,
+          id: isPlainObject(payload.userTracking) ? stringValue(payload.userTracking.id).trim() : '',
         },
         mounts: normalizeMounts(payload.routes, byTier),
         metrics: {
@@ -3961,6 +3998,10 @@ window.__ModuleLoader__.load({
          not appear to bounce while the reload settles. */
       const [widgetPending, setWidgetPending] = React.useState(null);
       const [widgetError, setWidgetError] = React.useState('');
+      /* The user-tracking switch is a config write too, so it holds the same optimistic
+         value and its own error line: the click must not bounce while the plugin reloads. */
+      const [userTrackingPending, setUserTrackingPending] = React.useState(null);
+      const [userTrackingError, setUserTrackingError] = React.useState('');
 
       /* The provider-list vocabulary: what the Host reports, and the edit staged against it.
          Staged rather than one write per click because a config write re-applies the plugin
@@ -3990,6 +4031,7 @@ window.__ModuleLoader__.load({
       const noticeTimerRef = React.useRef(null);
       const copyTimerRef = React.useRef(null);
       const widgetTimerRef = React.useRef(null);
+      const userTrackingTimerRef = React.useRef(null);
       const factsRetryRef = React.useRef(null);
       /* The poll and the facts read are mount-scoped, so both read `t` and the current facts
          through refs and keep their effect dependencies about the data. The page is handed
@@ -4030,6 +4072,10 @@ window.__ModuleLoader__.load({
           if (widgetTimerRef.current !== null) {
             clearTimeout(widgetTimerRef.current);
             widgetTimerRef.current = null;
+          }
+          if (userTrackingTimerRef.current !== null) {
+            clearTimeout(userTrackingTimerRef.current);
+            userTrackingTimerRef.current = null;
           }
           if (factsRetryRef.current !== null) {
             clearTimeout(factsRetryRef.current);
@@ -4138,6 +4184,12 @@ window.__ModuleLoader__.load({
                `WIDGET_SETTLE_MS` stops it from outliving a write that never landed. */
             setWidgetPending((pending) =>
               pending !== null && answer.snapshot.usageWidget.enabled === pending ? null : pending,
+            );
+            /* The same reconciliation for the user-tracking switch: a poll that agrees with the
+               click ends the optimistic value, so the checkbox is the relay's answer rather than
+               a click waiting out its timer. */
+            setUserTrackingPending((pending) =>
+              pending !== null && answer.snapshot.userTracking.enabled === pending ? null : pending,
             );
           } catch (error) {
             if (cancelled) return;
@@ -4678,6 +4730,78 @@ window.__ModuleLoader__.load({
             /* Otherwise the outcome is unknown: the config write may well have landed
                before the connection dropped, so the checkbox keeps the click and the next
                status answer is the truth. Saying "failed" here would be a guess. */
+          } finally {
+            if (mountedRef.current) {
+              busyRef.current = null;
+              setBusy(null);
+            }
+            if (actionControllerRef.current === controller) actionControllerRef.current = null;
+          }
+        })();
+      };
+
+      /*
+       * The user-tracking switch. The same shape as the card's switch above — a config
+       * write that reloads the plugin, so the click is held optimistically and the read-back
+       * decides — because it is the same kind of preference: one boolean, one key, one
+       * reload. Turning it on for the first time also mints the identifier, which is why the
+       * hint under the checkbox prints the value the next poll reports.
+       */
+      const runUserTrackingToggle = (enabled) => {
+        if (busy !== null || busyRef.current !== null) return;
+        const controller = new AbortController();
+        busyRef.current = 'userTracking';
+        actionControllerRef.current = controller;
+        setBusy({ kind: 'userTracking', key: 'userTracking' });
+        setUserTrackingError('');
+        setUserTrackingPending(enabled);
+        /* Bounded like the card's click: if the read-back never agrees — a write that never
+           landed, a relay that stayed down — the next status answer wins over the click. */
+        if (userTrackingTimerRef.current !== null) {
+          clearTimeout(userTrackingTimerRef.current);
+          userTrackingTimerRef.current = null;
+        }
+        userTrackingTimerRef.current = setTimeout(() => {
+          userTrackingTimerRef.current = null;
+          if (mountedRef.current) setUserTrackingPending(null);
+        }, WIDGET_SETTLE_MS);
+        (async () => {
+          let refused = false;
+          try {
+            const response = await fetch(origin + CONTROL_PREFIX + '/user-tracking', {
+              method: 'POST',
+              mode: 'cors',
+              cache: 'no-store',
+              headers: {
+                accept: 'application/json',
+                'content-type': 'application/json',
+                'x-oorp-client': CLIENT_HEADER,
+              },
+              body: JSON.stringify({ enabled: enabled }),
+              signal: controller.signal,
+            });
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            if (!response.ok) {
+              refused = true;
+              throw new Error(payloadErrorMessage(payload) || t('error.http', { status: String(response.status) }));
+            }
+            if (!mountedRef.current) return;
+            /* The write landed; re-read now rather than on the next interval, so the hint
+               can name the identifier that was just generated. */
+            setRefreshKey((key) => key + 1);
+          } catch (error) {
+            if (!mountedRef.current) return;
+            if (refused) {
+              setUserTrackingPending(null);
+              setUserTrackingError(t('userTracking.toggleFailed', { message: errorMessage(t, error) }));
+            }
+            /* Otherwise the outcome is unknown: the write may have landed before the reload
+               cut the answer, so the click stands and the next poll is the truth. */
           } finally {
             if (mountedRef.current) {
               busyRef.current = null;
@@ -5511,6 +5635,53 @@ window.__ModuleLoader__.load({
         );
       };
 
+      /*
+       * The optional OpenRouter `user` field.
+       *
+       * Its own section because it is neither a routing decision nor a display preference:
+       * it decides what a third party receives about the person making the requests. Drawn
+       * only when the Host reports the preference — a Host from before it would answer the
+       * write with a 404, and a switch that cannot be saved must not be offered.
+       */
+      const renderUserTracking = () => {
+        if (snapshot === null || snapshot.userTracking.available !== true) return null;
+        const enabled = userTrackingPending === null ? snapshot.userTracking.enabled : userTrackingPending;
+        const id = snapshot.userTracking.id;
+        /* Three readings, and the middle one is why the identifier is printed at all: an
+           optimistic "on" has no id yet — the write that mints it is still landing — and
+           saying nothing about what will be sent is the ambiguity this section removes. */
+        const detail = enabled
+          ? id !== ''
+            ? t('userTracking.on', { id: id })
+            : t('userTracking.onPending')
+          : t('userTracking.off');
+        return h(
+          'section',
+          { style: sectionStyle() },
+          h('h4', { style: H4_STYLE }, t('userTracking.caption')),
+          h('p', { style: HINT_STYLE }, t('userTracking.hint')),
+          h(
+            'div',
+            { style: USAGE_TOGGLE_ROW_STYLE },
+            h(
+              'label',
+              { style: USAGE_TOGGLE_STYLE },
+              h('input', {
+                type: 'checkbox',
+                checked: enabled,
+                disabled: busy !== null,
+                onChange: (event) => runUserTrackingToggle(event.target.checked),
+              }),
+              h('span', null, t('userTracking.toggle')),
+            ),
+          ),
+          h('p', { style: HINT_STYLE }, detail),
+          userTrackingError !== ''
+            ? h('p', { role: 'alert', style: ALERT_STYLE }, userTrackingError)
+            : null,
+        );
+      };
+
       /* ---------------------------------------------------------------- assembly */
 
       /* The sections follow the snapshot, not the connection: a poll that fails mid-reload
@@ -5526,6 +5697,7 @@ window.__ModuleLoader__.load({
         snapshot !== null ? renderSavings() : null,
         snapshot !== null ? renderProviders() : null,
         snapshot !== null ? renderProviderFacts() : null,
+        snapshot !== null ? renderUserTracking() : null,
         snapshot !== null ? renderRecent() : null,
       );
     }
@@ -8289,6 +8461,10 @@ window.__ModuleLoader__.load({
          tolerance the settings page and the chip depend on. Nothing here touches React or
          the DOM, and the loader ignores extra fields on a module object. */
       __test: {
+        /* The page body itself, so a test can render the settings page against a fake
+           `/status` answer and prove a section actually draws — the class of failure a
+           source-text grep cannot see. */
+        PageBody,
         normalizePresetTable,
         /* The other profile default, read from the same `/targets` answer: null when the
            Host predates it, which is the page's gate on offering the control at all. */

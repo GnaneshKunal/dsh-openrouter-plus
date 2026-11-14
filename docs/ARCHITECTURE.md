@@ -85,7 +85,7 @@ dispatch call, not a second implementation.
 | Method + path | Body | Response |
 | --- | --- | --- |
 | `GET /__openrouter-plus/health` | — | `{ ok: true, version, uptimeMs }` |
-| `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, precision: { default, floorBypassed: { count, byModel } }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
+| `GET /__openrouter-plus/status` | — | `{ ok, version, address, bound, port, upstream, routes, tiers, controlPrefix, usageWidget: { enabled }, userTracking: { enabled, id }, precision: { default, floorBypassed: { count, byModel } }, metrics }` — `metrics` is the module's `snapshot()` (cost in USD, day buckets, model/tier rollups, recent rows) |
 | `GET /__openrouter-plus/targets` | — | `{ available: boolean, reason?, sources: Source[], created: Created[], custom: Target[], tier: { default, presets }, precision: { default: { floor, includeUnknown, allow }, floors }, reasoning: { fill, levels } }` — the two profile preferences ride the answer the settings page already loads | |
 | `POST /__openrouter-plus/routes/remove` | `{ name }` | `{ ok: true, name }` |
 | `POST /__openrouter-plus/routes/repair` | — | `{ ok: true, patched: Patch[], unresolved: Unresolved[], owned: string[], changed: boolean }` |
@@ -107,6 +107,8 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/provider?session=<id>&model=<id>` | — | `{ ok, session, provider: { tag, name, tier, precision } | null, chosen, model, available }`; what that Session pins *now* |
 | `POST /__openrouter-plus/provider` | `{ session, provider, model? }` | the same body; `provider: null` clears. **Memory only.** A slug the model's listing does not offer answers `404` |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` | `{ ok: true, usageWidget: { enabled } }`; one config write — the sidebar card's preference (`usageWidget` on the plugin row). A non-boolean `enabled` is a `400` |
+| `GET /__openrouter-plus/user-tracking` | — | `{ ok: true, userTracking: { enabled, id } }`; read from the live plugin row, not the boot snapshot, so a toggle is visible before the reload lands |
+| `POST /__openrouter-plus/user-tracking` | `{ enabled: boolean }` | `{ ok: true, userTracking: { enabled, id } }`; one config write on the `userTracking` key. Turning it on mints `dsh-<32 hex>` when no id is stored; turning it off keeps the id, so a re-enable sends the same value. A non-boolean `enabled` is a `400` |
 
 `POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
 (a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
@@ -203,7 +205,40 @@ Target mounts (alongside the legacy tier mounts):
   (never the configured path) and `x-oorp-tier` keeps its existing meaning (`passthrough` when
   nothing is pinned). `x-oorp-precision` is always present and reports the floor: its id when
   `provider.quantizations` was written, `bypass` when a floor was configured but could not be
-  admitted for that model, `any` otherwise.
+  admitted for that model, `any` otherwise. `x-oorp-user` names the identifier that actually rode
+  *this* request — a JSON object body was rewritten — and `none` when nothing was written: the
+  switch is off, the request carried no body (a `GET`), or the body was not a JSON object and was
+  forwarded untouched. Like the other `x-oorp-*` headers it is present on **forwarded** responses
+  only; a relay-generated `400`/`502` carries none of them.
+
+### The user identifier is an installation preference, not a recipe lever
+
+OpenRouter's `user` field is the one request-body field this plugin sends that is about the
+*person* rather than the request: an endpoint whose data policy requires a user identity cannot
+isolate abuse per end user without it, so every request from the account shares one upstream
+identity. It is therefore **off by default**, and it is deliberately not part of a recipe:
+
+- **Not per Session.** A recipe is a routing decision that belongs to one conversation (tier,
+  comparator, floor, pin). The identifier belongs to the installation — one person, one profile —
+  so it is a relay option read once at creation (`createRelay({ user })`), and the relay writes it
+  on every forwarded JSON body without asking a resolver. A request with no advertised Session
+  still carries it; a request whose Session resolved no recipe still carries it.
+- **Not a derived value.** It is `dsh-` plus 16 random bytes, minted when the switch is turned on
+  and stored in the plugin row (`userTracking: { enabled, id }`) — not a hash of the hostname, the
+  profile path, a session id or a key. Turning the switch off keeps it, so the upstream identity is
+  stable across toggles and restarts; a hand-written `id` (a registered external user, say) is used
+  verbatim.
+- **Not a strip.** The four routing levers are stripped by the pass-through preset because the
+  relay owns them. `user` is only written when configured: an off switch must not delete a value a
+  client set deliberately. On *is* authoritative — when the switch is on, a `user` the caller sent
+  is replaced, because the operator asked for the requests this relay carries to carry the
+  installation's identity, and two identities in one request is not a coherent choice.
+- **Every mount, not just OpenRouter.** The identifier is written into every forwarded JSON body,
+  so a custom `/t/<id>` target receives it too. The relay cannot know which gateways require an
+  identity or which reject an unknown field; the switch is global, and its help text says so.
+- **Admission is trivial; visibility is not.** The relay reports the value it sent in
+  `x-oorp-user`, and `/status` carries `{ enabled, id }` so the settings page can print what is
+  being sent instead of only that the switch is on.
 
 
 ```js
@@ -220,6 +255,10 @@ Target mounts (alongside the legacy tier mounts):
  *        `model` is the body's model id: a floor may only be admitted per model pool.
  * @param {(session: string) => string|null} [options.resolveSessionTier]
  *        tier-era spelling of the same seam: a bare tier string
+ * @param {string|null} [options.user]
+ *        the OpenRouter `user` identifier every forwarded JSON body carries, or null for
+ *        none. An installation-wide identity, so it is read once here rather than resolved
+ *        per Session; a value that is not a non-empty string is treated as null.
  * @param {Record<string, (req,res)=>Promise<void>|void>} [options.control]
  *        absolute pathname -> handler, checked before proxying
  * @param {(entry: object) => void} [options.onRecord]   per-request metric sink

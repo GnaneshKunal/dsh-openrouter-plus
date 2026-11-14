@@ -19,6 +19,10 @@ import {
   PROVIDER_SORTS,
   normalizeSessionPrecisions,
   normalizeUsageWidget,
+  normalizeUserTracking,
+  normalizeUserId,
+  generateUserId,
+  USER_ID_MAX,
 } from '../index.js'
 
 /* Every boot in this file writes the usage snapshot under `$DSH_HOME`. Point that at a
@@ -222,6 +226,52 @@ test('the sidebar card is on unless it was switched off', () => {
   assert.deepEqual(normalizeConfig({ usageWidget: false }).usageWidget, { enabled: false })
 })
 
+test('the user identifier is off unless a usable one is configured', () => {
+  // Off by default, and the switch *is* the identifier: there is nothing to send without
+  // one, so an enabled row that carries none reads as off rather than sending an empty
+  // string that OpenRouter would fold into the account-level identity.
+  assert.deepEqual(normalizeConfig(undefined).userTracking, { enabled: false, id: '' })
+  assert.deepEqual(normalizeConfig({}).userTracking, { enabled: false, id: '' })
+  assert.deepEqual(normalizeUserTracking(undefined), { enabled: false, id: '' })
+  assert.deepEqual(normalizeUserTracking({ enabled: true }), { enabled: false, id: '' }, 'no id, nothing to send')
+  assert.deepEqual(
+    normalizeUserTracking({ id: 'employee_123' }),
+    { enabled: false, id: 'employee_123' },
+    'an id alone does not turn it on',
+  )
+  assert.deepEqual(
+    normalizeUserTracking({ enabled: true, id: ' employee_123 ' }),
+    { enabled: true, id: 'employee_123' },
+    'the value is trimmed',
+  )
+  // A bare boolean cannot name an identifier, and guessing one would be inventing an
+  // identity — so unlike `usageWidget`, a bare value is not accepted as the setting.
+  assert.deepEqual(normalizeUserTracking(true), { enabled: false, id: '' })
+  assert.deepEqual(normalizeUserTracking(false), { enabled: false, id: '' })
+  // The identifier is an opaque identity: case is preserved, because the value is what
+  // OpenRouter matches against, and only a blank or oversized one is no identifier.
+  assert.equal(normalizeUserId('  Employee_123  '), 'Employee_123')
+  assert.equal(normalizeUserId(''), '')
+  assert.equal(normalizeUserId('   '), '')
+  assert.equal(normalizeUserId(7), '')
+  assert.equal(normalizeUserId(null), '')
+  assert.equal(normalizeUserId('x'.repeat(USER_ID_MAX)), 'x'.repeat(USER_ID_MAX))
+  assert.equal(normalizeUserId('x'.repeat(USER_ID_MAX + 1)), '')
+  // The same value is echoed in a response header, so a value Node cannot write into one is
+  // refused at the seam — otherwise enabling the switch would turn every response into a 502.
+  assert.equal(normalizeUserId('dsh-\u65e5\u672c'), '', 'non-ASCII cannot be a header value')
+  assert.equal(normalizeUserId('bad\nvalue'), '', 'a control character is not an identifier')
+  assert.equal(normalizeUserId('two words'), 'two words', 'printable ASCII, spaces included')
+  assert.deepEqual(
+    normalizeUserTracking({ enabled: true, id: 'dsh-\u65e5\u672c' }),
+    { enabled: false, id: '' },
+    'an unusable id reads as off',
+  )
+  // A generated identifier is random, prefixed, and safe in a JSON body and a log line.
+  const first = generateUserId()
+  assert.match(first, /^dsh-[0-9a-f]{32}$/)
+  assert.notEqual(first, generateUserId())
+})
 test('the provider list states every fact it has unless one was switched off', () => {
   // On by default, one flag per fact. A fact the listing omits is already dropped row by
   // row, so "on" never prints an empty column — it only stops a fact appearing late.
@@ -523,6 +573,246 @@ test('the provider-facts preference is read and written through the control API'
   })
   assert.equal(tolerant.status, 200)
   assert.deepEqual(await tolerant.json(), { ok: true, providerFacts: defaults })
+})
+
+
+test('the user-tracking switch is written through the guarded control API, and mints one identifier', async (t) => {
+  const port = await freePort()
+  const editor = createFakeEditor([ownRow({ host: '127.0.0.1', port })])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false })
+
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const url = `${origin}/__openrouter-plus/user-tracking`
+  // Off by default, and the settings page draws its switch from the snapshot it already
+  // polls, so /status carries the same object /user-tracking answers.
+  assert.deepEqual(await (await fetch(url)).json(), { ok: true, userTracking: { enabled: false, id: '' } })
+  assert.deepEqual(
+    (await (await fetch(`${origin}/__openrouter-plus/status`)).json()).userTracking,
+    { enabled: false, id: '' },
+  )
+
+  // Every control write carries the guard header; without it nothing is written.
+  const unguarded = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  assert.equal(unguarded.status, 403)
+  assert.equal(editor.writes.length, 0, 'an unguarded write must not reach the config')
+
+  // The switch is a real boolean, not a value that happens to be truthy.
+  for (const body of [{}, { enabled: 'true' }, { enabled: 1 }]) {
+    assert.equal((await postJson(url, body)).status, 400, `${JSON.stringify(body)} is a bad request`)
+  }
+  // A malformed body is a client error, not a server one.
+  const malformed = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-oorp-client': 'web' },
+    body: 'not json',
+  })
+  assert.equal(malformed.status, 400)
+  // Over the control-body cap is a client error that actually reaches the caller, rather
+  // than a cut socket: this used to destroy the connection before the answer was written.
+  const oversized = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-oorp-client': 'web' },
+    body: JSON.stringify({ enabled: true, padding: 'x'.repeat(200 * 1024) }),
+  })
+  assert.equal(oversized.status, 413)
+  assert.equal(editor.writes.length, 0)
+
+  // Turning it on mints the identifier in the same write: a switch with no id would be off
+  // by normalization, so the two are one preference. Only the plugin's own row is written.
+  const enabled = await postJson(url, { enabled: true })
+  assert.equal(enabled.status, 200)
+  const enabledBody = await enabled.json()
+  assert.equal(enabledBody.ok, true)
+  assert.equal(enabledBody.userTracking.enabled, true)
+  assert.match(enabledBody.userTracking.id, /^dsh-[0-9a-f]{32}$/)
+  const id = enabledBody.userTracking.id
+  // /status reports the value this process just wrote, before the reload that write causes:
+  // otherwise the page would read its own click back as the old value for a poll or two.
+  assert.deepEqual(
+    (await (await fetch(`${origin}/__openrouter-plus/status`)).json()).userTracking,
+    { enabled: true, id },
+  )
+  assert.equal(editor.writes.length, 1)
+  assert.equal(editor.writes[0].entry, editor.rows[0].entry, 'the plugin row is the only row written')
+  assert.deepEqual(editor.writes[0].next, { host: '127.0.0.1', port, userTracking: { enabled: true, id } })
+
+  // Turning it off keeps the identifier, and turning it back on sends the same value: a new
+  // identity per toggle would break the upstream isolation the field exists for.
+  const disabled = await postJson(url, { enabled: false })
+  assert.equal(disabled.status, 200)
+  assert.deepEqual((await disabled.json()).userTracking, { enabled: false, id })
+  const reenabled = await postJson(url, { enabled: true })
+  assert.equal(reenabled.status, 200)
+  assert.deepEqual((await reenabled.json()).userTracking, { enabled: true, id })
+
+  // The live read follows the row, not the config this process booted with.
+  assert.deepEqual((await (await fetch(url)).json()).userTracking, { enabled: true, id })
+  // ...and the next boot reads the same preference back off the row.
+  assert.deepEqual(normalizeConfig(editor.writes[0].next).userTracking, { enabled: true, id })
+})
+
+test('a hand-written identifier is used verbatim and never regenerated', async (t) => {
+  // The escape hatch for an organization: an id registered through OpenRouter's
+  // external-users API must be sent exactly as registered, and the page's switch must not
+  // replace it with a generated one.
+  const port = await freePort()
+  const editor = createFakeEditor([
+    ownRow({ host: '127.0.0.1', port, userTracking: { enabled: true, id: 'employee_123' } }),
+  ])
+  const { ctx, dispose } = createFakeContext({ configEditor: editor })
+  t.after(dispose)
+  apply(ctx, editor.rows[0].entry.options.config)
+
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  const url = `${origin}/__openrouter-plus/user-tracking`
+  assert.deepEqual(await (await fetch(url)).json(), { ok: true, userTracking: { enabled: true, id: 'employee_123' } })
+  assert.deepEqual(
+    (await (await fetch(`${origin}/__openrouter-plus/status`)).json()).userTracking,
+    { enabled: true, id: 'employee_123' },
+  )
+
+  // Off then on again is still the same identity, and no generated one replaces it.
+  assert.deepEqual(
+    (await (await postJson(url, { enabled: false })).json()).userTracking,
+    { enabled: false, id: 'employee_123' },
+  )
+  assert.deepEqual(
+    (await (await postJson(url, { enabled: true })).json()).userTracking,
+    { enabled: true, id: 'employee_123' },
+  )
+})
+
+test('an enabled switch with no identifier reads as off, and says so once', async (t) => {
+  const port = await freePort()
+  const { ctx, logs, dispose } = createFakeContext()
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false, userTracking: { enabled: true } })
+
+  const origin = `http://127.0.0.1:${port}`
+  await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+
+  assert.deepEqual(
+    (await (await fetch(`${origin}/__openrouter-plus/status`)).json()).userTracking,
+    { enabled: false, id: '' },
+  )
+  // A hand-edited row that asks for the feature without an identifier is a misconfiguration,
+  // and the one place it can be seen is the Host log.
+  assert.ok(
+    logs.some((line) => line.includes('userTracking is enabled but carries no usable id')),
+    'the boot says the switch cannot send anything',
+  )
+})
+
+test('a saved identifier rides every relayed request after a reload', async (t) => {
+  const port = await freePort()
+  const upstreamPort = await freePort()
+  /** @type {Array<Record<string, any>>} */
+  const bodies = []
+  const upstream = http.createServer(async (req, res) => {
+    bodies.push(JSON.parse((await readRequestBody(req)).toString('utf8')))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => {
+    upstream.closeAllConnections?.()
+    upstream.close(() => resolve(undefined))
+  }))
+
+  const editor = createFakeEditor([ownRow({
+    host: '127.0.0.1',
+    port,
+    portFallback: false,
+    upstream: `http://127.0.0.1:${upstreamPort}/v1`,
+  })])
+  const first = createFakeContext({ configEditor: editor })
+  let firstStopped = false
+  t.after(async () => {
+    if (!firstStopped) await first.dispose()
+  })
+  apply(first.ctx, editor.rows[0].entry.options.config)
+  const origin = `http://127.0.0.1:${port}`
+  const ready = () => waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+  await ready()
+
+  // The switch mints the identifier and stores it in the plugin row.
+  const enabled = await (await postJson(`${origin}/__openrouter-plus/user-tracking`, { enabled: true })).json()
+  const id = enabled.userTracking.id
+  assert.equal(editor.rows[0].entry.options.config.userTracking.id, id)
+  await first.dispose()
+  firstStopped = true
+
+  // Re-apply the row the editor wrote, as the Loader does on reload. Every relayed request
+  // now carries the identifier — Session or no Session, because it is not a recipe.
+  const reloaded = createFakeContext({ configEditor: editor })
+  t.after(reloaded.dispose)
+  apply(reloaded.ctx, editor.rows[0].entry.options.config)
+  await ready()
+
+  const response = await fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-session-id': 'sess-1' },
+    body: JSON.stringify({ model: 'example/model', messages: [] }),
+  })
+  assert.equal(response.status, 200)
+  assert.equal(bodies[0].user, id, 'the request carries the stored identifier')
+  assert.equal(response.headers.get('x-oorp-user'), id)
+
+  // A request with no Session at all carries it too: this is an installation preference,
+  // not a per-conversation one.
+  const anonymous = await fetch(`${origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'example/model', messages: [] }),
+  })
+  assert.equal(anonymous.status, 200)
+  assert.equal(bodies[1].user, id)
+
+  // Turning it off is a write too. It keeps the identifier for the next enable, and the row
+  // the next boot reads is off — which the relay's own "off writes nothing" is tested
+  // against directly in test/proxy.test.mjs.
+  const disabled = await postJson(`${origin}/__openrouter-plus/user-tracking`, { enabled: false })
+  assert.equal(disabled.status, 200)
+  assert.deepEqual(editor.rows[0].entry.options.config.userTracking, { enabled: false, id })
+  assert.equal(
+    normalizeConfig(editor.rows[0].entry.options.config).userTracking.enabled,
+    false,
+    'the next boot reads the switch as off',
+  )
 })
 
 test('booting with the card switched off still reports the cost telemetry', async (t) => {

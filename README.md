@@ -95,6 +95,14 @@ switching never mints a provider, a route or a model list.
   starts on: `Any`, `No four-bit`, `Eight-bit up` or `Full width`, with a checkbox for endpoints
   that declare no precision. Neither has to be re-picked for every new conversation, and the
   composer chip's `Profile default (…)` entries hand a Session back to them.
+- **An optional user identifier, for endpoints that require one.** Some models carry a data policy
+  that says *Anonymity: Requires user IDs*: their provider only accepts requests that name an end
+  user, and without one every request shares a single account-level identity upstream, so a block
+  triggered by one request can affect the whole account. A checkbox on the settings page turns this
+  on. It is **off by default**; when on, it sends one random pseudonym for this installation
+  (`dsh-…`) as the request's `user` field — no account, session, key or machine name. OpenRouter
+  hashes the value before forwarding it and never sends it raw. Turning it off sends nothing, and
+  turning it back on sends the same identifier.
 - **Zero risk to your existing setup** — the relay holds no API key, forwards your `Authorization`
   header verbatim, binds only to loopback, and the only profile changes it makes are reversible by
   construction.
@@ -557,7 +565,7 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /__openrouter-plus/health` | liveness |
-| `GET /__openrouter-plus/status` | address, `bound`/`port`, upstream, mounts, `usageWidget`, and `metrics` (cost in USD, day buckets, model/tier rollups, recent requests) |
+| `GET /__openrouter-plus/status` | address, `bound`/`port`, upstream, mounts, `usageWidget`, `userTracking` (`{ enabled, id }`), and `metrics` (cost in USD, day buckets, model/tier rollups, recent requests) |
 | `GET /__openrouter-plus/targets` | source routes, routes on this relay, the `targets` table, and the preset table (`{ default, presets }`) |
 | `GET /__openrouter-plus/tier?session=<id>` | what that Session would apply now: `preset`, `wire`, `chosen`, `default`, `presets` |
 | `POST /__openrouter-plus/tier` | `{ session, preset }` — choose this Session's preset; `preset: null` hands it back to the profile default. **Memory only, never a config write** |
@@ -566,6 +574,8 @@ fallback for a composition with no web GUI; the browser half never uses it.
 | `POST /__openrouter-plus/provider` | `{ session, provider, model? }` — pin one endpoint slug; `provider: null` clears it. A slug the model does not list answers `404`. **Memory only** |
 | `POST /__openrouter-plus/tier/default` | `{ preset }` — the preset an unchosen Session inherits; omit it (or send `none`) to pin nothing |
 | `POST /__openrouter-plus/widget` | `{ enabled: boolean }` — show/hide the sidebar spend card; a config write |
+| `GET /__openrouter-plus/user-tracking` | `{ userTracking: { enabled, id } }` — whether a `user` identifier is sent, and which one |
+| `POST /__openrouter-plus/user-tracking` | `{ enabled: boolean }` — the switch. Turning it on mints an identifier when none is stored; turning it off keeps the one already there. A config write |
 | `GET /__openrouter-plus/provider-facts` | `{ providerFacts }` — which facts an endpoint row states, whether it prints the median alone or with p90, and the order it sorts in |
 | `POST /__openrouter-plus/provider-facts` | `{ providerFacts }` — the same object; a config write on the `providerFacts` key. A Host from before `sort` omits it, and the page then draws no sort control |
 | `GET /__openrouter-plus/models?route=<id>&upstream=<url>` | the live catalogue for one route, each model marked `inRoute` |
@@ -624,6 +634,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | `precisionFloor` | `any` | the precision floor an unchosen Session inherits: a bare floor id (`any`, `no-four-bit`, `eight-bit-up`, `full-width`) or `{ floor, includeUnknown }`. `includeUnknown` says whether endpoints that declare no precision stay eligible; it follows the floor's own answer when omitted (on for the two middle floors, off for `full-width` and `any`). Written by **Precision floor for new sessions** on the settings page; a Session's own composer choice overrides it for that Session only |
 | `targets` | `{}` | extra endpoints served from `/t/<id>/…` mounts: `{ "<id>": { upstream } }`. Written by the switch; edit by hand only if you want one without a provider row |
 | `usageWidget` | `{ enabled: true }` | draw the sidebar spend card. A bare `false` is accepted; hiding the card hides nothing else — the settings page still shows every number |
+| `userTracking` | `{ enabled: false }` | the optional `user` field sent on every relayed request: `{ enabled, id }`. Off by default. `enabled` means "there is an identifier to send" — a row that asks for it with no `id` reads as off and logs a warning at boot, because an empty string is not an identity. Turning it on in Settings → OpenRouter Plus generates `dsh-<32 hex>` and stores it here; a hand-written `id` is used verbatim (for example one registered through OpenRouter's external-users API), and turning the switch off keeps it so a re-enable sends the same value |
 | `providerFacts` | all `true`, `percentiles: p50`, `sort: default` | which facts an endpoint row states (`precision`, `price`, `uptime`, `throughput`, `latency`), whether speed prints the median alone (`p50`) or with the tail (`p50p90`), and the order the list reads in: `default` (cheapest first), `throughput`, `latency`, `uptime`, `input`, `output`, `cacheRead`. Only an explicit `false` hides a fact, and an unknown sort reads as `default`. Written by **Provider list display** on the settings page; display only — the relay never reads it, and the menu's order is not `provider.sort` |
 
 ## Security model
@@ -643,6 +654,16 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
   Host/Origin check and session cookie the GUI's own API uses. Only a loopback request with no
   `Origin` — a local process — is exempt, and that is the privilege it already had on the relay
   listener.
+- **The user identifier is opt-in, pseudonymous and never a key.** With user tracking off (the
+  default) no identifier is sent, and a `user` a client set itself is left alone. With it on, the
+  relay writes one random per-installation value (`dsh-…`) into every forwarded JSON body; it is
+  not derived from the account, a session, a key or the machine, and OpenRouter hashes it before
+  forwarding it upstream. Two consequences of "one installation, one value" are worth stating: it
+  replaces a `user` a client set itself (the switch is the operator's choice for these requests),
+  and it goes to whichever upstream a mount forwards to — custom `/t/<id>` targets included,
+  because the relay cannot know which gateways require an identity and which reject an unknown
+  field. The value is visible in `/status` and in the `x-oorp-user` response header, because
+  "what am I sending" must have an answer.
 - **Read-only telemetry.** The status API exposes counts, token sums and billed cost, never prompts
   or keys.
 - **Reversible by construction.** The plugin only ever adds a provider route whose `baseURL` points
@@ -657,6 +678,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/status | jq .metrics.byTier
 | Card says *OpenRouter Plus is not answering* | Usually a busy Host, not a broken one: `/status` is served by the same process that streams completions. The page needs three failed polls in a row before it says so. Turning on `controlDiagnostics` adds `control.recent` to `/status` — the last slow or failed control calls with their duration. The Host log has a `[openrouter-plus] control API call was slow` line for each. If `control.recent` is empty and the page still refuses, the exact match is that the Host row is not loaded or the GUI's fence refused the request. |
 | The relay is down but the page still answers | That is the split working: the control API reports `bound: false` plus the bind error from `/status`, instead of looking like a dead plugin. Check the port range or `enabled: false`; set a fixed `port`. |
 | Settings → OpenRouter Plus works on the desktop but not on another machine or a phone | Should not happen any more: the page calls its own origin. If it does, the Host is too old to mount the API on the web server — update it, or reach the loopback copy on the relay port. |
+| A model refuses requests, or one user's block hits every conversation | The endpoint's data policy requires a user identity (*Anonymity: Requires user IDs* on the model page). Turn on **User tracking** in Settings → OpenRouter Plus; every relayed request then carries one pseudonym for this installation. The `x-oorp-user` response header says which value rode it, and `none` when the switch is off. |
 | A model errors after disabling the plugin | That model belongs to a route pointing at the relay. Re-enable the plugin or remove the route on the OpenRouter Plus page. |
 | Requests work but nothing is steered | The Session is on **No pin** (or the profile default is), the mount is a bare `/v1` passthrough, or the request is not `POST` with a JSON body. |
 | The chip shows a preset, but another Session still bills full price | Every preset is per Session by design. Set it in that Session's composer, or set a profile **Service tier preset for new sessions**. |

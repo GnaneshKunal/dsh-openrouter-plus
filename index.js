@@ -16,6 +16,8 @@
  * keeps a copy only for `curl` and for compositions with no web GUI. That split is
  * what makes Settings → OpenRouter Plus work behind Tailscale.
  */
+import { randomBytes } from 'node:crypto'
+
 import { fetchEndpoints, survives } from './lib/endpoints.js'
 import {
   PROVIDERS_CACHE_LIMIT,
@@ -28,7 +30,12 @@ import {
   tagsOf,
 } from './lib/providers.js'
 import { createMetrics } from './lib/metrics.js'
-import { baseModelId, createRelay } from './lib/proxy.js'
+import { USER_ID_MAX, baseModelId, createRelay, normalizeUserId } from './lib/proxy.js'
+
+/* The identifier's vocabulary lives in the relay module, which has to echo the same value in
+   a response header: re-exported here because the Host's config is what an operator edits,
+   and the tests read it from this module's public surface. */
+export { USER_ID_MAX, normalizeUserId }
 import { createConfigBridge } from './lib/config-bridge.js'
 import { MODEL_LISTING_MAX_BYTES, annotateLive, readLiveModels } from './lib/models-sync.js'
 import { PRECISION_IDS, normalizePrecision, precisionLabel } from './lib/quantization.js'
@@ -146,6 +153,7 @@ const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|::1)$/i
  *   sessionPrecisions: Record<string, { floor: string, includeUnknown: boolean }>,
  *   sessionPrecisionStamp: Record<string, number>,
  *   usageWidget: { enabled: boolean },
+ *   userTracking: { enabled: boolean, id: string },
  *   providerFacts: ReturnType<typeof normalizeProviderFacts>,
  * }}
  */
@@ -200,6 +208,12 @@ export function normalizeConfig(raw) {
     // Whether the sidebar card is drawn. The flag hides the card, never the numbers:
     // the settings page shows the same spend whether or not the card is on.
     usageWidget: { enabled: normalizeUsageWidget(config.usageWidget) },
+    // The optional `user` field every relayed request carries. Off by default, because it
+    // is the one thing this plugin sends that is about the person rather than the request:
+    // an OpenRouter endpoint whose data policy requires a user identity needs it, and
+    // nothing else does. `enabled` means "there is an identifier to send", so a row that
+    // asks for it without one reads as off instead of sending an empty string.
+    userTracking: normalizeUserTracking(config.userTracking),
     // Which facts a provider row states beside its name, and how many percentiles of a
     // speed it prints. Display only: the relay never reads this, and a fact that is off
     // is simply not painted, not withheld from the listing.
@@ -218,6 +232,46 @@ export function normalizeUsageWidget(value) {
   if (value === false) return false
   if (isPlainObject(value) && value.enabled === false) return false
   return true
+}
+
+/** The prefix every generated identifier carries, so one is recognisable in a dashboard. */
+const USER_ID_PREFIX = 'dsh-'
+
+/**
+ * The optional `user` field, as `{ enabled, id }`.
+ *
+ * `enabled` is not a free-standing switch: an identifier is the whole setting, so a row
+ * that says `enabled: true` without an id reads as **off**. That is the safe reading —
+ * sending `user: ""` would claim an identity OpenRouter cannot distinguish from the
+ * account-level one, while looking like the feature was on. The settings page turns the
+ * switch on by generating and storing an id in the same write, so the only way to reach
+ * the id-less state is by hand; `apply()` logs a warning when it does.
+ *
+ * A bare boolean is deliberately *not* accepted here (unlike `usageWidget`): `true`
+ * cannot name an identifier, and guessing one would be inventing an identity.
+ *
+ * @param {unknown} raw
+ * @returns {{ enabled: boolean, id: string }}
+ */
+export function normalizeUserTracking(raw) {
+  const value = isPlainObject(raw) ? raw : {}
+  const id = normalizeUserId(value.id)
+  return { enabled: value.enabled === true && id !== '', id }
+}
+
+/**
+ * A fresh installation identifier: `dsh-` plus 16 random bytes in hex.
+ *
+ * Random rather than derived from anything about the machine or the profile: OpenRouter
+ * hashes it before forwarding, and the point of a per-installation value is to tell one
+ * installation from another without carrying a hostname, a username or a path. Generated
+ * once, when the switch is turned on, and kept in the plugin row from then on — a value
+ * that changed per restart would fragment the reporting it exists to make coherent.
+ *
+ * @returns {string}
+ */
+export function generateUserId() {
+  return USER_ID_PREFIX + randomBytes(16).toString('hex')
 }
 
 /**
@@ -544,8 +598,10 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > MAX_CONTROL_BODY) {
-        reject(new Error('request body too large'))
-        req.destroy()
+        /* A client error, and an answerable one: the socket is left open so the handler's
+           `413` can actually reach the caller. Destroying it here cut the response before
+           it was written, which made this the one control refusal a client could not see. */
+        reject(badRequest('request body too large', 413))
         return
       }
       chunks.push(chunk)
@@ -556,10 +612,10 @@ function readJsonBody(req) {
       if (!text) return resolve({})
       try {
         const parsed = JSON.parse(text)
-        if (!isPlainObject(parsed)) return reject(new Error('expected a JSON object'))
+        if (!isPlainObject(parsed)) return reject(badRequest('expected a JSON object'))
         resolve(parsed)
       } catch (error) {
-        reject(new Error(`invalid JSON body: ${error instanceof Error ? error.message : String(error)}`))
+        reject(badRequest(`invalid JSON body: ${error instanceof Error ? error.message : String(error)}`))
       }
     })
   })
@@ -826,6 +882,17 @@ export function apply(ctx, rawConfig) {
   if (!config.enabled) {
     log('info', 'disabled by config (enabled: false); no listener bound')
     return
+  }
+
+  /* An enabled switch with no identifier cannot send anything, so normalization reads it
+     as off. Say so once: the alternative is an operator who hand-wrote `enabled: true`,
+     believes requests carry a user id, and finds out from a provider's data policy. */
+  if (isPlainObject(rawConfig?.userTracking) && rawConfig.userTracking.enabled === true && !config.userTracking.enabled) {
+    log(
+      'warn',
+      'userTracking is enabled but carries no usable id; no user identifier will be sent. ' +
+        'Turn it on from Settings → OpenRouter Plus to generate one, or set userTracking.id by hand',
+    )
   }
 
   const metrics = createMetrics({ recentLimit: 50 })
@@ -1243,6 +1310,72 @@ export function apply(ctx, rawConfig) {
       ...(isPlainObject(currentConfig) ? currentConfig : current),
       usageWidget: { enabled },
     }))
+  }
+
+  /**
+   * The last user-tracking value this process wrote, until the reload that write causes
+   * replaces `config` with it.
+   *
+   * `/status` answers `config`, which is frozen at boot, so without this the page would
+   * read the old value for a moment after its own click and paint the switch back. The
+   * variable is per activation and dies with the reload, which is exactly the lifetime it
+   * should have.
+   *
+   * @type {{ enabled: boolean, id: string } | null}
+   */
+  let writtenUserTracking = null
+
+  /** What `/status` should report right now. */
+  function currentUserTracking() {
+    return writtenUserTracking ?? config.userTracking
+  }
+
+  /**
+   * Persist the user-tracking preference, minting the identifier when it is turned on
+   * without one.
+   *
+   * The mint happens *inside* the write, from the config the editor hands the planner: two
+   * clicks that raced would otherwise both read no id, mint different ones, and leave the
+   * loser's answer naming an identifier that was never stored. The identifier is kept when
+   * the switch is turned off, so a re-enable sends the same value — a new identity per
+   * toggle would break the upstream isolation the field exists for.
+   *
+   * @param {boolean} enabled
+   * @returns {Promise<{ enabled: boolean, id: string }>}
+   */
+  async function writeUserTracking(enabled) {
+    const { editor, entry, current } = ownRow()
+    /** @type {{ enabled: boolean, id: string } | null} */
+    let next = null
+    await editor.edit(entry, (currentConfig) => {
+      const base = isPlainObject(currentConfig) ? currentConfig : current
+      const existing = normalizeUserTracking(base.userTracking)
+      const id = existing.id !== '' ? existing.id : enabled ? generateUserId() : ''
+      next = { enabled, id }
+      return { ...base, userTracking: next }
+    })
+    // A planner that never ran would leave the answer unknown; the row is the truth then.
+    const written = next === null ? ownUserTracking() : /** @type {{ enabled: boolean, id: string }} */ (next)
+    writtenUserTracking = written
+    return written
+  }
+
+  /**
+   * The user-tracking preference as it is ON DISK, not as this fiber booted with.
+   *
+   * A control request can follow a write this same process made — turning the switch on
+   * generates an identifier, turning it off must keep that same one — and `config` is
+   * frozen at boot. Falls back to the loaded copy when there is no editor, exactly like
+   * {@link ownTargets}.
+   *
+   * @returns {{ enabled: boolean, id: string }}
+   */
+  function ownUserTracking() {
+    try {
+      return normalizeUserTracking(ownRow().current.userTracking)
+    } catch {
+      return config.userTracking
+    }
   }
 
   /**
@@ -2129,6 +2262,12 @@ export function apply(ctx, rawConfig) {
         // The flag the sidebar card reads. It is part of /status rather than a separate
         // round trip because the card already polls this endpoint.
         usageWidget: config.usageWidget,
+        // The optional `user` field the relay writes into every request body. It rides this
+        // answer for the same reason the card flag does — the settings page already polls
+        // it — and because the page has to show *which* identifier is being sent, not just
+        // that the switch is on. The sidebar card ignores the extra key. Read through
+        // `currentUserTracking`, so the page's own write is visible before the reload lands.
+        userTracking: currentUserTracking(),
         // What the composer chip and the settings page read for the precision floor:
         // the default every unchosen Session inherits, and whether any request went out
         // with a configured floor withheld. A floor that is never honoured must be
@@ -2496,6 +2635,36 @@ export function apply(ctx, rawConfig) {
       writeSessionPin(session, record)
       log('info', 'pinned an endpoint for a session', { session, pin: record.tag })
       sendJson(res, 200, await answer(session, model))
+    }),
+
+    /**
+     * The `user` field every relayed request carries, or none.
+     *
+     * `GET` answers the preference as stored. `POST { enabled }` writes it, and turning it
+     * on for the first time also mints the identifier: a switch with no id would be off by
+     * normalization, so the two are one write. Turning it *off* keeps the id, so turning it
+     * back on sends the same value — a new identity per toggle would break the upstream
+     * isolation the field exists for. A hand-written `userTracking.id` (a registered
+     * external user, say) is used verbatim and never regenerated.
+     */
+    [`${CONTROL_PREFIX}/user-tracking`]: controlRoute(async (req, res) => {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, userTracking: ownUserTracking() })
+        return
+      }
+      if (!requireMethod(req, res, 'POST')) return
+      const body = await readJsonBody(req)
+      if (typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { error: { message: 'enabled must be a boolean' } })
+        return
+      }
+      const next = await outsideHmrTransaction(ctx, () => writeUserTracking(body.enabled))
+      log(
+        'info',
+        body.enabled ? 'sending a user identifier with every request' : 'no longer sending a user identifier',
+        { id: next.id === '' ? null : next.id },
+      )
+      sendJson(res, 200, { ok: true, userTracking: next })
     }),
 
     // The sidebar card is a preference, not traffic state: one config key, and the
@@ -2897,6 +3066,11 @@ export function apply(ctx, rawConfig) {
     log,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
     generationLookup: config.generationLookup,
+    /* The one body field the relay writes for every request rather than for one Session:
+       OpenRouter's `user` is a property of the installation, not of a conversation. `null`
+       is "off", and the relay then leaves a caller's own `user` alone instead of stripping
+       it. */
+    user: config.userTracking.enabled ? config.userTracking.id : null,
     resolveTarget,
     // The tier and precision a bare mount should apply for the Session carrying the
     // request. The relay only asks; every choice, and the admission decision behind the
