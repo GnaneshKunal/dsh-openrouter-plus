@@ -7,6 +7,39 @@ the config keys can still change.
 
 ## [Unreleased]
 
+**Some endpoints only accept requests that name a user, and the relay can now send one.**
+OpenRouter's `user` field is the optional identifier a provider uses to isolate abuse per end user.
+A model whose data policy says *Anonymity: Requires user IDs* needs it: without one, every request
+from the account shares a single account-level identity upstream, so a block triggered by one
+request can affect all of them. Settings → OpenRouter Plus now has a **User tracking** switch. It is
+off by default.
+
+### Added
+
+- **User tracking** — a checkbox in Settings → OpenRouter Plus that makes every relayed request carry
+  the `user` field. Turning it on mints a random per-installation pseudonym (`dsh-` plus 16 random
+  bytes in hex) and stores it in the plugin row on `userTracking`; turning it off keeps the
+  identifier, so a re-enable sends the same value, and a hand-written `userTracking.id` (for example
+  one registered through OpenRouter's external-users API) is used verbatim. Off sends nothing at
+  all — a `user` a client set itself is left alone — and the value that rode a request is reported
+  in the `x-oorp-user` response header — which names the identifier that actually rode that
+  request, and says `none` for a `GET` or a body the relay could not parse. The relay writes it on
+  every forwarded JSON body, Session or no Session, because the identifier belongs to the
+  installation rather than to a conversation. It replaces a `user` the client set (the switch is
+  authoritative) and it goes to every mount, custom `/t/<id>` targets included. A value that is not
+  printable ASCII is refused, because the same string is echoed in a response header and Node
+  cannot write a non-ASCII one.
+- **`GET`/`POST /__openrouter-plus/user-tracking`** — the switch's control route. `GET` reads the
+  live plugin row, so a toggle is visible before the reload lands; `POST { enabled }` writes it and
+  mints the identifier when one is missing. A non-boolean `enabled` is a `400`.
+- **`/status` carries `userTracking: { enabled, id }`** — the settings page draws the switch from
+  the snapshot it already polls, and prints the identifier so "what am I sending" has an answer. A
+  Host from before the field answers none, and the page draws no switch rather than one whose write
+  would 404.
+- **A boot warning for a hand-edited row that asks for the feature without an identifier.** An
+  enabled row with no `id` reads as off — an empty string is not an identity — and the log says so
+  once, instead of letting an operator believe requests carry a user id they do not.
+
 ## [0.8.0] — 2026-11-13
 
 **The precision floor can be set once for the profile, instead of once per new conversation.**

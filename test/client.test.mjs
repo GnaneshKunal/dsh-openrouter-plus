@@ -32,7 +32,11 @@ const reactStub = {
     props: props === null || props === undefined ? {} : props,
     children,
   }),
-  useState: (value) => [value, () => {}],
+  /* React's own contract: a function initial value is a lazy initialiser, called once.
+     The page seeds itself that way (`useState(readCachedStatus)`), and a stub that returned
+     the function itself would make a render test read a function where it expects a
+     snapshot. */
+  useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
   useEffect: () => {},
   useRef: (value) => ({ current: value }),
   useMemo: (factory) => factory(),
@@ -44,6 +48,7 @@ const module = definition.factory((id) => {
 })
 const {
   normalizeMounts,
+  PageBody,
   normalizePrecisionTable,
   normalizePresetTable,
   normalizePresetState,
@@ -1817,4 +1822,63 @@ test('the last answer survives the tab, and a store it cannot use is no answer',
   assert.equal(readCachedStatus(), null)
   assert.equal(readCachedFacts(), null)
   assert.equal(writeCachedStatus({ ok: true }), false)
+})
+
+/* The user-tracking switch decides what a third party receives about the person making the
+   requests, so it is drawn from the same `/status` snapshot the page already polls. Rendering
+   `PageBody` against a cached answer is what proves the row actually draws — a source-text
+   grep cannot catch a control wired to an undefined identifier — and the older-Host case is
+   the gate: no field, no switch, rather than a write that would 404. */
+test('the settings page draws the user-tracking switch, and withdraws it on an older Host', () => {
+  const store = new Map()
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  }
+  Object.defineProperty(globalThis, 'sessionStorage', { value: storage, configurable: true })
+  const status = (extra) => ({
+    ok: true,
+    version: '0.9.0',
+    routes: { '/v1': null },
+    metrics: { requests: 0, promptTokens: 0, completionTokens: 0 },
+    ...extra,
+  })
+  /** The switch's own input, found through the label that names it. */
+  const switchInput = (page) => {
+    const label = findElementWhere(
+      page,
+      (node) => node.type === 'label' && elementText(node).join(' ').includes(en('userTracking.toggle')),
+    )
+    return label === null ? null : findElement(label, 'input')
+  }
+  try {
+    // On: the switch is ticked and the hint names the identifier every request carries.
+    assert.equal(writeCachedStatus(status({ userTracking: { enabled: true, id: 'dsh-abc123' } })), true)
+    const onPage = PageBody({ t: en, seat: 'settings' })
+    const onText = elementText(onPage).join(' ')
+    assert.ok(onText.includes(en('userTracking.caption')), 'the section is drawn')
+    assert.ok(onText.includes(en('userTracking.toggle')), 'the switch has its label')
+    assert.ok(
+      onText.includes(en('userTracking.on', { id: 'dsh-abc123' })),
+      'the identifier that will be sent is printed, not hidden',
+    )
+    assert.equal(switchInput(onPage).props.checked, true)
+    assert.equal(switchInput(onPage).props.type, 'checkbox')
+
+    // Off: the same row, unticked, explains the account-level identity instead.
+    writeCachedStatus(status({ userTracking: { enabled: false, id: '' } }))
+    const offPage = PageBody({ t: en, seat: 'settings' })
+    assert.ok(elementText(offPage).join(' ').includes(en('userTracking.off')))
+    assert.equal(switchInput(offPage).props.checked, false)
+
+    // A Host from before the field: no section, and therefore no switch that would 404.
+    writeCachedStatus(status({}))
+    const olderText = elementText(PageBody({ t: en, seat: 'settings' })).join(' ')
+    assert.equal(olderText.includes(en('userTracking.caption')), false)
+    assert.equal(olderText.includes(en('userTracking.toggle')), false)
+    assert.equal(switchInput(PageBody({ t: en, seat: 'settings' })), null)
+  } finally {
+    Reflect.deleteProperty(globalThis, 'sessionStorage')
+  }
 })

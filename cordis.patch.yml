@@ -129,3 +129,25 @@
         # endpoint of that model survives it, because an empty pool is a hard failure
         # upstream, not a silent fallback.
         precisionFloor: any
+
+        # The optional OpenRouter `user` field: a stable identifier this installation
+        # sends on every relayed request. Some endpoints carry a data policy that
+        # requires a user identity ("Anonymity: Requires user IDs" on the model page);
+        # without one, every request shares the account-level identity upstream, so a
+        # provider block triggered by one request can affect the whole account.
+        # OpenRouter hashes the value before forwarding it and never sends it raw.
+        #
+        # OFF BY DEFAULT — it is the one field this plugin sends about the person rather
+        # than the request. Turning it on in the settings page generates the identifier
+        # and stores it here; turning it off keeps it, so a re-enable sends the same
+        # value. `enabled` means "there is an identifier to send": an enabled row with
+        # no id reads as off (and logs a warning at boot). A hand-written id is used
+        # verbatim — printable ASCII only, because the same value is echoed in the
+        # x-oorp-user response header — e.g. one registered through OpenRouter's
+        # external-users API:
+        #
+        # userTracking:
+        #   enabled: true
+        #   id: employee_123
+        userTracking:
+          enabled: false

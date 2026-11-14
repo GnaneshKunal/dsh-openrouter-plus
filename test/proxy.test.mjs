@@ -3,7 +3,17 @@ import http from 'node:http'
 import { after, test } from 'node:test'
 
 import { createMetrics } from '../lib/metrics.js'
-import { applyRecipe, baseModelId, createRelay, findGenerationId, findUsage, normalizeRecipe, sessionKeyOf } from '../lib/proxy.js'
+import {
+  applyRecipe,
+  applyUser,
+  baseModelId,
+  createRelay,
+  findGenerationId,
+  findUsage,
+  normalizeRecipe,
+  normalizeUserOption,
+  sessionKeyOf,
+} from '../lib/proxy.js'
 
 /** The "provider reported nothing" shape, so token-only fixtures stay readable. */
 const emptyUsage = () => ({
@@ -906,6 +916,132 @@ test('applyRecipe() merges provider fields and never clobbers the caller`s own',
   assert.equal(applyRecipe(body, normalizeRecipe({ preset: 'none' })), true)
   assert.equal(body.model, 'vendor/model')
   assert.equal('service_tier' in body, false)
+})
+
+test('the relay writes the installation user id on every request, and none when off', async () => {
+  /** @type {string[]} */
+  const bodies = []
+  const upstream = await startServer(async (req, res) => {
+    bodies.push((await readRequestBody(req)).toString('utf8'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const on = await startRelay(upstream.origin, undefined, { user: 'dsh-install-1' })
+  /* The bare `/v1` mount with no Session header: the identifier is not a recipe, so it
+     rides the request whether or not a Session resolved one. */
+  const response = await fetch(`${on.address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model', messages: [] }),
+  })
+  assert.equal(response.status, 200)
+  assert.equal(JSON.parse(bodies[0]).user, 'dsh-install-1')
+  assert.equal(response.headers.get('x-oorp-user'), 'dsh-install-1')
+
+  // On is authoritative: the operator's identifier replaces a caller's own value.
+  await fetch(`${on.address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model', user: 'client-value' }),
+  })
+  assert.equal(JSON.parse(bodies[1]).user, 'dsh-install-1')
+
+  // Off is the default and writes nothing at all: the key is absent, not empty.
+  const off = await startRelay(upstream.origin)
+  const offResponse = await fetch(`${off.address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model', messages: [] }),
+  })
+  assert.equal('user' in JSON.parse(bodies[2]), false)
+  assert.equal(offResponse.headers.get('x-oorp-user'), 'none')
+
+  // ...and a caller's own value survives while the switch is off.
+  await fetch(`${off.address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model', user: 'client-value' }),
+  })
+  assert.equal(JSON.parse(bodies[3]).user, 'client-value')
+})
+
+test('the header names what actually rode the request, and a header-unsafe id is refused', async () => {
+  /** @type {string[]} */
+  const bodies = []
+  const upstream = await startServer(async (req, res) => {
+    bodies.push((await readRequestBody(req)).toString('utf8'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{}')
+  })
+
+  const { address } = await startRelay(upstream.origin, undefined, { user: 'dsh-install-1' })
+  // A GET has no body, so nothing rode it even though the switch is on.
+  const listed = await fetch(`${address.origin}/v1/models`)
+  assert.equal(listed.status, 200)
+  assert.equal(listed.headers.get('x-oorp-user'), 'none')
+  assert.equal(bodies[0], '')
+
+  // A body the relay cannot parse is forwarded untouched — the identifier is a JSON-body
+  // field, and rewriting an opaque body would be worse than not sending one. The header
+  // reports that nothing rode it, rather than naming a value the bytes do not contain.
+  const opaque = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain' },
+    body: 'not json',
+  })
+  assert.equal(opaque.status, 200)
+  assert.equal(bodies[1], 'not json')
+  assert.equal(opaque.headers.get('x-oorp-user'), 'none')
+
+  // A JSON object is where the identifier can ride.
+  const chat = await fetch(`${address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model' }),
+  })
+  assert.equal(chat.headers.get('x-oorp-user'), 'dsh-install-1')
+  assert.equal(JSON.parse(bodies[2]).user, 'dsh-install-1')
+
+  /* A hand-written id that cannot be a header value is refused at the seam, not at
+     writeHead: otherwise every response would be a 502 — after the upstream call had
+     already been made and billed — with the switch on. */
+  const unsafe = await startRelay(upstream.origin, undefined, { user: 'dsh-\u65e5\u672c' })
+  const refused = await fetch(`${unsafe.address.origin}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vendor/model' }),
+  })
+  assert.equal(refused.status, 200)
+  assert.equal(refused.headers.get('x-oorp-user'), 'none')
+  assert.equal('user' in JSON.parse(bodies[3]), false)
+})
+
+test('applyUser() writes the installation identifier, and an off switch writes nothing', () => {
+  // Not a recipe lever: the identifier belongs to the installation, so it is applied on
+  // every request rather than resolved per Session.
+  assert.equal(normalizeUserOption('  dsh-abc  '), 'dsh-abc', 'trimmed, otherwise verbatim')
+  assert.equal(normalizeUserOption(''), null)
+  assert.equal(normalizeUserOption('   '), null)
+  assert.equal(normalizeUserOption(42), null)
+  assert.equal(normalizeUserOption('x'.repeat(129)), null, 'an absurd value is no identifier')
+  assert.equal(normalizeUserOption('x'.repeat(128)), 'x'.repeat(128))
+
+  const body = { model: 'vendor/model' }
+  assert.equal(applyUser(body, 'dsh-abc'), true)
+  assert.equal(body.user, 'dsh-abc')
+  assert.equal(applyUser(body, 'dsh-abc'), false, 'an unchanged value is not a re-serialisation')
+
+  // Off means "leave the caller alone", which is the opposite of how a pass-through preset
+  // treats a tier: the tier is a routing decision this relay owns, a user id is not.
+  const own = { model: 'vendor/model', user: 'client-value' }
+  assert.equal(applyUser(own, null), false)
+  assert.equal(own.user, 'client-value', 'a caller' + String.fromCharCode(96) + 's own user survives an off switch')
+
+  // On is authoritative: the operator asked for the requests this relay carries to carry
+  // this identity, so it replaces whatever the client sent.
+  assert.equal(applyUser(own, 'dsh-abc'), true)
+  assert.equal(own.user, 'dsh-abc')
 })
 
 test('baseModelId() only strips the two relay-owned variants', () => {
