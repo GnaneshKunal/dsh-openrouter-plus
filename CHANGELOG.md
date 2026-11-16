@@ -7,6 +7,58 @@ the config keys can still change.
 
 ## [Unreleased]
 
+**The plugin has a terminal front door: one slash command that reads the relay and changes what a
+Session runs on.** A profile running under `dsh-tui` could route traffic through the plugin, but
+changing a preset, the precision floor or the user switch meant hand-editing YAML or curling the
+control API. `/openrouter-plus` (alias `/oorp`) is now registered through the DSH command registry,
+which `dsh-tui` and the Web UI both resolve, so the same verbs answer in a transcript and in the
+palette.
+
+### Added
+
+- **`/openrouter-plus` (alias `/oorp`) — the terminal outlet.** `status` (also the bare command)
+  reports the relay, version, uptime, upstream, the preset this Session runs on and whether it was
+  chosen or inherited, the precision floor and where it came from, and today's and retained spend.
+  `preset` lists the nine presets, `preset <id>` switches this Session, `preset default <id>` sets
+  what a new Session inherits and `preset clear` hands the Session back; `precision` does the same
+  for the four floors. `routes` lists the provider rows through the relay — with a pinned tier or
+  `per-Session preset` — and the registered targets, with `route <provider>` and
+  `unroute <provider>` moving one row. `spend`, `user`/`user on`/`user off` and `repair` round it
+  out, and `models` is a pointer rather than a second listing: `/provider` already probes a route's
+  stored `baseURL` with the stored key.
+- **`providers [<model>]` — the endpoint table, in the terminal.** One row per OpenRouter endpoint
+  with price in and out per million tokens, tokens per second, milliseconds to the first token, the
+  last day's uptime and the lane each endpoint belongs to, in the model page's group order, with the
+  endpoints it will not route to marked rather than hidden. It is the composer's endpoint menu in text, and the only verb that
+  reads OpenRouter rather than the relay. With no model named it uses the one this Session last put
+  through the relay, read from the metrics ring the status call already carries; a listing that
+  omits a fact prints a dash, never a zero.
+- **Per-Session choices stay in memory; only the profile defaults write.** `preset <id>`,
+  `precision <id>` and their `clear` forms change the Session table, exactly as the composer chip
+  does, because a switch must not rewrite the profile mid-conversation. `preset default <id>` and
+  `precision default <id>` are preferences, so they write the plugin row and the Loader re-applies
+  it; the command says so when it lands, since that reload also drops the per-Session choices held
+  in memory.
+- **The control origin is resolved instead of assumed.** Each process binds 8791, falls forward when
+  the port is taken and holds its own Session table, so the command reads the loopback origins of the
+  profile's provider rows, then its own bound address, then the configured port and the nine after
+  it, probing `GET /__openrouter-plus/health` on each, caching the winner for 30 seconds and
+  re-probing after a failure. A preset written into a process that is not serving the traffic would
+  be a switch that does nothing.
+- **A write to `/__openrouter-plus/*` accepts `x-oorp-client: tui` as well as `web`.** The guard now
+  keys on the write methods (`POST`, `PUT`, `PATCH`, `DELETE`) rather than on `POST`, trims the value
+  and compares it case-insensitively, and answers `403` naming the accepted list for anything else;
+  `GET`s are unchanged and header-free. The header is a guard rather than authentication — the
+  listener is loopback-only — and the accepted list lives in the running Host, so a Host from before
+  this change still accepts only `web`, and answers a terminal write with
+  `403 missing x-oorp-client header` until its profile is restarted.
+- **`npm run smoke:tui`** — `scripts/tui-smoke.mjs` discovers a relay on `127.0.0.1:8791..8800` (or
+  honours `OORP_ORIGIN`), runs every read-only verb, and exits non-zero if any of them failed;
+  `--write` additionally sets and clears a synthetic Session's preset, which is what exercises the
+  `tui` write path.
+- **No new configuration keys.** The outlet registers when a composition has a command registry and
+  logs one line when it does not, so a headless Host or a bare `cordis.yml` start is unchanged.
+
 ## [0.9.0] — 2026-11-14
 
 **Some endpoints only accept requests that name a user, and the relay can now send one.**

@@ -46,8 +46,10 @@ async function freePort() {
 /**
  * The smallest cordis-shaped context `apply()` needs.
  *
- * @param {{ configEditor?: any }} [options] an editor stub, when the test drives
- *   the endpoints that read and write config (the relay never touches it)
+ * @param {{ configEditor?: any, commands?: any }} [options] the services the test
+ *   hands the plugin: an editor stub when it drives the endpoints that read and
+ *   write config, and a command registry stub when it drives the terminal outlet
+ *   (the relay itself touches neither, which is why both are optional)
  */
 function createFakeContext(options = {}) {
   /** @type {Array<() => unknown>} */
@@ -58,7 +60,13 @@ function createFakeContext(options = {}) {
   return {
     ctx: {
       logger: { info: sink('info'), warn: sink('warn'), error: sink('error') },
-      get: (name) => (name === 'configEditor' ? options.configEditor : undefined),
+      /* A service the test did not hand over is absent, not stubbed: the plugin's
+         own soft probes are what this fixture is meant to exercise. */
+      get: (name) => {
+        if (name === 'configEditor') return options.configEditor
+        if (name === 'commands') return options.commands
+        return undefined
+      },
       on: () => () => {},
       effect(fn) {
         const disposer = fn()
@@ -90,6 +98,32 @@ function createFakeEditor(rows) {
       writes.push({ entry, before, next })
       if (entry?.options) entry.options.config = next
       return next
+    },
+  }
+}
+
+/**
+ * A `ctx.commands` stub that records what the terminal outlet registers.
+ *
+ * The real registry takes a definition and hands back a disposer; that is the whole
+ * contract `installTui` relies on, so the stub keeps exactly that shape plus the list a
+ * test reads. What the command *says* is proven elsewhere; what this fixture has to
+ * prove is that the right definitions arrive and that their handler addresses the relay
+ * this boot is listening on.
+ */
+function createRecordingRegistry() {
+  /** @type {Array<any>} */
+  const definitions = []
+  return {
+    definitions,
+    register(definition) {
+      definitions.push(definition)
+      // Handing back a disposer is part of the contract, so the stub returns one;
+      // removing the entry it added keeps a teardown from leaving it behind.
+      return () => {
+        const index = definitions.indexOf(definition)
+        if (index >= 0) definitions.splice(index, 1)
+      }
     },
   }
 }
@@ -358,7 +392,12 @@ test('boots the relay, serves control endpoints, and stops cleanly', async (t) =
   })
   assert.equal(foreign.headers.get('access-control-allow-origin'), null)
 
-  // A preflight is answered for the GUI, and a POST without the guard header is refused.
+  /* A preflight is answered for the GUI, and a POST without the guard header is refused.
+     This is also where the *missing*-header refusal lives rather than in a boot of its
+     own: it is one branch of one wrapper, and a second instance would only repeat the
+     assertion. The message is part of the contract now that the accepted set has widened
+     — a hand-written `curl` that gets it wrong should learn the vocabulary from the
+     refusal, not from the source. */
   const preflight = await fetch(`${origin}/__openrouter-plus/routes/attach`, {
     method: 'OPTIONS',
     headers: { origin: 'http://127.0.0.1:3080' },
@@ -370,6 +409,16 @@ test('boots the relay, serves control endpoints, and stops cleanly', async (t) =
     body: '{}',
   })
   assert.equal(unguarded.status, 403)
+  const unguardedMessage = (await unguarded.json()).error.message
+  assert.ok(unguardedMessage.includes('web'), 'a write with no guard header is refused, and the page is named')
+  assert.ok(unguardedMessage.includes('tui'), 'the terminal is named beside it')
+
+  /* A read needs no guard header at all — the gate is on writes only. `/status` is already
+     read without one at the top of this test (the wait only proceeds on a 2xx), so the
+     assertion is stated rather than merely relied upon, and folded in here for the same
+     reason as the refusal above: it is the same wrapper's other branch. */
+  const unguardedRead = await fetch(`${origin}/__openrouter-plus/status`)
+  assert.equal(unguardedRead.status, 200, 'a read answers without the guard header')
 
   // targets answers even when configEditor is unavailable
   const targets = await (await fetch(`${origin}/__openrouter-plus/targets`)).json()
@@ -2345,10 +2394,17 @@ test('a mount pointed at another upstream never spends the caller key on a listi
   assert.equal(listingHits, 1, "another provider's key is never spent on this upstream")
 })
 
-/** Boot one plugin instance on its own port and return its origin. */
-async function bootPlugin(t, config = {}) {
+/**
+ * Boot one plugin instance on its own port and return its origin.
+ *
+ * `contextOptions` is whatever `createFakeContext` takes — an editor or a command
+ * registry — so a test can hand the plugin the service it wants to observe without
+ * rebuilding the boot sequence. Omitted, the context is bare: the one composition in
+ * which the relay has to manage on its own.
+ */
+async function bootPlugin(t, config = {}, contextOptions = {}) {
   const port = await freePort()
-  const { ctx, dispose } = createFakeContext()
+  const { ctx, dispose } = createFakeContext(contextOptions)
   t.after(dispose)
   apply(ctx, { port, portFallback: false, ...config })
   const origin = `http://127.0.0.1:${port}`
@@ -2387,4 +2443,138 @@ test('with controlDiagnostics on, /status reports the slow and failed calls', as
     assert.equal(typeof entry.at, 'number')
   }
   assert.ok(status.control.recent.length <= 20, 'the ring is bounded')
+})
+
+test('a write from the terminal is accepted, and it flips that Session\'s preset', async (t) => {
+  /* The gate used to accept `web` and nothing else, which made every verb the terminal
+     offers a 403: the outlet would have been installed and unusable. So this asserts the
+     effect rather than the status code — the preset is read back through the same route
+     the command itself reads, which is the difference between "the refusal disappeared"
+     and "the terminal can actually switch a Session". */
+  const origin = await bootPlugin(t)
+  const written = await fetch(`${origin}/__openrouter-plus/tier`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-oorp-client': 'tui' },
+    body: JSON.stringify({ session: 'sess-tui-gate', preset: 'priority' }),
+  })
+  assert.equal(written.status, 200)
+  const read = await (await fetch(`${origin}/__openrouter-plus/tier?session=sess-tui-gate`)).json()
+  assert.equal(read.chosen, 'priority', 'the write is the choice the relay now reports')
+})
+
+test('the guard header the page sends still writes after the gate was widened', async (t) => {
+  /* Widening a guard is the classic way to break the caller it already served. The page
+     sends `web`; a list that grew must still accept what it grew from, or the fix for the
+     terminal is a regression for the settings page. */
+  const origin = await bootPlugin(t)
+  const written = await postJson(`${origin}/__openrouter-plus/tier`, { session: 'sess-web-gate', preset: 'flex' })
+  assert.equal(written.status, 200)
+  assert.equal((await written.json()).chosen, 'flex')
+})
+
+test('an unknown guard value is refused, and the refusal names both front doors', async (t) => {
+  /* The header is not authentication — the listener is loopback-only — it is the one
+     thing that keeps a stray POST from a page, a scanner or a pasted URL out of the config
+     path. A value nobody ships is therefore a refusal, and the message has to say what
+     would have been accepted: somebody debugging a hand-written `curl` should not have to
+     read the source to learn the vocabulary. */
+  const origin = await bootPlugin(t)
+  const refused = await fetch(`${origin}/__openrouter-plus/tier`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-oorp-client': 'curl' },
+    body: JSON.stringify({ session: 'sess-curl-gate', preset: 'priority' }),
+  })
+  assert.equal(refused.status, 403)
+  const message = (await refused.json()).error.message
+  assert.ok(message.includes('web'), 'the refusal names the page')
+  assert.ok(message.includes('tui'), 'and the terminal beside it')
+  // Refused before the body was read, so nothing was recorded for that Session either.
+  const read = await (await fetch(`${origin}/__openrouter-plus/tier?session=sess-curl-gate`)).json()
+  assert.equal(read.chosen, null, 'a refused write is not a write')
+})
+
+test('the terminal outlet registers two commands, and their handler drives this relay', async (t) => {
+  /* Three facts a transcript depends on, and none of them is the command's wording:
+     the definitions arrive after the relay binds (a command has to address a live
+     address), the handler resolves *this* instance rather than one that merely looks
+     plausible on a machine running two profiles, and a refusal comes back as text
+     instead of a thrown handler — which a UI would report as a generic failure. */
+  const registry = createRecordingRegistry()
+  const origin = await bootPlugin(t, {}, { commands: registry })
+
+  /* Registration is a `.then` on the bind, not a side effect of `apply()`, so this is the
+     one wait a command test cannot skip. */
+  await waitFor(() => registry.definitions.length === 2)
+  assert.deepEqual(
+    registry.definitions.map((definition) => definition.name),
+    ['openrouter-plus', 'oorp'],
+    'the primary name is registered first, then the alias',
+  )
+  for (const definition of registry.definitions) {
+    assert.equal(typeof definition.description, 'string', `/${definition.name} describes itself`)
+    assert.ok(definition.description.length > 0)
+    assert.equal(typeof definition.input?.hint, 'string', `/${definition.name} carries a composer hint`)
+    assert.ok(definition.input.hint.length > 0)
+    assert.equal(typeof definition.handler, 'function')
+  }
+
+  const primary = registry.definitions[0]
+  const chosen = await primary.handler({ rawInput: 'preset flex', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
+  assert.equal(chosen.kind, 'success', chosen.text)
+  const tier = await (await fetch(`${origin}/__openrouter-plus/tier?session=sess-outlet`)).json()
+  assert.equal(tier.chosen, 'flex', 'the handler wrote through the relay this boot is listening on')
+
+  /* A bare invocation is the one answer that names an origin, which is how the command
+     shows it resolved the right instance rather than another profile's relay. */
+  const status = await primary.handler({ rawInput: '', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
+  assert.equal(status.kind, 'success', status.text)
+  assert.ok(status.text.includes(origin), `the status block names the relay it addressed (${origin})`)
+
+  /* The API's own refusal, surfaced as a sentence: `preset nope` is a 400 from the control
+     layer, and losing its wording would turn a typo into "the command failed". */
+  const refused = await primary.handler({ rawInput: 'preset nope', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
+  assert.equal(refused.kind, 'error', 'a refused write resolves as an error result, not a rejection')
+  assert.match(refused.text, /unknown preset "nope"/)
+  assert.match(refused.text, /flex/, 'and it lists the presets that would have worked')
+  const unchanged = await (await fetch(`${origin}/__openrouter-plus/tier?session=sess-outlet`)).json()
+  assert.equal(unchanged.chosen, 'flex', 'a refused write leaves the previous choice alone')
+})
+
+test('a Host with no command registry boots, serves, and stays healthy', async (t) => {
+  /* The relay is the product; the terminal outlet is an offer. A composition that hands
+     the plugin no registry — a bare `cordis.yml` start, a headless Host, this fixture —
+     must still serve, and say so. Booted here rather than through `bootPlugin` because the
+     log line is half the evidence: the outlet reports its own absence instead of taking the
+     relay down with it on the way out. */
+  const port = await freePort()
+  const { ctx, logs, dispose } = createFakeContext()
+  t.after(dispose)
+  apply(ctx, { port, portFallback: false })
+  const origin = `http://127.0.0.1:${port}`
+  const healthy = await waitFor(async () => {
+    try {
+      return (await fetch(`${origin}/__openrouter-plus/health`)).ok
+    } catch {
+      return false
+    }
+  })
+  assert.equal(healthy, true, 'the plugin is healthy with no UI attached')
+  await waitFor(() => logs.some((line) => line.includes('terminal outlet stays off')))
+  /* The outlet says so at `info` and nothing treats it as a fault. (The one warning a bare
+     composition does produce is the provider-route snapshot being unavailable, which is
+     about `configEditor`, not about the UI — hence matching on the outlet's own words
+     rather than on the level alone.) */
+  const outlet = logs.find((line) => line.includes('terminal outlet')) ?? ''
+  assert.match(outlet, /^info: .*terminal outlet stays off/)
+  assert.ok(
+    !logs.some((line) => line.startsWith('error:')),
+    'a boot with no command registry logs no error',
+  )
+  assert.ok(
+    !logs.some((line) => line.startsWith('warn:') && /command|terminal outlet/.test(line)),
+    'and draws no warning about the missing registry',
+  )
+  const status = await (await fetch(`${origin}/__openrouter-plus/status`)).json()
+  assert.equal(status.ok, true)
+  assert.equal(status.bound, true, 'and it is bound, not merely loaded')
 })
