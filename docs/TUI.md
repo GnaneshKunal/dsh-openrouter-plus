@@ -151,7 +151,7 @@ npm test        # node --test: no dependencies, no network, no profile writes
 npm run check   # node --check over the entry points, the modules and the smoke script
 ```
 
-The suite is 348 tests on this change (241 before it) and needs neither network nor a profile. Its formatters are
+The suite is 349 tests on this change (241 before it) and needs neither network nor a profile. Its formatters are
 exported as pure functions, so a wording change can be checked against a fixed answer, not by eye.
 
 ### 2. A live relay, without a terminal UI
