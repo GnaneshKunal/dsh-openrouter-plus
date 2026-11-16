@@ -659,6 +659,8 @@ window.__ModuleLoader__.load({
       'usage.genId': 'Generation id',
       'usage.notReported': 'not reported',
       'usage.usd': '${value}',
+      /* A real sub-cent bill: the two-decimal headline must not read as "nothing spent". */
+      'usage.usdUnderCent': '< $0.01',
       'usage.toggleSettings': 'Show spend card in the sidebar',
       'usage.toggleHint':
         'A collapsible card at the sidebar foot shows today\'s spend and the models that used it. Turning it on reloads the relay.',
@@ -974,6 +976,7 @@ window.__ModuleLoader__.load({
       'usage.genId': '生成 ID',
       'usage.notReported': '未报告',
       'usage.usd': '${value}',
+      'usage.usdUnderCent': '< $0.01',
       'usage.toggleSettings': '在侧边栏显示费用卡片',
       'usage.toggleHint': '侧边栏底部会显示可折叠的费用卡片，包含今日花费与使用的模型。开启会重新加载中继。',
       'usage.toggleFailed': '无法修改侧边栏卡片：{message}',
@@ -1077,6 +1080,10 @@ window.__ModuleLoader__.load({
     function usdHeadline(t, value) {
       const number = finiteNumber(value);
       if (number === null) return t('usage.notReported');
+      /* A real sub-cent bill rounds to $0.00 at two decimals, and that would read as
+         "nothing was spent". Say "under a cent" instead; the exact figure stays in the
+         element's title. */
+      if (number > 0 && Math.round(number * 100) === 0) return t('usage.usdUnderCent');
       try {
         return t('usage.usd', {
           value: new Intl.NumberFormat(undefined, {
@@ -1087,6 +1094,20 @@ window.__ModuleLoader__.load({
       } catch (error) {
         return t('usage.usd', { value: number.toFixed(2) });
       }
+    }
+
+    /**
+     * A cost bar's width, as a percentage of the leading preset.
+     *
+     * A real nonzero cost keeps a sliver even when it is dwarfed by the biggest preset;
+     * a zero or unreported cost draws nothing, so an empty bucket is not mistaken for a
+     * tiny charge.
+     */
+    function costBarWidth(cost, max) {
+      const amount = finiteNumber(cost);
+      const ceiling = finiteNumber(max);
+      if (amount === null || amount <= 0 || ceiling === null || ceiling <= 0) return 0;
+      return Math.max(2, Math.round((amount / ceiling) * 100));
     }
 
     /** Compact token counts for a one-line summary: 8500000 → "8.5M". */
@@ -5467,8 +5488,7 @@ window.__ModuleLoader__.load({
                 { style: COST_BLOCK_STYLE },
                 h('span', { style: SUB_LABEL_STYLE }, t('usage.byTier')),
                 tierCosts.map((row) => {
-                  const cost = row.costUsd === null ? 0 : row.costUsd;
-                  const width = maxTierCost > 0 ? Math.max(2, Math.round((cost / maxTierCost) * 100)) : 0;
+                  const width = costBarWidth(row.costUsd, maxTierCost);
                   return h(
                     'div',
                     { key: row.tier, style: COST_BAR_ROW_STYLE },
@@ -8942,6 +8962,10 @@ window.__ModuleLoader__.load({
         settingsTabIds: SETTINGS_TAB_IDS,
         readCachedTab,
         writeCachedTab,
+        /* The two money-presentation rules the Overview depends on: a real sub-cent amount
+           never prints as $0.00, and a zero-cost bucket draws no bar. */
+        usdHeadline,
+        costBarWidth,
         storageKeys: { status: STORAGE_STATUS_KEY, facts: STORAGE_FACTS_KEY, tab: STORAGE_TAB_KEY },
         providerTiers: PROVIDER_TIERS,
         providerPrecisions: PROVIDER_PRECISIONS,

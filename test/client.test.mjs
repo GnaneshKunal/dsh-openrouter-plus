@@ -101,6 +101,8 @@ const {
   writeCachedBody,
   readCachedTab,
   writeCachedTab,
+  usdHeadline,
+  costBarWidth,
   storageKeys,
   settingsTabIds,
   providerPinForModel,
@@ -1977,4 +1979,21 @@ test('the settings page opens on Overview and draws one tab panel at a time', ()
   } finally {
     Reflect.deleteProperty(globalThis, 'sessionStorage')
   }
+})
+/* The Overview prints a headline amount at two decimals. A real sub-cent bill must not
+   read as "$0.00" (the exact rule usdText already keeps), and a zero-cost bucket must not
+   draw a bar. Both are pure formatters, so the review's two findings are pinned directly. */
+test('a sub-cent headline is not zero, and a zero-cost preset draws no bar', () => {
+  assert.equal(usdHeadline(en, 0.004), '< $0.01')
+  assert.equal(usdHeadline(en, 0), '$0.00')
+  assert.equal(usdHeadline(en, 0.02), '$0.02')
+  assert.equal(usdHeadline(en, null), en('usage.notReported'))
+  assert.equal(usdHeadline(zh, 0.004), '< $0.01')
+
+  assert.equal(costBarWidth(0, 58), 0, 'a zero bucket draws nothing')
+  assert.equal(costBarWidth(null, 58), 0, 'an unreported cost draws nothing')
+  assert.equal(costBarWidth(0.09, 58), 2, 'a tiny real cost keeps a sliver')
+  assert.equal(costBarWidth(29, 58), 50)
+  assert.equal(costBarWidth(58, 0), 0, 'no leading cost means no bar')
+  assert.equal(costBarWidth(1, 58), 2)
 })
