@@ -7,14 +7,7 @@ the config keys can still change.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`providers` asks the Session what model it is on, not the relay what it last carried.** The verb
-  defaulted to the newest model in the metrics ring, which is a proxy: after `/model` it still named
-  the previous model until a request had gone through, and on a Session that had routed nothing it
-  had no answer at all. It now reads `Agent.model.current()` — the documented "choice the next step
-  will use", so a recorded selection beats the last request — and keeps the ring as the fallback for
-  a host that cannot answer, before finally asking for a model id.
+## [0.10.0] — 2026-11-16
 
 **The plugin has a terminal front door: one slash command that reads the relay and changes what a
 Session runs on.** A profile running under `dsh-tui` could route traffic through the plugin, but
@@ -67,6 +60,27 @@ palette.
   `tui` write path.
 - **No new configuration keys.** The outlet registers when a composition has a command registry and
   logs one line when it does not, so a headless Host or a bare `cordis.yml` start is unchanged.
+
+### Changed
+
+- **The settings page is five tabs: Overview, Routing, Endpoints, Provider list and Privacy.** One
+  scroll became one panel per question — money and recent traffic (Overview), the profile defaults
+  for new sessions (Routing), the pinned base URLs and the routes through them (Endpoints), the
+  composer row's facts and their order (Provider list), and what leaves the machine (Privacy). The
+  tab bar stays put while a panel scrolls, arrows/Home/End walk the row with focus following the
+  selection, and the open tab is remembered in `sessionStorage`, so reopening Settings lands where
+  it was left rather than always on Overview. Before the first `/status` answer there is nothing to
+  tab between, so the page keeps its one-line hint instead of drawing five empty panels, and a poll
+  that fails keeps the last snapshot, so every tab keeps its numbers under the offline banner.
+
+### Fixed
+
+- **`providers` asks the Session what model it is on, not the relay what it last carried.** The verb
+  defaulted to the newest model in the metrics ring, which is a proxy: after `/model` it still named
+  the previous model until a request had gone through, and on a Session that had routed nothing it
+  had no answer at all. It now reads `Agent.model.current()` — the documented "choice the next step
+  will use", so a recorded selection beats the last request — and keeps the ring as the fallback for
+  a host that cannot answer, before finally asking for a model id.
 
 ## [0.9.0] — 2026-11-14
 
