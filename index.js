@@ -37,14 +37,13 @@ import { USER_ID_MAX, baseModelId, createRelay, normalizeUserId } from './lib/pr
    and the tests read it from this module's public surface. */
 export { USER_ID_MAX, normalizeUserId }
 import { createConfigBridge } from './lib/config-bridge.js'
+import { CONTROL_CLIENTS, CONTROL_PREFIX } from './lib/control-client.js'
+import { installTui } from './lib/tui.js'
 import { MODEL_LISTING_MAX_BYTES, annotateLive, readLiveModels } from './lib/models-sync.js'
 import { PRECISION_IDS, normalizePrecision, precisionLabel } from './lib/quantization.js'
 import { normalizeReasoningEfforts } from './lib/reasoning.js'
 import { createAutoRepair } from './lib/auto-repair.js'
 import { readUsageStoreSync, usageStorePath, writeUsageStore, writeUsageStoreSync } from './lib/usage-store.js'
-
-/** Must match the string client.js probes and the docs advertise. */
-const CONTROL_PREFIX = '/__openrouter-plus'
 
 const DEFAULT_ROUTES = {
   '/flex/v1': 'flex',
@@ -737,6 +736,13 @@ function setControlLog(fn) {
   controlLog = typeof fn === 'function' ? fn : () => {}
 }
 
+/**
+ * Methods that change something. The front-door guard keys on this set rather
+ * than on the literal `POST`, so a future write route spelled `PUT` is fenced
+ * by construction instead of by remembering to copy the guard.
+ */
+const CONTROL_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 function controlRoute(handler) {
   return async (req, res) => {
     applyCors(req, res)
@@ -745,8 +751,21 @@ function controlRoute(handler) {
       res.end()
       return
     }
-    if (req.method === 'POST' && req.headers['x-oorp-client'] !== 'web') {
-      sendJson(res, 403, { error: { message: 'missing x-oorp-client header' } })
+    /* A write must name the front door that asked for it. The value is not
+       authentication — the listener is loopback-only — it is the one guard that
+       keeps a stray write from a page, a scanner or a pasted URL out of the
+       config path. The terminal sends `tui`; the page sends `web`. A value is
+       compared case-insensitively and trimmed, because a hand-written `curl` is
+       a legitimate caller and `TUI` names the same door. */
+    const client = typeof req.headers['x-oorp-client'] === 'string'
+      ? req.headers['x-oorp-client'].trim().toLowerCase()
+      : ''
+    if (CONTROL_WRITE_METHODS.has(req.method ?? '') && !CONTROL_CLIENTS.includes(client)) {
+      sendJson(res, 403, {
+        error: {
+          message: `missing or unknown x-oorp-client header; expected one of ${CONTROL_CLIENTS.join(', ')}`,
+        },
+      })
       return
     }
     /* Nothing is attached at all when the diagnostic is off: one boolean, no listener,
@@ -3122,6 +3141,46 @@ export function apply(ctx, rawConfig) {
         return { host: config.host, port: config.port, origin: originOf(config.host, config.port) }
       })
 
+    /*
+     * The terminal outlet — one slash command, and only once the relay has an
+     * address: every verb it offers is a call to the control API on that
+     * address, so registering it earlier would advertise a door with nothing
+     * behind it.
+     *
+     * `installTui` probes for a command registry and does nothing when there is
+     * none, which is what keeps a headless Host bootable. It is installed here
+     * rather than next to the web-server mount because the web front door is a
+     * page this plugin ships and the terminal front door is a registry someone
+     * else owns: one is a mount, the other is an offer.
+     */
+    let disposeTui = () => {}
+    void started
+      .then((address) => {
+        if (disposed) return
+        disposeTui = installTui(ctx, {
+          // The listening address, not the configured one: a profile that fell
+          // forward to the next port must still resolve its own relay, and a
+          // control call must never address a port nothing is bound to.
+          ownOrigin: () => address.origin,
+          // Which relay carries this profile's traffic is written in the provider
+          // rows, so that is what the resolver reads first — a second process on
+          // this machine owns 8791 and is the instance a pinned baseURL dials.
+          sources: async () => {
+            try {
+              const targets = await bridge.targets()
+              return Array.isArray(targets?.sources) ? targets.sources : []
+            } catch {
+              return []
+            }
+          },
+          host: config.host,
+          port: address.port,
+          portFallback: config.portFallback,
+          log,
+        })
+      })
+      .catch((error) => log('warn', 'could not mount the terminal outlet', error))
+
     // Three settle signals, one debounced pass: a profile write reloads the
     // patches, the settings snapshot moves when a config revision lands, and
     // adding or removing a route changes the adapter topology. Repair is
@@ -3158,6 +3217,7 @@ export function apply(ctx, rawConfig) {
 
     return () => {
       disposed = true
+      disposeTui()
       for (const off of unwatch) off?.()
       autoRepair.dispose()
       void relay.stop().catch((error) => log('warn', 'relay stop failed', error))

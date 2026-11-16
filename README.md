@@ -79,6 +79,9 @@ switching never mints a provider, a route or a model list.
   (Plugins → Installed → OpenRouter Plus, in the sidebar's plugin manager), beside the version and
   the Uninstall button — so the plugin is configurable from where it was installed, not only from
   the nav row it added.
+- **The same controls in a terminal.** A slash command — `/openrouter-plus`, alias `/oorp` — reports
+  the relay, the preset this Session runs on and where it came from, the precision floor, the routes
+  and the spend, and changes any of them without hand-editing YAML or curling the API.
 - **A preset chip in the composer** — next to the model selector, a compact chip shows the preset
   this Session will actually apply and switches it in one click. The switch is **per session**: it
   changes what the next request from *this* conversation carries, so two conversations can sit on
@@ -364,6 +367,28 @@ entirely, and use **Add reasoning to N models** in the settings page (or
 Either way it only ever touches routes whose `baseURL` points at the relay, never overwrites a
 declared map, never resurrects an explicit `false`, and writes nothing when there is nothing to do.
 
+## Use it from dsh-tui
+
+Under `dsh-tui` the plugin's front door is a command rather than a page: `/openrouter-plus` (alias
+`/oorp`) is registered through the DSH command registry, which the terminal and the Web UI both
+resolve, so it appears in the Web UI's command palette as well and the same verbs answer there.
+
+```
+/openrouter-plus                   relay, version, uptime, upstream, this Session's preset and floor, spend
+/openrouter-plus preset            the nine presets, with the current choice marked
+/openrouter-plus preset priority   switch this Session (memory only, no config write)
+/openrouter-plus routes            rows through the relay, and the targets behind them
+/openrouter-plus spend             today, the retained window, per-preset totals
+```
+
+`precision`, `route`/`unroute`, `user`, `repair` and `models` are the rest. [`docs/TUI.md`](docs/TUI.md)
+has the whole list, and answers the multi-instance question: which relay a command talks to when two
+profiles run at once, and why that is resolved from your provider rows rather than assumed to be
+`8791`.
+
+`npm run smoke:tui` runs every read-only verb against a live relay and exits non-zero on the first
+failure; `npm run smoke:tui -- --write` adds the preset write path.
+
 ## Presets
 
 A service tier is not one field. OpenRouter exposes three levers — `service_tier` (which pools may
@@ -603,8 +628,9 @@ On the web origin the API is behind the GUI's own fence (`ctx.connection.request
 Host/Origin trust check plus the `dsh-auth-*` session cookie, so a page served from another origin
 cannot read the telemetry or drive a write. A request with a loopback `Host` and no `Origin` is a
 local process — `curl`, a script — and is allowed through as before, which is also why the command
-below works without a cookie. `POST` additionally requires `x-oorp-client: web`, and the loopback
-copy of the API reflects CORS only for loopback GUI origins.
+below works without a cookie. A write additionally requires `x-oorp-client`, naming an accepted
+front door (`web`, or `tui` from the terminal); a read stays header-free. The loopback copy of the API
+reflects CORS only for loopback GUI origins.
 
 ```bash
 # Control API on the GUI origin (same answer, no extra port):

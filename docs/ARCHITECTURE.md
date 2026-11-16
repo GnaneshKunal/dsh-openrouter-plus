@@ -66,6 +66,10 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/endpoints.js` | relay-core | `parseEndpoints(payload, maxBytes)`, `levelsFrom(endpoints)`, `survives(allow, levels)`, `fetchEndpoints(upstream, model, { fetch })`; per-endpoint precision for admission control. Injected fetch, no network in tests |
 | `lib/providers.js` | relay-core | `parseProviders(payload, maxBytes)`, `sortProviders`, `groupProviders`, `findProvider`, `pinnedFacets`, `precisionLevels`, `tagsOf`, `readProviders(upstream, model, { fetch, authorization })`; the same listing read for *display* — full rows, dollars per million, the `latency`/`throughput` p50·p90 pair, groups in the model page's order. Injected fetch, no network in tests |
 | `lib/config-bridge.js` | config-bridge | `createConfigBridge(options) -> { available, targets, removeRoute, repairRoutes, repointRoute, restoreRoute, listRoutes, reasoning }` |
+| `lib/control-client.js` | terminal-outlet | `createControlClient({ origin }) -> { get, post, request, origin }`, `CONTROL_PREFIX`, `CONTROL_CLIENT_HEADER`, `CONTROL_CLIENTS`; one mount prefix, one header, one timeout, and `ControlUnavailable`/`ControlRejected` carrying a sentence rather than a stack |
+| `lib/control-origin.js` | terminal-outlet | `createOriginResolver({ candidates, ownOrigin, host, port, portFallback, probe }) -> { resolve, invalidate, known }`, `probeRelay`, `loopbackOriginsOf`, `isLoopbackHostname`, `originOf`; the candidate order, the 30-second cache and the fallback scan. Injected fetch, no network in tests |
+| `lib/tui-command.js` | terminal-outlet | `runTuiCommand({ rawInput, sessionId, client }) -> { kind, text }`, `parseInvocation`, the `format*` formatters, `TUI_COMMAND_NAME`/`TUI_COMMAND_ALIAS`/`TUI_INPUT_HINT`; text only — no socket, no colour, nothing over 80 columns |
+| `lib/tui.js` | terminal-outlet | `installTui(ctx, { ownOrigin, sources, host, port, portFallback }) -> dispose`, `tuiCommandDefinitions`, `sessionIdOf`; registers into `commands` when the composition has it, and stays silent when it does not |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
@@ -110,9 +114,10 @@ dispatch call, not a second implementation.
 | `GET /__openrouter-plus/user-tracking` | — | `{ ok: true, userTracking: { enabled, id } }`; read from the live plugin row, not the boot snapshot, so a toggle is visible before the reload lands |
 | `POST /__openrouter-plus/user-tracking` | `{ enabled: boolean }` | `{ ok: true, userTracking: { enabled, id } }`; one config write on the `userTracking` key. Turning it on mints `dsh-<32 hex>` when no id is stored; turning it off keeps the id, so a re-enable sends the same value. A non-boolean `enabled` is a `400` |
 
-`POST` requests must carry the header `x-oorp-client: web`; the relay answers `403` without it
-(a cheap cross-site-request guard: a foreign origin cannot add that header without a preflight the
-relay refuses). Every response carries CORS headers limited to loopback GUI origins.
+A write must carry an `x-oorp-client` header naming an accepted front door (`web` or `tui`); the
+relay answers `403` otherwise (a cheap cross-site-request guard: a foreign origin cannot add that
+header without a preflight the relay refuses). Every write route in the table is a `POST`. Every
+response carries CORS headers limited to loopback GUI origins.
 
 ### The target table and the per-provider switch
 
@@ -643,3 +648,49 @@ factory(require) { ... } })` call (see the decoration template). Inside:
 - Do not replace `conversation.input.model`: it is a `single` seat owned by
   `ui-model-selection` (`replaceRisk: shadows-shipped-ui`), and occupying it means reimplementing the
   two-level provider/model menu, effort levels, search and `/model` parity.
+
+## The terminal outlet
+
+The Host half is front-door neutral: a relay and a control API. The browser half is `client.js`. A
+terminal has neither a page nor an `<input>` the plugin can reach, but it does have a **command
+registry** — `@deepseek-ai/dsh-commands`, the one seam already wired in `dsh-tui` and in the Web UI.
+So the terminal half is a slash command and nothing else: `/openrouter-plus`, with the alias `/oorp`,
+two registrations sharing one handler. `lib/tui-command.js` turns one invocation into control calls
+and control answers into text; `lib/tui.js` owns the registration.
+
+- **The seam is a service, not an import.** `installTui` asks `ctx.inject(['commands'], …)` when the
+  context offers it, so a registry that activates after this row still finds the command, and it
+  falls back to a direct `ctx.get('commands')` probe for contexts that do not (tests, embedded
+  hosts). No registry means one log line and no registration, which is what keeps a headless Host
+  and a bare `cordis.yml` start bootable. `@deepseek-ai/dsh-commands` is not a dependency of this
+  package; it is a service that may or may not be present, and the relay must start either way.
+- **The origin is resolved, not assumed.** Each process binds `8791` and falls forward, and each
+  holds its own in-memory Session table, so a command that assumed `8791` would write a preset into
+  whichever process happens to own the port: a switch that does nothing, with nothing in the
+  transcript to say so. `lib/control-origin.js` builds its candidate list the way the traffic is
+  routed — the loopback origins of the profile's live provider rows' `baseURL`s in row order, then
+  the address this process's listener reported, then the configured port and the nine after it when
+  `portFallback` is on — and probes each with `GET /__openrouter-plus/health`, which must answer
+  `ok: true`, so a 200 from an unrelated server on the port is not mistaken for the plugin. The
+  winner is cached for 30 seconds; a refused or unreachable call invalidates it, and the last known
+  origin is reused only so the failure can name an address. Reading the rows per resolution rather
+  than once at apply time is deliberate: a row can be attached, detached or re-pointed while the
+  process keeps running.
+- **The write gate grew a second name.** A write used to carry `x-oorp-client: web` and nothing else.
+  The guard now keys on the write methods (`POST`, `PUT`, `PATCH`, `DELETE`, so a future write route
+  is fenced by construction) and accepts `web` or `tui` (`CONTROL_CLIENTS`), trimming the value and
+  comparing it case-insensitively; anything else answers `403` naming the accepted list. The value is
+  a guard, not authentication — the listener is loopback-only — and widening it is the only way a
+  second front door can write at all. `GET`s stay header-free, because a read has no config path
+  behind it. The accepted list and the terminal client's value come from one module
+  (`lib/control-client.js`, imported by `index.js`), so those two cannot drift apart; the page's
+  literal stays inside its own browser bundle, where the host test that still posts as `web` is what
+  pins it.
+- **Installed after the relay binds.** Every verb is a call to the control API on the address the
+  relay just took, so registering earlier would advertise a door with nothing behind it. `installTui`
+  runs from the `started` promise with `ownOrigin` set to the address `relay.start()` reported — the
+  fall-forward port when that is what it bound — and its disposer runs with the plugin's `ctx.effect`,
+  so a profile reload tears the command down with the row.
+
+The user-facing side — the verb table, which writes are per-Session and which are config writes, and
+what two profiles at once mean — is in [`docs/TUI.md`](TUI.md).
