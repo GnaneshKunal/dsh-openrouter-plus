@@ -64,16 +64,23 @@ function spyClient() {
 }
 
 test('sessionIdOf() reads the Session the UI dispatched for', () => {
+  // The real shape: `Agent` is `{ id }` and carries `session` at runtime; the
+  // shipped plugins read `agent.session.id`. Both must land on the same id — a
+  // wrong guess here silently disables every Session verb.
+  assert.equal(sessionIdOf({ agent: { id: 'sess-1', session: { id: 'sess-1' } } }), 'sess-1')
+  assert.equal(sessionIdOf({ agent: { id: 'sess-1' } }), 'sess-1')
+  assert.equal(sessionIdOf({ agent: { session: { id: 'sess-1' } } }), 'sess-1')
+  // Kept for a Host whose invocation spells the id directly.
   assert.equal(sessionIdOf({ agent: { sessionId: 'sess-1' } }), 'sess-1')
   // An id that is not a string would become the literal "undefined" in a query,
   // which is a different Session from the one the person is typing in.
-  assert.equal(sessionIdOf({ agent: { sessionId: '' } }), '')
+  assert.equal(sessionIdOf({ agent: { id: '' } }), '')
 })
 
 test('sessionIdOf() answers an empty string when there is no usable id', () => {
   assert.equal(sessionIdOf({}), '')
   assert.equal(sessionIdOf(undefined), '')
-  assert.equal(sessionIdOf({ agent: { sessionId: 7 } }), '')
+  assert.equal(sessionIdOf({ agent: { id: 7 } }), '')
   assert.equal(sessionIdOf({ agent: null }), '')
 })
 
@@ -91,7 +98,7 @@ test('tuiCommandDefinitions() registers the primary name and the alias, both com
 test('both handlers answer help from text and call nothing', async () => {
   const client = spyClient()
   for (const definition of tuiCommandDefinitions({ client })) {
-    const result = await definition.handler({ rawInput: 'help', agent: { sessionId: 'sess-1' } })
+    const result = await definition.handler({ rawInput: 'help', agent: { id: 'sess-1', session: { id: 'sess-1' } } })
     assert.equal(result.kind, 'success')
     assert.equal(typeof result.text, 'string')
     assert.ok(result.text.includes(`/${TUI_COMMAND_NAME}`))
@@ -236,7 +243,7 @@ test('a registered command resolves the relay through an injected fetch and name
   const definition = registry.registered.find((entry) => entry.name === TUI_COMMAND_NAME)
   assert.ok(definition, 'the primary command is registered')
 
-  const result = await definition.handler({ rawInput: '', agent: { sessionId: 'sess-1' } })
+  const result = await definition.handler({ rawInput: '', agent: { id: 'sess-1', session: { id: 'sess-1' } } })
 
   assert.equal(result.kind, 'success', result.text)
   // Naming the relay is the point of the status block: two profiles are two

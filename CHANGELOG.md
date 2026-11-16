@@ -46,7 +46,7 @@ palette.
   this change still accepts only `web`, and answers a terminal write with
   `403 missing x-oorp-client header` until its profile is restarted.
 - **`npm run smoke:tui`** — `scripts/tui-smoke.mjs` discovers a relay on `127.0.0.1:8791..8800` (or
-  honours `OORP_ORIGIN`), runs every read-only verb and exits non-zero on the first failure;
+  honours `OORP_ORIGIN`), runs every read-only verb, and exits non-zero if any of them failed;
   `--write` additionally sets and clears a synthetic Session's preset, which is what exercises the
   `tui` write path.
 - **No new configuration keys.** The outlet registers when a composition has a command registry and

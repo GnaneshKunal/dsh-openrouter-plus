@@ -47,6 +47,7 @@
     "index.js",
     "client.js",
     "lib",
+    "scripts",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

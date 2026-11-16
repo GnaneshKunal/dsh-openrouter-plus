@@ -413,14 +413,12 @@ const DISPATCH = [
     rawInput: 'user on',
     calls: [{ method: 'POST', path: '/user-tracking', payload: { enabled: true } }],
     includes: ['User tracking on', 'user_2f8c1d'],
-    width: false,
   },
   {
     name: '`user off` writes the tracking switch off',
     rawInput: 'user off',
     calls: [{ method: 'POST', path: '/user-tracking', payload: { enabled: false } }],
     includes: ['User tracking off', 'The stored one is kept'],
-    width: false,
   },
   {
     name: '`repair` refills the reasoning efforts a relay route is missing',
@@ -438,7 +436,7 @@ for (const verb of DISPATCH) {
     })
     assert.deepEqual(calls, verb.calls)
     assert.deepEqual(invalidations, [], 'a successful call must not drop the cached origin')
-    const text = verb.width === false ? succeeded(result) : printed(result)
+    const text = printed(result)
     for (const fragment of verb.includes ?? []) {
       assert.ok(text.includes(fragment), `expected ${JSON.stringify(fragment)} in:\n${text}`)
     }
@@ -477,7 +475,7 @@ test('`user maybe` is refused without a write', async () => {
   assert.match(result.text, /user on or off/)
 })
 
-test('a refused call becomes the refusal sentence and drops the cached origin', async () => {
+test('a refused call becomes the refusal sentence and keeps the cached origin', async () => {
   const refusal = new ControlRejected('unknown preset "turbo"; use one of none, standard, flex', {
     status: 400,
     path: '/tier',
@@ -488,7 +486,9 @@ test('a refused call becomes the refusal sentence and drops the cached origin', 
   assert.equal(result.kind, 'error')
   assert.equal(result.text, refusal.message, 'the API sentence is the transcript, not "HTTP 400"')
   assert.deepEqual(calls, [{ method: 'POST', path: '/tier', payload: { session: SESSION, preset: 'turbo' } }])
-  assert.equal(invalidations.length, 1, 'a refusal is evidence the cached origin may be stale')
+  // A 400 says the argument was wrong, not that the address moved: dropping the
+  // cached origin for it would cost a probe sweep per typo.
+  assert.deepEqual(invalidations, [], 'a refusal says nothing about the cached origin')
 })
 
 test('an unreachable relay becomes its sentence instead of a thrown handler', async () => {
@@ -520,6 +520,7 @@ test('a Session-scoped write is refused before any control call when there is no
     assert.equal(result.kind, 'error', rawInput)
     assert.deepEqual(calls, [], `${rawInput} must not write without a Session`)
     assert.match(result.text, /not running in one/)
+    assertWidth(result.text)
     assert.ok(result.text.includes(`/openrouter-plus ${verb} default <id>`), 'the refusal offers the profile write')
   }
 })
@@ -528,6 +529,7 @@ test('`preset clear` without a Session is refused like every other Session write
     const { result, calls } = await dispatch('preset clear', { sessionId: '', routes: {} })
     assert.equal(result.kind, 'error')
     assert.deepEqual(calls, [], 'a write with an empty Session must not reach the relay')
+    assertWidth(result.text)
   },
 )
 

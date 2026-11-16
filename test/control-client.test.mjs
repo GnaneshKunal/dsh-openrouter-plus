@@ -252,7 +252,10 @@ test('a relay that never answers is abandoned at the timeout, not left pending',
   const started = Date.now()
   await assert.rejects(client.get('/status'), (error) => {
     assert.ok(error instanceof ControlUnavailable)
-    assert.match(error.message, /could not reach/)
+    // A deadline that expired is a different remedy from a socket that was never
+    // there, and the sentence says which one happened.
+    assert.match(error.message, /heard nothing from its relay/)
+    assert.match(error.message, /25ms/)
     return true
   })
   // The point of the timeout is that the composer gets an answer at all.

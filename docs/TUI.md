@@ -31,8 +31,11 @@ front doors read the same registry, which is intended. One command, two register
 
 It ships in the package: the bundle's patch declares the Host row, so a profile that has the plugin
 has the command, and in a `dsh-tui` profile the bundle is already declared. Check it with
-`/openrouter-plus help`. If it is missing, the composition has no command registry: the log carries
-`no command registry in this composition; the terminal outlet stays off`, and the relay is unaffected.
+`/openrouter-plus help`. If it is missing, the composition has no command registry, the relay is unaffected, and the log says
+which case it was: `offering the terminal outlet to the command registry` when the Host could wait for
+one (the usual case — a registry that never activates leaves that line and nothing else), or
+`no command registry in this composition; the terminal outlet stays off` when the context has no
+registry seam at all.
 
 ## What the verbs do
 
@@ -101,6 +104,16 @@ Two profiles at once are two relays and two Session tables: a switch in one is i
 other, and `routes` reports the table of the process that answered, not the one that typed the
 command.
 
+That cuts both ways, and it is worth knowing before blaming the command. The **Session** verbs
+(`preset <id>`, `precision <id>`, the two `clear` forms) want the relay that carries the traffic, so
+they address the process the provider rows name — correct by construction. The **profile** verbs
+(`preset default`, `precision default`, `user on|off`, `route`, `unroute`, `repair`) edit the config
+of whichever process answered, which is that same one. In a two-profile setup that is a real
+constraint: a provider key that exists only in the typing profile is not there for `route`, and a
+`preset default` lands on the answering profile's row. `status` and `routes` name the process that
+answered, so the mismatch is visible rather than silent; run the command from the profile you mean to
+change when the two differ.
+
 ## What it does not do
 
 - **No model list.** `/provider` already does live discovery in a terminal: it probes a route's
@@ -145,8 +158,8 @@ OORP_ORIGIN=http://127.0.0.1:8792 npm run smoke:tui    # a specific instance
 npm run smoke:tui -- --write                           # also sets and clears a Session preset
 ```
 
-It prints `relay: <origin>`, then a line per verb, and exits non-zero on the first failure, reporting
-`N of M verbs failed`. `--write` exercises the `x-oorp-client: tui` path: it sets and clears a
+It prints `relay: <origin>`, then a line per verb, runs every check, and exits non-zero if any of
+them failed, reporting `N of M verbs failed`. `--write` exercises the `x-oorp-client: tui` path: it sets and clears a
 synthetic Session's preset. This is the check that says which instance your provider rows dial.
 
 ### 3. By hand, in the terminal

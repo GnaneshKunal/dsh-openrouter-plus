@@ -3156,7 +3156,9 @@ export function apply(ctx, rawConfig) {
     let disposeTui = () => {}
     void started
       .then((address) => {
-        if (disposed) return
+        // A boot that could not bind has no control API to reach, and installing a
+        // command for it would only advertise a door onto a closed room.
+        if (disposed || state.error !== undefined) return
         disposeTui = installTui(ctx, {
           // The listening address, not the configured one: a profile that fell
           // forward to the next port must still resolve its own relay, and a
@@ -3174,7 +3176,11 @@ export function apply(ctx, rawConfig) {
             }
           },
           host: config.host,
-          port: address.port,
+          // The *configured* port seeds the fallback scan, not the bound one: a
+          // process that fell forward still has to be able to find the sibling that
+          // holds the port the provider rows name. The bound address is `ownOrigin`
+          // above, and it is probed before this range.
+          port: config.port,
           portFallback: config.portFallback,
           log,
         })

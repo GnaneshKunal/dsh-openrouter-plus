@@ -386,8 +386,8 @@ has the whole list, and answers the multi-instance question: which relay a comma
 profiles run at once, and why that is resolved from your provider rows rather than assumed to be
 `8791`.
 
-`npm run smoke:tui` runs every read-only verb against a live relay and exits non-zero on the first
-failure; `npm run smoke:tui -- --write` adds the preset write path.
+`npm run smoke:tui` runs every read-only verb against a live relay and exits non-zero if any of them
+failed; `npm run smoke:tui -- --write` adds the preset write path.
 
 ## Presets
 

@@ -2519,20 +2519,20 @@ test('the terminal outlet registers two commands, and their handler drives this 
   }
 
   const primary = registry.definitions[0]
-  const chosen = await primary.handler({ rawInput: 'preset flex', agent: { sessionId: 'sess-outlet' } })
+  const chosen = await primary.handler({ rawInput: 'preset flex', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
   assert.equal(chosen.kind, 'success', chosen.text)
   const tier = await (await fetch(`${origin}/__openrouter-plus/tier?session=sess-outlet`)).json()
   assert.equal(tier.chosen, 'flex', 'the handler wrote through the relay this boot is listening on')
 
   /* A bare invocation is the one answer that names an origin, which is how the command
      shows it resolved the right instance rather than another profile's relay. */
-  const status = await primary.handler({ rawInput: '', agent: { sessionId: 'sess-outlet' } })
+  const status = await primary.handler({ rawInput: '', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
   assert.equal(status.kind, 'success', status.text)
   assert.ok(status.text.includes(origin), `the status block names the relay it addressed (${origin})`)
 
   /* The API's own refusal, surfaced as a sentence: `preset nope` is a 400 from the control
      layer, and losing its wording would turn a typo into "the command failed". */
-  const refused = await primary.handler({ rawInput: 'preset nope', agent: { sessionId: 'sess-outlet' } })
+  const refused = await primary.handler({ rawInput: 'preset nope', agent: { id: 'sess-outlet', session: { id: 'sess-outlet' } } })
   assert.equal(refused.kind, 'error', 'a refused write resolves as an error result, not a rejection')
   assert.match(refused.text, /unknown preset "nope"/)
   assert.match(refused.text, /flex/, 'and it lists the presets that would have worked')
