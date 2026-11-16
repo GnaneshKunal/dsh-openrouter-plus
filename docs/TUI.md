@@ -58,7 +58,8 @@ Both names take the same argument; a bare command is `status`, and `help` prints
 | `spend` | Today, the retained window, requests and errors, tokens in and out, the measured multiplier of list price, and the priciest presets by cost. |
 | `user` · `user on` · `user off` | The optional OpenRouter `user` identifier: whether one is sent, which one, and the switch. |
 | `repair` | Refill the reasoning efforts a relay route is missing. |
-| `models` | Why model discovery lives in `/provider`, not here. |
+| `providers [<model>]` | The endpoint table for one model: price in and out per million tokens, tokens per second, milliseconds to the first token, and the last day's uptime, one row per OpenRouter endpoint in the model page's own group order. With no model named it uses the one this Session last put through the relay. |
+| `models` | Why model *discovery* lives in `/provider`, not here. |
 
 The nine preset ids are `none`, `standard`, `fastest`, `fastest-standard`, `cheapest`, `flex`,
 `priority`, `ultra` and `floor`; the four floors are `any`, `no-four-bit`, `eight-bit-up` and
@@ -116,9 +117,11 @@ change when the two differ.
 
 ## What it does not do
 
-- **No model list.** `/provider` already does live discovery in a terminal: it probes a route's
+- **No model catalogue.** `/provider` already does live discovery in a terminal: it probes a route's
   stored `baseURL` with the stored key, so a model OpenRouter added after this install appears there.
-  A second listing here would be a duplicate that drifts. `models` says so in the transcript.
+  A second catalogue here would be a duplicate that drifts. What `providers` answers is the other
+  question — *these* are the endpoints behind one model, and what each charges and delivers — because
+  that is the fact a routing decision turns on and nothing in the terminal reported it.
 - **No status-line field, no scene.** A field beside the model, and a full-screen page of its own,
   are the natural next steps; neither is in this change.
 - **No new configuration keys.** The outlet registers itself when a command registry exists.
@@ -198,6 +201,7 @@ curl -s http://127.0.0.1:8791/__openrouter-plus/health
 | A line says *chosen for this Session* but the bill does not move | Check the first line of `status`: which relay answered, and whether this Session's provider is routed at all. A Session on `none`, or on a provider that is not through the relay, sends nothing to steer. |
 | A switch seems to affect nothing, or the wrong conversation | Two profiles are two relays and two Session tables. `status` names the one that answered; the other will disagree. |
 | `no provider route named "…"` | `route` takes the provider key as `routes` prints it, not the display name. |
+| `providers` says *no endpoint listing*, or the speeds are all dashes | The table is the one verb that reads OpenRouter rather than the relay: a listing that failed is reported with the upstream's reason, and speed fields need an authenticated read, so an unauthenticated caller still gets prices and uptime. Name the model explicitly if the Session has not routed a request yet. |
 | The command is missing from the palette | No command registry in this composition (the log says so), or the name collided (`could not register /openrouter-plus`). The relay keeps working either way. |
 
 ## Internals

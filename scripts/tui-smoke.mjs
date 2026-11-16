@@ -23,8 +23,20 @@ import { createControlClient } from '../lib/control-client.js'
 import { createOriginResolver, loopbackOriginsOf, originOf, probeRelay } from '../lib/control-origin.js'
 import { runTuiCommand } from '../lib/tui-command.js'
 
-const args = new Set(process.argv.slice(2))
-const write = args.has('--write')
+const args = process.argv.slice(2)
+const write = args.includes('--write')
+
+/**
+ * The model whose endpoint table to check, when one was named.
+ *
+ * `/providers` is the one verb that reads OpenRouter rather than the relay, so it
+ * is opt-in: a smoke run must not fail because an upstream was slow, and the
+ * model has to be one this installation actually uses.
+ */
+const modelFlag = args.indexOf('--model')
+const model = modelFlag >= 0
+  ? (args[modelFlag + 1] ?? '').trim()
+  : (typeof process.env.OORP_MODEL === 'string' ? process.env.OORP_MODEL.trim() : '')
 
 /* The relay defaults the plugin ships with. A profile that fell forward is found
    by the same scan the command uses. */
@@ -93,6 +105,7 @@ const checks = [
 if (write) {
   checks.push(['set session preset', 'preset priority'], ['clear session preset', 'preset clear'])
 }
+if (model !== '') checks.push(['endpoint table', `providers ${model}`])
 
 let failed = 0
 for (const [label, rawInput] of checks) {
@@ -115,6 +128,7 @@ if (failed > 0) {
 }
 console.log(`\nall ${checks.length} verbs answered`)
 if (!write) console.log('add --write to exercise the POST path (sets and clears a synthetic Session preset)')
+if (model === '') console.log('add --model <author/slug> to check the endpoint table (price, tok/s, uptime)')
 
 /**
  * @param {string} value

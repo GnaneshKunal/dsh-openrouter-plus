@@ -381,6 +381,10 @@ resolve, so it appears in the Web UI's command palette as well and the same verb
 /openrouter-plus spend             today, the retained window, per-preset totals
 ```
 
+`/openrouter-plus providers` prints the endpoint table behind the model you just used — price in and
+out per million tokens, tokens per second, latency and uptime, one row per provider — which is the
+same listing the composer's endpoint menu draws, in a terminal.
+
 `precision`, `route`/`unroute`, `user`, `repair` and `models` are the rest. [`docs/TUI.md`](docs/TUI.md)
 has the whole list, and answers the multi-instance question: which relay a command talks to when two
 profiles run at once, and why that is resolved from your provider rows rather than assumed to be

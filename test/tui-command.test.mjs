@@ -20,6 +20,7 @@ import {
   formatHelp,
   formatPrecisionCatalog,
   formatPresetCatalog,
+  formatProviders,
   formatRouteResult,
   formatRoutes,
   formatSpend,
@@ -124,6 +125,64 @@ const CLEARED_PRECISION = {
 }
 
 /** The user-tracking answer, envelope and all, as `GET`/`POST` send it. */
+/** `/providers`: three endpoints of one model, one of them not routable. */
+const ENDPOINTS = {
+  ok: true,
+  model: 'deepseek/deepseek-v3.2',
+  cached: false,
+  groups: [
+    { id: 'standard', tags: ['deepinfra/fp8', 'together/fp8'] },
+    { id: 'flex', tags: ['fireworks/fp8/flex'] },
+    { id: 'unavailable', tags: ['bad/endpoint'] },
+  ],
+  providers: [
+    {
+      tag: 'deepinfra/fp8',
+      precision: 'fp8',
+      inputPrice: 0.3,
+      outputPrice: 1.2,
+      throughput: { p50: 142, p90: 190 },
+      latency: { p50: 310, p90: 520 },
+      uptime1d: 99.81,
+      available: true,
+      group: 'standard',
+    },
+    {
+      tag: 'together/fp8',
+      precision: 'fp8',
+      inputPrice: 0.25,
+      outputPrice: 1,
+      throughput: { p50: 88, p90: null },
+      latency: { p50: 420, p90: null },
+      uptime1d: 98.2,
+      available: true,
+      group: 'standard',
+    },
+    {
+      tag: 'fireworks/fp8/flex',
+      precision: null,
+      inputPrice: 0,
+      outputPrice: 0.6,
+      throughput: null,
+      latency: null,
+      uptime1d: null,
+      available: true,
+      group: 'flex',
+    },
+    {
+      tag: 'bad/endpoint',
+      precision: 'unknown',
+      inputPrice: 2.5,
+      outputPrice: 9,
+      throughput: { p50: 10, p90: 12 },
+      latency: { p50: 900, p90: 900 },
+      uptime1d: 41,
+      available: false,
+      group: 'unavailable',
+    },
+  ],
+}
+
 const USER_TRACKING = { ok: true, userTracking: { enabled: true, id: 'user_2f8c1d' } }
 
 /** Every route the command may call, with an answer shaped like the Host's. */
@@ -443,6 +502,92 @@ for (const verb of DISPATCH) {
   })
 }
 
+test('`providers` answers with price, speed and uptime per endpoint', async () => {
+  const { result, calls } = await dispatch('providers deepseek/deepseek-v3.2', {
+    routes: controlRoutes({ 'GET /providers': ENDPOINTS }),
+  })
+  assert.deepEqual(calls, [
+    { method: 'GET', path: '/providers', payload: { model: 'deepseek/deepseek-v3.2' } },
+  ])
+  const text = printed(result)
+  // The facts a routing choice is made with, in the order the table promises them.
+  for (const fragment of [
+    'deepseek/deepseek-v3.2: 4 endpoints',
+    'in $/M',
+    'out $/M',
+    'tok/s',
+    '0.300',
+    '1.20',
+    '142/190',
+    '310/520',
+    '99.8',
+    'standard 2 · flex 1 · unavailable 1',
+  ]) {
+    assert.ok(text.includes(fragment), `expected ${JSON.stringify(fragment)} in:
+${text}`)
+  }
+  // A listing that omits a fact must not print a zero for it: "0 tok/s" is a
+  // claim, and the endpoint simply did not report.
+  const unnoticed = text.split('\n').find((line) => line.includes('fireworks/fp8/flex'))
+  assert.ok(unnoticed !== undefined)
+  assert.ok(!/\b0\b/.test(unnoticed.replace('0.120', '').replace('0.600', '')), 'no invented zeros')
+  assert.ok(unnoticed.includes('free'), 'a zero price is free, not a blank')
+  // The endpoint OpenRouter will not route to is marked, not hidden.
+  assert.ok(text.includes('bad/endpoint'))
+  assert.ok(text.includes('!'))
+  assertWidth(text)
+})
+
+test('`providers` remembers the model this Session routed last', async () => {
+  const { result, calls } = await dispatch('providers', {
+    routes: controlRoutes({
+      'GET /status': {
+        ...STATUS,
+        metrics: {
+          ...STATUS.metrics,
+          recent: [
+            { at: 3, sessionId: 'another-session', model: 'x/y' },
+            { at: 2, sessionId: SESSION, model: 'deepseek/deepseek-v3.2' },
+            { at: 1, sessionId: SESSION, model: 'older/model' },
+          ],
+        },
+      },
+      'GET /providers': ENDPOINTS,
+    }),
+  })
+  // Newest first, and matched on this Session: the other session's row is skipped.
+  assert.deepEqual(calls[1], { method: 'GET', path: '/providers', payload: { model: 'deepseek/deepseek-v3.2' } })
+  assert.ok(printed(result).includes("this Session's last model"))
+})
+
+test('`providers` with nothing to go on asks for a model instead of guessing', async () => {
+  const { result, calls } = await dispatch('providers', {
+    routes: controlRoutes({ 'GET /status': STATUS }),
+  })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /providers <author\/slug>/)
+  assert.deepEqual(calls, [{ method: 'GET', path: '/status' }])
+})
+
+test('`providers` refuses an id that cannot be an OpenRouter model, without asking', async () => {
+  const { result, calls } = await dispatch('providers gpt', { routes: controlRoutes() })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /author\/slug/)
+  assert.deepEqual(calls, [], 'a malformed id is answered from the text alone')
+})
+
+test('`providers` reports an empty listing with the reason the upstream gave', () => {
+  const text = printed({
+    kind: 'success',
+    text: formatProviders({
+      answer: { model: 'x/y', providers: [], groups: [], error: 'the upstream answered 502' },
+    }),
+  })
+  assert.ok(text.includes('No endpoint listing for x/y.'))
+  assert.ok(text.replace(/\s+/g, ' ').includes('the upstream answered 502'))
+  assertWidth(text)
+})
+
 test('`models` and `help` answer from text and never reach the relay', async () => {
   for (const rawInput of ['models', 'help']) {
     const { result, calls } = await dispatch(rawInput, { routes: {} })
@@ -573,6 +718,7 @@ test('the command fits the 80-column transcript for every verb', async () => {
       'user on',
       'user off',
       'repair',
+      'providers deepseek/deepseek-v3.2',
       'models',
       'help',
     ]
@@ -582,7 +728,11 @@ test('the command fits the 80-column transcript for every verb', async () => {
       // The width sweep has to answer `precision clear` the way the Host does,
       // or the stale fixture (a floor still named eight-bit-up) invents a long line.
       const routes =
-        rawInput === 'precision clear' ? controlRoutes({ 'POST /precision': CLEARED_PRECISION }) : undefined
+        rawInput === 'precision clear'
+          ? controlRoutes({ 'POST /precision': CLEARED_PRECISION })
+          : rawInput.startsWith('providers')
+            ? controlRoutes({ 'GET /providers': ENDPOINTS })
+            : undefined
       const { result } = await dispatch(rawInput, { routes })
       if (result.kind !== 'success') {
         over.push(`${JSON.stringify(rawInput)}: ${result.kind}`)
