@@ -69,7 +69,7 @@ dsh-llm-pi-ai ──► dsh-openrouter-plus relay ──► https://openrouter.a
 | `lib/control-client.js` | terminal-outlet | `createControlClient({ origin }) -> { get, post, request, origin }`, `CONTROL_PREFIX`, `CONTROL_CLIENT_HEADER`, `CONTROL_CLIENTS`; one mount prefix, one header, one timeout, and `ControlUnavailable`/`ControlRejected` carrying a sentence rather than a stack |
 | `lib/control-origin.js` | terminal-outlet | `createOriginResolver({ candidates, ownOrigin, host, port, portFallback, probe }) -> { resolve, invalidate, known }`, `probeRelay`, `loopbackOriginsOf`, `isLoopbackHostname`, `originOf`; the candidate order, the 30-second cache and the fallback scan. Injected fetch, no network in tests |
 | `lib/tui-command.js` | terminal-outlet | `runTuiCommand({ rawInput, sessionId, client }) -> { kind, text }`, `parseInvocation`, the `format*` formatters, `TUI_COMMAND_NAME`/`TUI_COMMAND_ALIAS`/`TUI_INPUT_HINT`; text only — no socket, no colour, nothing over 80 columns |
-| `lib/tui.js` | terminal-outlet | `installTui(ctx, { ownOrigin, sources, host, port, portFallback }) -> dispose`, `tuiCommandDefinitions`, `sessionIdOf`; registers into `commands` when the composition has it, and stays silent when it does not |
+| `lib/tui.js` | terminal-outlet | `installTui(ctx, { ownOrigin, sources, host, port, portFallback }) -> dispose`, `tuiCommandDefinitions`, `sessionIdOf`; registers into `commands` when the composition has it, and logs one line without registering when it does not |
 | `client.js` | models-page | `window.__ModuleLoader__.load(...)`; registers the `settings.section` page "OpenRouter Plus", the same page as the `plugins.bundle.config` body of the bundle (`dsh-openrouter-plus`), the `settings.models.provider-card` row extension, the composer preset chip and the `sidebar.footer.action` spend card + dialog. |
 | `package.json`, `cordis.patch.yml`, `locale/`, `icon.svg` | lead | bundle manifest, inserted row, display metadata. |
 
@@ -672,8 +672,9 @@ and control answers into text; `lib/tui.js` owns the registration.
   the address this process's listener reported, then the configured port and the nine after it when
   `portFallback` is on — and probes each with `GET /__openrouter-plus/health`, which must answer
   `ok: true`, so a 200 from an unrelated server on the port is not mistaken for the plugin. The
-  winner is cached for 30 seconds; a refused or unreachable call invalidates it, and the last known
-  origin is reused only so the failure can name an address. Reading the rows per resolution rather
+  winner is cached for 30 seconds; an unreachable relay invalidates it while a refusal keeps it (the
+  argument was wrong, not the address), and the last known origin is reused only so the failure can
+  name an address. Reading the rows per resolution rather
   than once at apply time is deliberate: a row can be attached, detached or re-pointed while the
   process keeps running.
 - **The write gate grew a second name.** A write used to carry `x-oorp-client: web` and nothing else.

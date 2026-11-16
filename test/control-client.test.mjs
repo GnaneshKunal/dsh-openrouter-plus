@@ -262,6 +262,34 @@ test('a relay that never answers is abandoned at the timeout, not left pending',
   assert.ok(Date.now() - started < 1_000, 'the call ends at its own deadline')
 })
 
+test('a body that stalls after the headers is abandoned at the same deadline', async () => {
+  // The deadline has to wrap the *body* read, not just the headers: a relay that
+  // answers 200 and then stops mid-body is the failure a headers-only timer misses,
+  // and the command handler awaits this call. `text()` here ignores nothing — it
+  // rejects only when the signal we pass it fires, so a cleared timer would hang.
+  const stallBody = (_url, init) => ({
+    ok: true,
+    status: 200,
+    text: () =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted mid-body')), { once: true })
+      }),
+  })
+  const client = createControlClient({
+    origin: () => 'http://127.0.0.1:8791',
+    timeoutMs: 25,
+    fetchImpl: stallBody,
+  })
+
+  const started = Date.now()
+  await assert.rejects(client.get('/status'), (error) => {
+    assert.ok(error instanceof ControlUnavailable)
+    assert.match(error.message, /heard nothing from its relay/)
+    return true
+  })
+  assert.ok(Date.now() - started < 1_000, 'the body read inherits the same deadline')
+})
+
 test('an origin that cannot be named is a refusal, and nothing is sent', async () => {
   const origins = [
     () => null,

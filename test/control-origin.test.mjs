@@ -230,6 +230,25 @@ test('the resolver asks the declared rows, then its own listener, then the fallb
   assert.deepEqual(await resolver.candidates(), expected, 'the list itself is deduped and ordered')
 })
 
+test('a process that fell forward still scans from the configured port', async () => {
+  // Configured 8791, bound 8792 after a fall-forward. The sibling that owns 8791 is
+  // the instance the provider rows dial, so the range has to start there — starting
+  // at the bound port would look at 8792..8801 and never see it.
+  const { asked, probe } = recordingProbe((origin) => origin === 'http://127.0.0.1:8791')
+  const resolver = createOriginResolver({
+    candidates: () => [],
+    ownOrigin: () => 'http://127.0.0.1:8792',
+    host: '127.0.0.1',
+    port: 8791,
+    portFallback: true,
+    probe,
+  })
+
+  assert.equal(await resolver.resolve(), 'http://127.0.0.1:8791')
+  assert.equal(asked[0], 'http://127.0.0.1:8792', 'its own bound address is still tried first')
+  assert.ok(asked.includes('http://127.0.0.1:8791'), 'the configured port is inside the range')
+})
+
 test('the fallback range is not scanned unless it was asked for', async () => {
   const { asked, probe } = recordingProbe(false)
   const resolver = createOriginResolver({
