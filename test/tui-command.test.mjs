@@ -286,7 +286,7 @@ function recorder(routes) {
  * `''` on purpose.
  *
  * @param {string} rawInput
- * @param {{ sessionId?: string, routes?: Record<string, unknown>, client?: any }} [options]
+ * @param {{ sessionId?: string, model?: string, routes?: Record<string, unknown>, client?: any }} [options]
  */
 async function dispatch(rawInput, options = {}) {
   const control = recorder(options.routes ?? controlRoutes())
@@ -294,6 +294,7 @@ async function dispatch(rawInput, options = {}) {
   const result = await runTuiCommand({
     rawInput,
     sessionId: options.sessionId ?? SESSION,
+    model: options.model,
     client: options.client ?? control.client,
     invalidateOrigin: () => invalidations.push(1),
     log: () => {},
@@ -559,6 +560,43 @@ ${text}`)
   assert.ok(text.includes('bad/endpoint'))
   assert.ok(text.includes('!'))
   assertWidth(text)
+})
+
+test('`providers` defaults to the model this Session is on', async () => {
+  const { result, calls } = await dispatch('providers', {
+    model: 'deepseek/deepseek-v3.2',
+    routes: controlRoutes({ 'GET /providers': ENDPOINTS }),
+  })
+  // The selected model answers the question on its own: no status read, and no
+  // dependence on a request having been made yet — which is what `/model` then
+  // `providers` needs.
+  assert.deepEqual(calls, [{ method: 'GET', path: '/providers', payload: { model: 'deepseek/deepseek-v3.2' } }])
+  assert.ok(printed(result).includes("this Session's model"))
+})
+
+test('a named model still wins over the one the Session is on', async () => {
+  const { result, calls } = await dispatch('providers other/model', {
+    model: 'deepseek/deepseek-v3.2',
+    routes: controlRoutes({ 'GET /providers': ENDPOINTS }),
+  })
+  assert.deepEqual(calls, [{ method: 'GET', path: '/providers', payload: { model: 'other/model' } }])
+  assert.ok(!printed(result).includes("this Session's model"), 'a named model is not labelled as the default')
+})
+
+test('the Session model beats the last model it routed', async () => {
+  const { result } = await dispatch('providers', {
+    model: 'deepseek/deepseek-v3.2',
+    routes: controlRoutes({
+      'GET /status': {
+        ...STATUS,
+        metrics: { ...STATUS.metrics, recent: [{ sessionId: SESSION, model: 'older/model' }] },
+      },
+      'GET /providers': ENDPOINTS,
+    }),
+  })
+  // No `/status` call at all: the selection is the better answer, so the ring is
+  // never consulted.
+  assert.ok(printed(result).includes('deepseek/deepseek-v3.2: 5 endpoints'))
 })
 
 test('`providers` remembers the model this Session routed last', async () => {

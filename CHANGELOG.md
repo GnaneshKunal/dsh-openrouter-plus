@@ -7,6 +7,15 @@ the config keys can still change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`providers` asks the Session what model it is on, not the relay what it last carried.** The verb
+  defaulted to the newest model in the metrics ring, which is a proxy: after `/model` it still named
+  the previous model until a request had gone through, and on a Session that had routed nothing it
+  had no answer at all. It now reads `Agent.model.current()` — the documented "choice the next step
+  will use", so a recorded selection beats the last request — and keeps the ring as the fallback for
+  a host that cannot answer, before finally asking for a model id.
+
 **The plugin has a terminal front door: one slash command that reads the relay and changes what a
 Session runs on.** A profile running under `dsh-tui` could route traffic through the plugin, but
 changing a preset, the precision floor or the user switch meant hand-editing YAML or curling the

@@ -12,7 +12,7 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import { TUI_COMMAND_ALIAS, TUI_COMMAND_NAME } from '../lib/tui-command.js'
-import { installTui, sessionIdOf, tuiCommandDefinitions } from '../lib/tui.js'
+import { installTui, modelIdOf, sessionIdOf, tuiCommandDefinitions } from '../lib/tui.js'
 
 /** A log sink that keeps `(level, message)` pairs; the installer must never print. */
 function logCollector() {
@@ -82,6 +82,22 @@ test('sessionIdOf() answers an empty string when there is no usable id', () => {
   assert.equal(sessionIdOf(undefined), '')
   assert.equal(sessionIdOf({ agent: { id: 7 } }), '')
   assert.equal(sessionIdOf({ agent: null }), '')
+})
+
+test('modelIdOf() reads the model the Session is on, and survives a host that cannot say', () => {
+  // `Agent.model.current()` is the documented "choice the next step will use", so
+  // it already reflects a `/model` switch that no request has used yet — which is
+  // exactly the case a "last routed model" fallback gets wrong.
+  const current = () => ({ provider: 'openrouter', model: 'deepseek/v3.2' })
+  assert.equal(modelIdOf({ agent: { model: { current } } }), 'deepseek/v3.2')
+
+  // No selection resolved, a foreign agent shape, a non-string and a host that
+  // throws: all four mean "the caller falls back", never an error.
+  assert.equal(modelIdOf({ agent: { model: { current: () => undefined } } }), '')
+  assert.equal(modelIdOf({ agent: {} }), '')
+  assert.equal(modelIdOf({ agent: { model: { current: () => ({ model: 7 }) } } }), '')
+  assert.equal(modelIdOf({ agent: { model: { current: () => { throw new Error('no session') } } } }), '')
+  assert.equal(modelIdOf({}), '')
 })
 
 test('tuiCommandDefinitions() registers the primary name and the alias, both complete', () => {
