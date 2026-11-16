@@ -12,7 +12,7 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import { TUI_COMMAND_ALIAS, TUI_COMMAND_NAME } from '../lib/tui-command.js'
-import { installTui, sessionIdOf, tuiCommandDefinitions } from '../lib/tui.js'
+import { installTui, modelIdOf, sessionIdOf, tuiCommandDefinitions } from '../lib/tui.js'
 
 /** A log sink that keeps `(level, message)` pairs; the installer must never print. */
 function logCollector() {
@@ -82,6 +82,22 @@ test('sessionIdOf() answers an empty string when there is no usable id', () => {
   assert.equal(sessionIdOf(undefined), '')
   assert.equal(sessionIdOf({ agent: { id: 7 } }), '')
   assert.equal(sessionIdOf({ agent: null }), '')
+})
+
+test('modelIdOf() reads the model the Session is on, and survives a host that cannot say', () => {
+  // `Agent.model.current()` is the documented "choice the next step will use", so
+  // it already reflects a `/model` switch that no request has used yet — which is
+  // exactly the case a "last routed model" fallback gets wrong.
+  const current = () => ({ provider: 'openrouter', model: 'deepseek/v3.2' })
+  assert.equal(modelIdOf({ agent: { model: { current } } }), 'deepseek/v3.2')
+
+  // No selection resolved, a foreign agent shape, a non-string and a host that
+  // throws: all four mean "the caller falls back", never an error.
+  assert.equal(modelIdOf({ agent: { model: { current: () => undefined } } }), '')
+  assert.equal(modelIdOf({ agent: {} }), '')
+  assert.equal(modelIdOf({ agent: { model: { current: () => ({ model: 7 }) } } }), '')
+  assert.equal(modelIdOf({ agent: { model: { current: () => { throw new Error('no session') } } } }), '')
+  assert.equal(modelIdOf({}), '')
 })
 
 test('tuiCommandDefinitions() registers the primary name and the alias, both complete', () => {
@@ -256,4 +272,73 @@ test('a registered command resolves the relay through an injected fetch and name
     requests.some((entry) => entry.startsWith(`GET ${origin}/__openrouter-plus/tier?session=sess-1`)),
     `the Session is passed to the tier read:\n${requests.join('\n')}`,
   )
+})
+
+test('a registered command carries the Session\'s model into /providers', async () => {
+  /* The definition is what the real front door calls, so this is the only place
+     that proves `model: modelIdOf(invocation)` is wired: without it the verb would
+     fall through to the metrics ring, and every unit test would still pass. */
+  const origin = 'http://127.0.0.1:9'
+  /** @type {string[]} */
+  const requests = []
+
+  function fetchImpl(url) {
+    const address = String(url)
+    requests.push(address)
+    const answer = (body) => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    })
+    if (address === `${origin}/__openrouter-plus/health`) return Promise.resolve(answer({ ok: true }))
+    if (address.startsWith(`${origin}/__openrouter-plus/providers`)) {
+      return Promise.resolve(
+        answer({
+          ok: true,
+          model: 'deepseek/v3.2',
+          groups: [{ id: 'standard', tags: ['deepinfra/fp8'] }],
+          providers: [
+            {
+              tag: 'deepinfra/fp8',
+              tier: 'standard',
+              precision: 'fp8',
+              inputPrice: 0.3,
+              outputPrice: 1.2,
+              throughput: { p50: 100, p90: 120 },
+              latency: { p50: 300, p90: 400 },
+              uptime1d: 99.9,
+              available: true,
+              group: 'standard',
+            },
+          ],
+        }),
+      )
+    }
+    return Promise.resolve({ ok: false, status: 404, json: async () => null, text: async () => '' })
+  }
+
+  const registry = recordingRegistry()
+  installTui(probingContext(registry), { ownOrigin: () => origin, fetchImpl, log: () => {} })
+  const definition = registry.registered.find((entry) => entry.name === TUI_COMMAND_NAME)
+  assert.ok(definition, 'the primary command is registered')
+
+  const result = await definition.handler({
+    rawInput: 'providers',
+    agent: {
+      id: 'sess-1',
+      session: { id: 'sess-1' },
+      model: { current: () => ({ provider: 'openrouter', model: 'deepseek/v3.2' }) },
+    },
+  })
+
+  assert.equal(result.kind, 'success', result.text)
+  assert.ok(
+    requests.includes(`${origin}/__openrouter-plus/providers?model=deepseek%2Fv3.2`),
+    `the selected model must ride the read:\n${requests.join('\n')}`,
+  )
+  // The selection is the better answer, so the ring is never consulted — a
+  // `/status` read here would mean the fallback had taken over.
+  assert.ok(!requests.some((entry) => entry.includes('/status')), 'the metrics ring is not read')
+  assert.ok(result.text.includes("this Session's model"), 'and the table says where the model came from')
 })
