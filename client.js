@@ -337,6 +337,15 @@ window.__ModuleLoader__.load({
       'card.regionAria': 'OpenRouter Plus relay',
       'page.intro': 'A loopback relay for OpenRouter. The composer chip picks a routing preset for one Session; a pinned base URL below sets it for a whole route.',
 
+      /* One label per question the page answers. Kept to one line: five tabs share a
+         564px column in the Settings modal. */
+      'settings.tabsAria': 'OpenRouter Plus settings sections',
+      'settings.tab.overview': 'Overview',
+      'settings.tab.routing': 'Routing',
+      'settings.tab.endpoints': 'Endpoints',
+      'settings.tab.display': 'Provider list',
+      'settings.tab.privacy': 'Privacy',
+
       'common.unknown': 'unknown',
       'common.notAvailable': '—',
       'common.multiplier': '{value}×',
@@ -395,6 +404,11 @@ window.__ModuleLoader__.load({
         'Multipliers are relative token prices. The USD figures are what OpenRouter charged for relayed requests, read from each response rather than derived from a price table.',
 
       'providers.caption': 'Provider routes',
+      /* The profile defaults moved to the Routing tab; the routes themselves stay on
+         Endpoints, next to the pinned base URLs they belong with. */
+      'routing.caption': 'New sessions',
+      'routing.hint':
+        'Profile defaults for every new Session; the composer chip still overrides them for one Session.',
       'providers.explain':
         'Tick \u201cRoute through OpenRouter Plus\u201d on a provider in Settings \u2192 Models, then pick a preset in the composer. The provider keeps its models and key; only its base URL moves onto this relay.',
       'providers.loading': 'Loading provider routes…',
@@ -550,6 +564,7 @@ window.__ModuleLoader__.load({
          not fit one 220 px menu row, and speed is the pair an operator may not always want,
          so the row's vocabulary is a setting instead of a guess about what fits. */
       'provider.facts.caption': 'Provider list display',
+      'provider.facts.unavailable': 'This Host does not report the endpoint display settings.',
       'provider.facts.hint':
         'Which facts an endpoint row states in the composer menu. Speed is OpenRouter\u2019s own rolling 30-minute figure, and it appears only after the relay has seen a request for that model. Applying reloads the relay once, and the cached listings go with it, so speed comes back as each model is used again.',
       'provider.facts.precision': 'Precision',
@@ -644,6 +659,8 @@ window.__ModuleLoader__.load({
       'usage.genId': 'Generation id',
       'usage.notReported': 'not reported',
       'usage.usd': '${value}',
+      /* A real sub-cent bill: the two-decimal headline must not read as "nothing spent". */
+      'usage.usdUnderCent': '< $0.01',
       'usage.toggleSettings': 'Show spend card in the sidebar',
       'usage.toggleHint':
         'A collapsible card at the sidebar foot shows today\'s spend and the models that used it. Turning it on reloads the relay.',
@@ -654,6 +671,7 @@ window.__ModuleLoader__.load({
          identity upstream, so one blocked end user can block the account. Off by default:
          it is the one field this plugin sends about the person rather than the request. */
       'userTracking.caption': 'User tracking',
+      'userTracking.unavailable': 'This Host does not report the user-tracking setting.',
       'userTracking.hint':
         'Some endpoints only serve requests that carry a user identity; OpenRouter folds the value into the hash it sends upstream. Turning this on sends one identifier, for this installation, on every relayed JSON request body.',
       'userTracking.toggle': 'Send a user identifier with every request',
@@ -671,6 +689,13 @@ window.__ModuleLoader__.load({
       'card.title': 'OpenRouter Plus',
       'card.regionAria': 'OpenRouter Plus 中继',
       'page.intro': '面向 OpenRouter 的本机中继。输入框的预设芯片为单个会话选择路由预设；下方的固定基址则作用于整条路由。',
+
+      'settings.tabsAria': 'OpenRouter Plus 设置分区',
+      'settings.tab.overview': '概览',
+      'settings.tab.routing': '路由',
+      'settings.tab.endpoints': '端点',
+      'settings.tab.display': '提供方列表',
+      'settings.tab.privacy': '隐私',
 
       'common.unknown': '未知',
       'common.notAvailable': '—',
@@ -725,6 +750,8 @@ window.__ModuleLoader__.load({
       'savings.note': '倍率是相对的 token 价格。美元金额是 OpenRouter 对中继请求的实际计费，取自响应本身，而非按价格表推算。',
 
       'providers.caption': '提供商路由',
+      'routing.caption': '新会话',
+      'routing.hint': '这是所有新会话的默认值；输入框的预设芯片仍可按会话覆盖。',
       'providers.explain': '在设置 → 模型里勾选“经 OpenRouter Plus 转发”，再到编辑器中选择预设。提供商会保留自己的模型与密钥，只有基址切换到本中继。',
       'providers.loading': '正在加载提供商路由…',
       'providers.retry': '重新加载',
@@ -860,6 +887,7 @@ window.__ModuleLoader__.load({
       'provider.stale': '已固定的端点不再出现在该模型的列表中。',
       'provider.error': '无法固定端点：{message}',
       'provider.facts.caption': '提供商列表显示',
+      'provider.facts.unavailable': '当前 Host 未提供端点显示设置。',
       'provider.facts.hint':
         '决定编辑器菜单中每个端点行显示哪些信息。速度取自 OpenRouter 自身的 30 分钟滚动统计，并且只在中继见过该模型的请求后出现。应用会重载中继一次，缓存的列表也随之清空，因此速度会在模型再次被使用后重新出现。',
       'provider.facts.precision': '精度',
@@ -948,6 +976,7 @@ window.__ModuleLoader__.load({
       'usage.genId': '生成 ID',
       'usage.notReported': '未报告',
       'usage.usd': '${value}',
+      'usage.usdUnderCent': '< $0.01',
       'usage.toggleSettings': '在侧边栏显示费用卡片',
       'usage.toggleHint': '侧边栏底部会显示可折叠的费用卡片，包含今日花费与使用的模型。开启会重新加载中继。',
       'usage.toggleFailed': '无法修改侧边栏卡片：{message}',
@@ -956,6 +985,7 @@ window.__ModuleLoader__.load({
          所有请求在上游共用一个账户级身份，一个用户被拦截就可能影响整个账户。默认关闭：
          这是本插件唯一一个关于"人"而不是关于"请求"的字段。 */
       'userTracking.caption': '用户标识',
+      'userTracking.unavailable': '当前 Host 未提供用户标识设置。',
       'userTracking.hint':
         '部分端点只接受带有用户身份的请求，OpenRouter 会把它并入发往上游的哈希值。开启后，每个经中继的 JSON 请求体都会携带本安装的同一个标识。',
       'userTracking.toggle': '在每个请求中发送用户标识',
@@ -1040,6 +1070,44 @@ window.__ModuleLoader__.load({
     function usdText(t, value) {
       const amount = formatUsd(value);
       return amount === null ? t('usage.notReported') : t('usage.usd', { value: amount });
+    }
+
+    /**
+     * A headline amount: two decimals, with the exact figure left for the element's title.
+     * A bill read at a glance does not need the six decimals used to reconcile one call; the
+     * exact value stays one hover away, and the reconciliation rows still print it.
+     */
+    function usdHeadline(t, value) {
+      const number = finiteNumber(value);
+      if (number === null) return t('usage.notReported');
+      /* A real sub-cent bill rounds to $0.00 at two decimals, and that would read as
+         "nothing was spent". Say "under a cent" instead; the exact figure stays in the
+         element's title. */
+      if (number > 0 && Math.round(number * 100) === 0) return t('usage.usdUnderCent');
+      try {
+        return t('usage.usd', {
+          value: new Intl.NumberFormat(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }).format(number),
+        });
+      } catch (error) {
+        return t('usage.usd', { value: number.toFixed(2) });
+      }
+    }
+
+    /**
+     * A cost bar's width, as a percentage of the leading preset.
+     *
+     * A real nonzero cost keeps a sliver even when it is dwarfed by the biggest preset;
+     * a zero or unreported cost draws nothing, so an empty bucket is not mistaken for a
+     * tiny charge.
+     */
+    function costBarWidth(cost, max) {
+      const amount = finiteNumber(cost);
+      const ceiling = finiteNumber(max);
+      if (amount === null || amount <= 0 || ceiling === null || ceiling <= 0) return 0;
+      return Math.max(2, Math.round((amount / ceiling) * 100));
     }
 
     /** Compact token counts for a one-line summary: 8500000 → "8.5M". */
@@ -2758,6 +2826,61 @@ window.__ModuleLoader__.load({
       textAlign: 'left',
     };
 
+    /*
+     * Five questions, five tabs.
+     *
+     * The page used to be one column: mounts, spend, routes, display, privacy and recent.
+     * They answer different questions ("is it healthy", "which base URL", "what did it
+     * cost", "what does one endpoint row say", "what leaves this machine") and stacking
+     * them made every reader scroll past four answers to reach the fifth. The tab bar is
+     * sticky so switching stays available while a panel scrolls, and its background is
+     * the modal's own layer so the bar covers what moves under it instead of drawing a
+     * coloured band across the page.
+     */
+    const SETTINGS_TAB_IDS = Object.freeze(['overview', 'routing', 'endpoints', 'display', 'privacy']);
+    const SETTINGS_TAB_ID_PREFIX = 'openrouter-plus-tab-';
+    const SETTINGS_TAB_PANEL_ID = 'openrouter-plus-settings-panel';
+    const SETTINGS_TAB_BAR_STYLE = {
+      display: 'flex',
+      alignItems: 'stretch',
+      gap: '18px',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      minWidth: 0,
+      margin: 0,
+      padding: 0,
+      overflowX: 'auto',
+      scrollbarWidth: 'none',
+      background: COLORS.layerTwo,
+      borderBottom: '1px solid ' + COLORS.border,
+    };
+    /* The panel is the tab's own scroll target and the one node that carries the ARIA
+       link back to the selected tab; each panel body stacks its sections at the page gap. */
+    const SETTINGS_TAB_PANEL_STYLE = { minWidth: 0 };
+    const SETTINGS_TAB_STACK_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      minWidth: 0,
+    };
+    /** One label: selected reads by weight and the underline, not by colour alone. */
+    const settingsTabStyle = (active) => ({
+      appearance: 'none',
+      border: 0,
+      margin: 0,
+      padding: '10px 1px 8px',
+      marginBottom: '-1px',
+      borderBottom: '2px solid ' + (active ? COLORS.primary : 'transparent'),
+      background: 'transparent',
+      color: active ? COLORS.primary : COLORS.secondary,
+      font: active ? FONTS.strong : FONTS.body,
+      lineHeight: '18px',
+      whiteSpace: 'nowrap',
+      cursor: 'pointer',
+      outlineOffset: '2px',
+    });
+
     const HEADER_STYLE = {
       display: 'flex',
       flexDirection: 'column',
@@ -2905,6 +3028,125 @@ window.__ModuleLoader__.load({
     const STAT_STYLE = { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 };
 
     const STAT_LABEL_STYLE = { color: COLORS.secondary, font: FONTS.tiny };
+
+    /* Overview's focal number: today's bill first, the figures used to reconcile it beside
+       it. The side rows are single-line label/value pairs, so a six-decimal total still fits
+       the rail at the settings column's width. */
+    const SPEND_HERO_STYLE = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'flex-start',
+      gap: '12px 24px',
+      minWidth: 0,
+      padding: '2px 0 4px',
+    };
+
+    const SPEND_HERO_MAIN_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '1px',
+      flex: '1 1 160px',
+      minWidth: 0,
+    };
+
+    const SPEND_HERO_LABEL_STYLE = { color: COLORS.secondary, font: FONTS.tiny };
+
+    const SPEND_HERO_VALUE_STYLE = {
+      color: COLORS.primary,
+      fontSize: 30,
+      fontWeight: 600,
+      lineHeight: '34px',
+      letterSpacing: '-0.02em',
+      fontVariantNumeric: 'tabular-nums',
+    };
+
+    const SPEND_HERO_SIDE_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 0,
+      flex: '0 1 236px',
+      minWidth: '190px',
+    };
+
+    const SPEND_HERO_ROW_STYLE = {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      gap: '12px',
+      minWidth: 0,
+      padding: '4px 0',
+      borderBottom: '1px solid ' + COLORS.border,
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+    };
+
+    const SPEND_HERO_ROW_LAST_STYLE = Object.assign({}, SPEND_HERO_ROW_STYLE, { borderBottom: 'none' });
+
+    const SPEND_HERO_ROW_VALUE_STYLE = {
+      color: COLORS.primary,
+      font: FONTS.strong,
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+    };
+
+    /* Cost by preset: a bar is the comparison; the request count explains the mix. */
+    const COST_BLOCK_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      minWidth: 0,
+      paddingTop: '4px',
+    };
+
+    const COST_BAR_ROW_STYLE = {
+      display: 'grid',
+      gridTemplateColumns: '104px minmax(0, 1fr) 78px',
+      alignItems: 'center',
+      gap: '10px',
+      minWidth: 0,
+    };
+
+    const COST_BAR_LABEL_STYLE = { display: 'flex', flexDirection: 'column', gap: 0, minWidth: 0 };
+
+    const COST_BAR_NAME_STYLE = {
+      color: COLORS.secondary,
+      font: FONTS.small,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    };
+
+    const COST_BAR_META_STYLE = {
+      color: COLORS.secondary,
+      font: FONTS.tiny,
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+    };
+
+    const COST_BAR_TRACK_STYLE = {
+      display: 'block',
+      height: '6px',
+      borderRadius: '999px',
+      background: COLORS.fill,
+      overflow: 'hidden',
+      minWidth: 0,
+    };
+
+    const COST_BAR_FILL_STYLE = {
+      display: 'block',
+      height: '100%',
+      borderRadius: '999px',
+      background: COLORS.secondary,
+      opacity: 0.7,
+    };
+
+    const COST_BAR_VALUE_STYLE = {
+      textAlign: 'right',
+      color: COLORS.primary,
+      font: FONTS.small,
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+    };
 
     const ROW_STYLE = {
       display: 'flex',
@@ -3585,13 +3827,6 @@ window.__ModuleLoader__.load({
       minWidth: 0,
     };
 
-    const USAGE_TIER_BLOCK_STYLE = {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '2px',
-      minWidth: 0,
-    };
-
     const USAGE_TIER_ROW_STYLE = {
       display: 'flex',
       alignItems: 'baseline',
@@ -3892,6 +4127,9 @@ window.__ModuleLoader__.load({
      */
     const STORAGE_STATUS_KEY = 'openrouter-plus.cached-status';
     const STORAGE_FACTS_KEY = 'openrouter-plus.cached-facts';
+    /* Which tab this tab last read. Not a paint, but the same budget: opening Settings
+       from a deep link to one switch should not always land on Overview. */
+    const STORAGE_TAB_KEY = 'openrouter-plus.settings-tab';
 
     /** `sessionStorage` when the page may use it, else null. */
     function cacheStorage() {
@@ -3969,6 +4207,31 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** The tab this tab last read, or Overview on a fresh page or an unknown id. */
+    function readCachedTab() {
+      const storage = cacheStorage();
+      if (storage === null) return 'overview';
+      try {
+        const value = storage.getItem(STORAGE_TAB_KEY);
+        return SETTINGS_TAB_IDS.includes(value) ? value : 'overview';
+      } catch (error) {
+        return 'overview';
+      }
+    }
+
+    /** Remember the open tab for the next mount. A refused write is not an error. */
+    function writeCachedTab(id) {
+      if (!SETTINGS_TAB_IDS.includes(id)) return false;
+      const storage = cacheStorage();
+      if (storage === null) return false;
+      try {
+        storage.setItem(STORAGE_TAB_KEY, id);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
     /**
      * The page body. Everything stateful lives here so the slot wrapper stays trivial and
      * unmounting the slot tears down every timer, fetch and listener this page owns.
@@ -3985,6 +4248,9 @@ window.__ModuleLoader__.load({
          nothing until it lands is a page that shows an operator nothing at all. The poll
          replaces these numbers as soon as one of its own lands. */
       const [snapshot, setSnapshot] = React.useState(readCachedStatus);
+      /* One tab at a time. The open tab is remembered beside the cached paint, so a
+         reader who comes back to flip one switch lands where they left off. */
+      const [activeTab, setActiveTab] = React.useState(readCachedTab);
       const [statusError, setStatusError] = React.useState('');
       const [refreshKey, setRefreshKey] = React.useState(0);
       const [targets, setTargets] = React.useState({ status: 'idle', data: null, error: '' });
@@ -5150,77 +5416,110 @@ window.__ModuleLoader__.load({
         );
       };
 
-      const renderSavings = () =>
-        h(
+      const renderSavings = () => {
+        /* Today's bill is the number this page is opened for; requests, tokens and the
+           multiplier are the reconciliation beside it. A Host that predates the money fields
+           keeps the old counters, so no headline is invented from a missing amount. */
+        const summaryRow = (label, value, title, last) =>
+          h(
+            'div',
+            { style: last ? SPEND_HERO_ROW_LAST_STYLE : SPEND_HERO_ROW_STYLE },
+            h('span', null, label),
+            h('span', { title: title, style: SPEND_HERO_ROW_VALUE_STYLE }, value),
+          );
+        const spendSummary = hasCost
+          ? h(
+              'div',
+              { style: SPEND_HERO_STYLE },
+              h(
+                'div',
+                { style: SPEND_HERO_MAIN_STYLE },
+                h('span', { style: SPEND_HERO_LABEL_STYLE }, t('usage.today')),
+                h(
+                  'strong',
+                  { title: usdText(t, metrics.todayUsd), style: SPEND_HERO_VALUE_STYLE },
+                  usdHeadline(t, metrics.todayUsd),
+                ),
+              ),
+              h(
+                'div',
+                { style: SPEND_HERO_SIDE_STYLE },
+                summaryRow(t('usage.total'), usdHeadline(t, metrics.costUsd), usdText(t, metrics.costUsd), false),
+                summaryRow(t('savings.multiplier'), multiplierLabel(t, metrics.effectiveMultiplier), undefined, false),
+                summaryRow(t('savings.requests'), formatCount(metrics.requests), undefined, false),
+                summaryRow(t('savings.tokens'), formatCount(totalTokens), undefined, true),
+              ),
+            )
+          : h(
+              'div',
+              { style: STATS_ROW_STYLE },
+              h(
+                'div',
+                { style: STAT_STYLE },
+                h('span', { style: STAT_LABEL_STYLE }, t('savings.requests')),
+                h('span', { style: { font: FONTS.strong } }, formatCount(metrics !== null ? metrics.requests : 0)),
+              ),
+              h(
+                'div',
+                { style: STAT_STYLE },
+                h('span', { style: STAT_LABEL_STYLE }, t('savings.tokens')),
+                h('span', { style: { font: FONTS.strong } }, formatCount(totalTokens)),
+              ),
+              h(
+                'div',
+                { style: STAT_STYLE },
+                h('span', { style: STAT_LABEL_STYLE }, t('savings.multiplier')),
+                h('span', { style: { font: FONTS.metric } }, multiplierLabel(t, metrics !== null ? metrics.effectiveMultiplier : null)),
+              ),
+            );
+        const maxTierCost = tierCosts.reduce(
+          (max, row) => (row.costUsd !== null && row.costUsd > max ? row.costUsd : max),
+          0,
+        );
+        return h(
           'section',
           { style: sectionStyle() },
           h('h4', { style: H4_STYLE }, t('savings.caption')),
-          h(
-            'div',
-            { style: STATS_ROW_STYLE },
-            h(
-              'div',
-              { style: STAT_STYLE },
-              h('span', { style: STAT_LABEL_STYLE }, t('savings.requests')),
-              h('span', { style: { font: FONTS.strong } }, formatCount(metrics !== null ? metrics.requests : 0)),
-            ),
-            h(
-              'div',
-              { style: STAT_STYLE },
-              h('span', { style: STAT_LABEL_STYLE }, t('savings.tokens')),
-              h('span', { style: { font: FONTS.strong } }, formatCount(totalTokens)),
-            ),
-            h(
-              'div',
-              { style: STAT_STYLE },
-              h('span', { style: STAT_LABEL_STYLE }, t('savings.multiplier')),
-              h('span', { style: { font: FONTS.metric } }, multiplierLabel(t, metrics !== null ? metrics.effectiveMultiplier : null)),
-            ),
-            hasCost
-              ? h(
-                  'div',
-                  { style: STAT_STYLE },
-                  h('span', { style: STAT_LABEL_STYLE }, t('usage.today')),
-                  h('span', { style: { font: FONTS.metric } }, usdText(t, metrics.todayUsd)),
-                )
-              : null,
-            hasCost
-              ? h(
-                  'div',
-                  { style: STAT_STYLE },
-                  h('span', { style: STAT_LABEL_STYLE }, t('usage.total')),
-                  h('span', { style: { font: FONTS.metric } }, usdText(t, metrics.costUsd)),
-                )
-              : null,
-          ),
+          spendSummary,
           tierCosts.length === 0
             ? null
             : h(
                 'div',
-                { style: USAGE_TIER_BLOCK_STYLE },
+                { style: COST_BLOCK_STYLE },
                 h('span', { style: SUB_LABEL_STYLE }, t('usage.byTier')),
-                h(
-                  'ul',
-                  { style: USAGE_TIER_LIST_STYLE },
-                  tierCosts.map((row) =>
+                tierCosts.map((row) => {
+                  const width = costBarWidth(row.costUsd, maxTierCost);
+                  return h(
+                    'div',
+                    { key: row.tier, style: COST_BAR_ROW_STYLE },
                     h(
-                      'li',
-                      { key: row.tier, style: USAGE_TIER_ROW_STYLE },
-                      h('span', { style: USAGE_TIER_LABEL_STYLE }, usageTierLabel(t, row.tier)),
+                      'span',
+                      { style: COST_BAR_LABEL_STYLE },
+                      h('span', { style: COST_BAR_NAME_STYLE }, usageTierLabel(t, row.tier)),
                       h(
                         'span',
-                        { style: USAGE_TIER_META_STYLE },
+                        { style: COST_BAR_META_STYLE },
                         t('usage.requests', { count: formatCount(row.requests) }),
                       ),
-                      h('span', { style: USAGE_TIER_COST_STYLE }, usdText(t, row.costUsd)),
                     ),
-                  ),
-                ),
+                    h(
+                      'span',
+                      { style: COST_BAR_TRACK_STYLE, 'aria-hidden': 'true' },
+                      h('span', { style: Object.assign({}, COST_BAR_FILL_STYLE, { width: width + '%' }) }),
+                    ),
+                    h(
+                      'span',
+                      { title: usdText(t, row.costUsd), style: COST_BAR_VALUE_STYLE },
+                      usdHeadline(t, row.costUsd),
+                    ),
+                  );
+                }),
               ),
           h('p', { style: PARAGRAPH_STYLE }, savingsSentence),
           h('p', { style: HINT_STYLE }, t('savings.note')),
           renderWidgetToggle(),
         );
+      };
 
       const renderRecent = () => {
         const rows =
@@ -5318,196 +5617,223 @@ window.__ModuleLoader__.load({
         );
       };
 
-      const renderCreated = () => {
-        const rows = [];
-        const repairing = busy !== null && busy.kind === 'repair';
-        if (targetsData.created.length === 0) {
-          rows.push(h('p', { key: 'empty', style: HINT_STYLE }, t('providers.createdEmpty')));
-        } else {
-          for (const route of targetsData.created) {
-            const removing = busy !== null && busy.kind === 'remove' && busy.key === route.name;
-            rows.push(
-              h(
-                'div',
-                { key: route.name, style: ROW_STYLE },
-                h(
-                  'div',
-                  { style: ROW_INFO_STYLE },
-                  h('code', { style: codeStyle }, route.name),
-                  h(
-                    'span',
-                    { style: HINT_STYLE },
-                    t('providers.routeMeta', {
-                      source: route.source !== '' ? route.source : t('common.unknown'),
-                      tier: route.tier === null ? t('common.defaultTier') : route.tier,
-                      count: formatCount(route.modelCount),
-                    }),
-                  ),
-                  route.baseURL !== ''
-                    ? h('span', { style: mutedCodeStyle }, t('providers.routeBase', { url: route.baseURL }))
-                    : null,
-                  route.missingReasoning > 0
-                    ? h(
-                        'span',
-                        { style: WARN_HINT_STYLE },
-                        t('providers.missingReasoning', { count: formatCount(route.missingReasoning) }),
-                      )
-                    : null,
-                ),
-                h(
-                  'div',
-                  { style: ROW_CONTROL_STYLE },
-                  h(ActionButton, {
-                    label: removing ? t('providers.removing') : t('providers.remove'),
-                    ariaLabel: t('providers.removeAria', { name: route.name }),
-                    disabled: busy !== null,
-                    onClick: () =>
-                      runRouteAction('remove', { name: route.name }, 'providers.noticeRemoved', route.name),
-                  }),
-                ),
-              ),
-            );
-          }
+      /* Both tabs that read /targets draw the same loading, error and unavailable shape;
+         only the panel decides which half of the answer it shows. */
+      const renderTargetsState = () => {
+        if (targets.status === 'error') {
+          return h(
+            'div',
+            {
+              style: {
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                gap: '8px',
+                minWidth: 0,
+              },
+            },
+            h(
+              'p',
+              { role: 'alert', style: ALERT_STYLE },
+              targets.error !== '' ? targets.error : t('error.badTargets'),
+            ),
+            h('div', null, h(ActionButton, { label: t('providers.retry'), onClick: reloadTargets })),
+          );
         }
-        /* One line of context next to the repair action, only when it helps:
-           how a fill would source the capability. No settings form lives here. */
-        let reasoningHint = '';
-        if (reasoningFill === 'never') reasoningHint = t('providers.reasoningNever');
-        else if (reasoningFill === 'default') reasoningHint = t('providers.reasoningDefault');
-        else if (reasoningFill === 'evidence') reasoningHint = t('providers.reasoningEvidence');
-        const repair =
-          missingReasoningTotal > 0
-            ? h(
-                'div',
-                { key: 'repair', style: REPAIR_ROW_STYLE },
-                h(ActionButton, {
-                  label: repairing
-                    ? t('providers.repairing')
-                    : t('providers.repair', { count: formatCount(missingReasoningTotal) }),
-                  ariaLabel: t('providers.repairAria', { count: formatCount(missingReasoningTotal) }),
-                  disabled: busy !== null,
-                  onClick: runRepair,
-                }),
-                reasoningHint !== '' ? h('p', { key: 'hint', style: HINT_STYLE }, reasoningHint) : null,
-              )
-            : null;
-        /* One profile-level preference, next to the routes it applies to: the preset an
-           unchosen Session inherits. Which preset a *particular* Session runs on is the
-           composer chip, so the two never compete for the same click. */
-        const presetTable = normalizePresetTable(targetsData.tier);
-        const presetChoice =
-          presetTable !== null && presetTable.presets.length > 0
-            ? h(
-                'div',
-                { key: 'preset-default', style: ROW_STYLE },
-                h(
+        if (targetsData === null) {
+          return h('p', { style: HINT_STYLE }, t('providers.loading'));
+        }
+        if (targetsData.available !== true) {
+          return h(
+            'p',
+            { style: HINT_STYLE },
+            targetsData.reason !== ''
+              ? t('providers.unavailable', { reason: targetsData.reason })
+              : t('providers.unavailableNoReason'),
+          );
+        }
+        return null;
+      };
+
+      /* Profile defaults for a Session that has not chosen yet. Which preset one *particular*
+         Session runs on is the composer chip, so the two never compete for the same click. */
+      const renderRoutingDefaults = () => {
+        const state = renderTargetsState();
+        let body = state;
+        if (state === null) {
+          const presetTable = normalizePresetTable(targetsData.tier);
+          const presetChoice =
+            presetTable !== null && presetTable.presets.length > 0
+              ? h(
                   'div',
-                  { style: ROW_INFO_STYLE },
-                  h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultTierCaption')),
-                  h('span', { style: HINT_STYLE }, t('providers.defaultTierHint')),
-                ),
-                h(
-                  'div',
-                  { style: ROW_CONTROL_STYLE },
-                  h(TierSelect, {
-                    value: presetTable.default,
-                    options: presetTable.presets.map((preset) => ({
-                      value: preset,
-                      label: t('preset.' + preset),
-                    })),
-                    ariaLabel: t('providers.defaultTierAria'),
-                    disabled: busy !== null,
-                    onChange: runDefaultPreset,
-                  }),
-                ),
-              )
-            : null;
-        /* The floor an unchosen Session inherits, beside the preset for the same reason:
-           both are profile preferences, while the composer chip chooses for one Session. The
-           rows live in one builder (see `precisionDefaultControls`) so the suite can execute
-           them for a floor other than `any` — a Host that predates the field answers no table
-           and the rows are then not drawn at all, rather than offering a 404ing write. */
-        const precisionControls = precisionDefaultControls(t, {
-          table: targetsData.precision,
-          busy: busy !== null,
-          onChange: runDefaultPrecision,
-        });
-        /* What each preset actually sends, written once where it can be read calmly. The
-           composer menu deliberately carries labels only: a picker that explains itself in
-           nine paragraphs is not a picker. */
-        const presetGlossary =
-          presetTable !== null && presetTable.presets.length > 0
-            ? h(
-                'div',
-                { key: 'preset-glossary', style: PRESET_GRID_STYLE },
-                h(
-                  'span',
-                  { style: Object.assign({}, SUB_LABEL_STYLE, { gridColumn: '1 / -1' }) },
-                  t('providers.presetCaption'),
-                ),
-                presetTable.presets.map((preset) =>
+                  { style: ROW_STYLE },
                   h(
                     'div',
-                    { key: preset, style: PRESET_ENTRY_STYLE },
-                    h('span', { style: SUB_LABEL_STYLE }, t('preset.' + preset)),
-                    h('span', { style: HINT_STYLE }, t('preset.' + preset + '.desc')),
+                    { style: ROW_INFO_STYLE },
+                    h('span', { style: SUB_LABEL_STYLE }, t('providers.defaultTierCaption')),
+                    h('span', { style: HINT_STYLE }, t('providers.defaultTierHint')),
                   ),
-                ),
-              )
-            : null;
+                  h(
+                    'div',
+                    { style: ROW_CONTROL_STYLE },
+                    h(TierSelect, {
+                      value: presetTable.default,
+                      options: presetTable.presets.map((preset) => ({
+                        value: preset,
+                        label: t('preset.' + preset),
+                      })),
+                      ariaLabel: t('providers.defaultTierAria'),
+                      disabled: busy !== null,
+                      onChange: runDefaultPreset,
+                    }),
+                  ),
+                )
+              : null;
+          /* The floor an unchosen Session inherits, beside the preset for the same reason:
+             both are profile preferences, while the composer chip chooses for one Session. The
+             rows live in one builder (see precisionDefaultControls) so the suite can execute
+             them for a floor other than any, and a Host that predates the field answers no
+             table — the rows are then absent rather than offering a 404ing write. */
+          const precisionControls = precisionDefaultControls(t, {
+            table: targetsData.precision,
+            busy: busy !== null,
+            onChange: runDefaultPrecision,
+          });
+          /* What each preset actually sends, written once where it can be read calmly. The
+             composer menu deliberately carries labels only: a picker that explains itself in
+             nine paragraphs is not a picker. */
+          const presetGlossary =
+            presetTable !== null && presetTable.presets.length > 0
+              ? h(
+                  'div',
+                  { style: PRESET_GRID_STYLE },
+                  h(
+                    'span',
+                    { style: Object.assign({}, SUB_LABEL_STYLE, { gridColumn: '1 / -1' }) },
+                    t('providers.presetCaption'),
+                  ),
+                  presetTable.presets.map((preset) =>
+                    h(
+                      'div',
+                      { key: preset, style: PRESET_ENTRY_STYLE },
+                      h('span', { style: SUB_LABEL_STYLE }, t('preset.' + preset)),
+                      h('span', { style: HINT_STYLE }, t('preset.' + preset + '.desc')),
+                    ),
+                  ),
+                )
+              : null;
+          body = h(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+            presetChoice,
+            precisionControls === null ? null : precisionControls.choice,
+            precisionControls === null ? null : precisionControls.unknown,
+            presetGlossary,
+          );
+        }
         return h(
-          'div',
-          { key: 'created', style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
-          h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
-          presetChoice,
-          precisionControls === null ? null : precisionControls.choice,
-          precisionControls === null ? null : precisionControls.unknown,
-          presetGlossary,
-          rows,
-          repair,
+          'section',
+          { style: sectionStyle() },
+          h('h4', { style: H4_STYLE }, t('routing.caption')),
+          h('p', { style: HINT_STYLE }, t('routing.hint')),
+          body,
         );
       };
 
-      const renderTargetsBody = () => {
-        if (targets.status === 'error') {
-          return [
-            h(
-              'p',
-              { key: 'error', role: 'alert', style: ALERT_STYLE },
-              targets.error !== '' ? targets.error : t('error.badTargets'),
-            ),
-            h('div', { key: 'retry' }, h(ActionButton, { label: t('providers.retry'), onClick: reloadTargets })),
-          ];
+      /* The routes themselves and the repair an operator can apply to the models a route
+         declares. Pinned base URLs sit above this on the same tab. */
+      const renderRoutes = () => {
+        const state = renderTargetsState();
+        let body = state;
+        if (state === null) {
+          const rows = [];
+          const repairing = busy !== null && busy.kind === 'repair';
+          if (targetsData.created.length === 0) {
+            rows.push(h('p', { key: 'empty', style: HINT_STYLE }, t('providers.createdEmpty')));
+          } else {
+            for (const route of targetsData.created) {
+              const removing = busy !== null && busy.kind === 'remove' && busy.key === route.name;
+              rows.push(
+                h(
+                  'div',
+                  { key: route.name, style: ROW_STYLE },
+                  h(
+                    'div',
+                    { style: ROW_INFO_STYLE },
+                    h('code', { style: codeStyle }, route.name),
+                    h(
+                      'span',
+                      { style: HINT_STYLE },
+                      t('providers.routeMeta', {
+                        source: route.source !== '' ? route.source : t('common.unknown'),
+                        tier: route.tier === null ? t('common.defaultTier') : route.tier,
+                        count: formatCount(route.modelCount),
+                      }),
+                    ),
+                    route.baseURL !== ''
+                      ? h('span', { style: mutedCodeStyle }, t('providers.routeBase', { url: route.baseURL }))
+                      : null,
+                    route.missingReasoning > 0
+                      ? h(
+                          'span',
+                          { style: WARN_HINT_STYLE },
+                          t('providers.missingReasoning', { count: formatCount(route.missingReasoning) }),
+                        )
+                      : null,
+                  ),
+                  h(
+                    'div',
+                    { style: ROW_CONTROL_STYLE },
+                    h(ActionButton, {
+                      label: removing ? t('providers.removing') : t('providers.remove'),
+                      ariaLabel: t('providers.removeAria', { name: route.name }),
+                      disabled: busy !== null,
+                      onClick: () =>
+                        runRouteAction('remove', { name: route.name }, 'providers.noticeRemoved', route.name),
+                    }),
+                  ),
+                ),
+              );
+            }
+          }
+          /* One line of context next to the repair action, only when it helps: how a fill
+             would source the capability. No settings form lives here. */
+          let reasoningHint = '';
+          if (reasoningFill === 'never') reasoningHint = t('providers.reasoningNever');
+          else if (reasoningFill === 'default') reasoningHint = t('providers.reasoningDefault');
+          else if (reasoningFill === 'evidence') reasoningHint = t('providers.reasoningEvidence');
+          const repair =
+            missingReasoningTotal > 0
+              ? h(
+                  'div',
+                  { style: REPAIR_ROW_STYLE },
+                  h(ActionButton, {
+                    label: repairing
+                      ? t('providers.repairing')
+                      : t('providers.repair', { count: formatCount(missingReasoningTotal) }),
+                    ariaLabel: t('providers.repairAria', { count: formatCount(missingReasoningTotal) }),
+                    disabled: busy !== null,
+                    onClick: runRepair,
+                  }),
+                  reasoningHint !== '' ? h('p', { style: HINT_STYLE }, reasoningHint) : null,
+                )
+              : null;
+          body = h(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+            h('div', { style: SUB_LABEL_STYLE }, t('providers.createdCaption')),
+            rows,
+            repair,
+          );
         }
-        if (targetsData === null) {
-          return [h('p', { key: 'loading', style: HINT_STYLE }, t('providers.loading'))];
-        }
-        if (targetsData.available !== true) {
-          return [
-            h(
-              'p',
-              { key: 'unavailable', style: HINT_STYLE },
-              targetsData.reason !== ''
-                ? t('providers.unavailable', { reason: targetsData.reason })
-                : t('providers.unavailableNoReason'),
-            ),
-          ];
-        }
-        return [renderCreated()];
-      };
-
-      const renderProviders = () =>
-        h(
+        return h(
           'section',
           { style: sectionStyle() },
           h('h4', { style: H4_STYLE }, t('providers.caption')),
           h('p', { style: HINT_STYLE }, t('providers.explain')),
-          actionError !== '' ? h('p', { role: 'alert', style: ALERT_STYLE }, actionError) : null,
-          notice !== ''
-            ? h('p', { role: 'status', 'aria-live': 'polite', style: NOTICE_STYLE }, notice)
-            : null,
-          renderTargetsBody(),
+          body,
         );
+      };
 
       /*
        * What an endpoint row states in the composer menu.
@@ -5517,7 +5843,16 @@ window.__ModuleLoader__.load({
        * because a preference that cannot be saved must not be offered.
        */
       const renderProviderFacts = () => {
-        if (providerFacts === null) return null;
+        /* A dedicated tab cannot be empty: a Host that predates the route still gets the
+           heading and the reason, rather than a blank panel where a control should be. */
+        if (providerFacts === null) {
+          return h(
+            'section',
+            { style: sectionStyle() },
+            h('h4', { style: H4_STYLE }, t('provider.facts.caption')),
+            h('p', { style: HINT_STYLE }, t('provider.facts.unavailable')),
+          );
+        }
         const shown = factsDraft === null ? providerFacts : factsDraft;
         /* Staging a value and then putting it back is not a change: comparing the two states
            rather than "is a draft present" keeps Apply from offering a write that would only
@@ -5644,7 +5979,17 @@ window.__ModuleLoader__.load({
        * write with a 404, and a switch that cannot be saved must not be offered.
        */
       const renderUserTracking = () => {
-        if (snapshot === null || snapshot.userTracking.available !== true) return null;
+        if (snapshot === null) return null;
+        /* The switch is the write, so it is absent on a Host that would answer 404; the tab
+           still explains what it would do and why it is not offered. */
+        if (snapshot.userTracking.available !== true) {
+          return h(
+            'section',
+            { style: sectionStyle() },
+            h('h4', { style: H4_STYLE }, t('userTracking.caption')),
+            h('p', { style: HINT_STYLE }, t('userTracking.unavailable')),
+          );
+        }
         const enabled = userTrackingPending === null ? snapshot.userTracking.enabled : userTrackingPending;
         const id = snapshot.userTracking.id;
         /* Three readings, and the middle one is why the identifier is printed at all: an
@@ -5684,21 +6029,103 @@ window.__ModuleLoader__.load({
 
       /* ---------------------------------------------------------------- assembly */
 
-      /* The sections follow the snapshot, not the connection: a poll that fails mid-reload
-         keeps the last snapshot (see the status poll), so the page shows the numbers it has
-         under the offline banner instead of blanking for a second. */
+      const selectTab = (id) => {
+        setActiveTab(id);
+        writeCachedTab(id);
+      };
+      const onSettingsTabKeyDown = (event, index) => {
+        if (
+          event.key !== 'ArrowLeft' &&
+          event.key !== 'ArrowRight' &&
+          event.key !== 'Home' &&
+          event.key !== 'End'
+        ) {
+          return;
+        }
+        event.preventDefault();
+        const last = SETTINGS_TAB_IDS.length - 1;
+        const next =
+          event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? last
+              : (index + (event.key === 'ArrowLeft' ? -1 : 1) + SETTINGS_TAB_IDS.length) %
+                SETTINGS_TAB_IDS.length;
+        selectTab(SETTINGS_TAB_IDS[next]);
+        /* Focus follows the selection, as a tablist is expected to: the row stays one tab
+           stop and the arrows walk it. React keeps the keyed buttons, so the next node is
+           already in the DOM when the focus call lands. */
+        const bar = event.currentTarget.parentElement;
+        const focusTarget = bar !== null && bar.children.length > next ? bar.children[next] : null;
+        if (focusTarget !== null && typeof focusTarget.focus === 'function') focusTarget.focus();
+      };
+      const tabBar = h(
+        'div',
+        { role: 'tablist', 'aria-label': t('settings.tabsAria'), style: SETTINGS_TAB_BAR_STYLE },
+        SETTINGS_TAB_IDS.map((id, index) =>
+          h(
+            'button',
+            {
+              key: id,
+              id: SETTINGS_TAB_ID_PREFIX + id,
+              type: 'button',
+              role: 'tab',
+              'aria-selected': activeTab === id,
+              'aria-controls': SETTINGS_TAB_PANEL_ID,
+              tabIndex: activeTab === id ? 0 : -1,
+              onClick: () => selectTab(id),
+              onKeyDown: (event) => onSettingsTabKeyDown(event, index),
+              style: settingsTabStyle(activeTab === id),
+            },
+            t('settings.tab.' + id),
+          ),
+        ),
+      );
+      /* One panel at a time, and each panel answers one question: money and recent traffic
+         (Overview), profile defaults (Routing), base URLs and routes (Endpoints), the
+         composer row (Provider list), what leaves the machine (Privacy). */
+      const panelBody =
+        activeTab === 'routing'
+          ? h('div', { style: SETTINGS_TAB_STACK_STYLE }, renderRoutingDefaults())
+          : activeTab === 'endpoints'
+            ? h('div', { style: SETTINGS_TAB_STACK_STYLE }, renderMounts(), renderRoutes())
+            : activeTab === 'display'
+              ? h('div', { style: SETTINGS_TAB_STACK_STYLE }, renderProviderFacts())
+              : activeTab === 'privacy'
+                ? h('div', { style: SETTINGS_TAB_STACK_STYLE }, renderUserTracking())
+                : h('div', { style: SETTINGS_TAB_STACK_STYLE }, renderSavings(), renderRecent());
+      const panel = h(
+        'div',
+        {
+          role: 'tabpanel',
+          id: SETTINGS_TAB_PANEL_ID,
+          'aria-labelledby': SETTINGS_TAB_ID_PREFIX + activeTab,
+          style: SETTINGS_TAB_PANEL_STYLE,
+        },
+        panelBody,
+      );
+
+      /* The tabs follow the snapshot, not the connection: a poll that fails mid-reload
+         keeps the last snapshot (see the status poll), so every tab keeps the numbers it has
+         under the offline banner instead of blanking for a second. Before the first answer
+         there is nothing to tab between, so the page waits with the one-line hint it always
+         had rather than drawing five empty panels. */
       return h(
         'section',
         { 'aria-label': t('card.regionAria'), style: PAGE_STYLE },
         header,
         chrome.intro ? h('p', { style: INTRO_STYLE }, t('page.intro')) : null,
         connection === 'offline' ? renderOffline() : null,
-        snapshot !== null ? renderMounts() : null,
-        snapshot !== null ? renderSavings() : null,
-        snapshot !== null ? renderProviders() : null,
-        snapshot !== null ? renderProviderFacts() : null,
-        snapshot !== null ? renderUserTracking() : null,
-        snapshot !== null ? renderRecent() : null,
+        snapshot !== null ? tabBar : null,
+        actionError !== '' ? h('p', { role: 'alert', style: ALERT_STYLE }, actionError) : null,
+        notice !== ''
+          ? h('p', { role: 'status', 'aria-live': 'polite', style: NOTICE_STYLE }, notice)
+          : null,
+        snapshot !== null
+          ? panel
+          : connection === 'offline'
+            ? null
+            : h('p', { style: HINT_STYLE }, t('status.checking')),
       );
     }
 
@@ -8530,7 +8957,16 @@ window.__ModuleLoader__.load({
         clearCachedFacts,
         readCachedBody,
         writeCachedBody,
-        storageKeys: { status: STORAGE_STATUS_KEY, facts: STORAGE_FACTS_KEY },
+        /* The tab strip's ids and the one key that remembers the open tab, so a render test
+           can open a named panel without a browser tab to click. */
+        settingsTabIds: SETTINGS_TAB_IDS,
+        readCachedTab,
+        writeCachedTab,
+        /* The two money-presentation rules the Overview depends on: a real sub-cent amount
+           never prints as $0.00, and a zero-cost bucket draws no bar. */
+        usdHeadline,
+        costBarWidth,
+        storageKeys: { status: STORAGE_STATUS_KEY, facts: STORAGE_FACTS_KEY, tab: STORAGE_TAB_KEY },
         providerTiers: PROVIDER_TIERS,
         providerPrecisions: PROVIDER_PRECISIONS,
         chipBadgeParts,

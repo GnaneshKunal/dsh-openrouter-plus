@@ -99,7 +99,12 @@ const {
   clearCachedFacts,
   readCachedBody,
   writeCachedBody,
+  readCachedTab,
+  writeCachedTab,
+  usdHeadline,
+  costBarWidth,
   storageKeys,
+  settingsTabIds,
   providerPinForModel,
   providerPrecisions,
   providerTiers,
@@ -1837,6 +1842,8 @@ test('the settings page draws the user-tracking switch, and withdraws it on an o
     removeItem: (key) => store.delete(key),
   }
   Object.defineProperty(globalThis, 'sessionStorage', { value: storage, configurable: true })
+  /** Open the page on one panel; the page remembers the tab in the same store. */
+  const openTab = (id) => sessionStorage.setItem(storageKeys.tab, id)
   const status = (extra) => ({
     ok: true,
     version: '0.9.0',
@@ -1855,6 +1862,7 @@ test('the settings page draws the user-tracking switch, and withdraws it on an o
   try {
     // On: the switch is ticked and the hint names the identifier every request carries.
     assert.equal(writeCachedStatus(status({ userTracking: { enabled: true, id: 'dsh-abc123' } })), true)
+    openTab('privacy')
     const onPage = PageBody({ t: en, seat: 'settings' })
     const onText = elementText(onPage).join(' ')
     assert.ok(onText.includes(en('userTracking.caption')), 'the section is drawn')
@@ -1868,17 +1876,124 @@ test('the settings page draws the user-tracking switch, and withdraws it on an o
 
     // Off: the same row, unticked, explains the account-level identity instead.
     writeCachedStatus(status({ userTracking: { enabled: false, id: '' } }))
+    openTab('privacy')
     const offPage = PageBody({ t: en, seat: 'settings' })
     assert.ok(elementText(offPage).join(' ').includes(en('userTracking.off')))
     assert.equal(switchInput(offPage).props.checked, false)
 
-    // A Host from before the field: no section, and therefore no switch that would 404.
+    // A Host from before the field: the tab explains the setting, but offers no switch
+    // that would 404.
     writeCachedStatus(status({}))
-    const olderText = elementText(PageBody({ t: en, seat: 'settings' })).join(' ')
-    assert.equal(olderText.includes(en('userTracking.caption')), false)
+    openTab('privacy')
+    const olderPage = PageBody({ t: en, seat: 'settings' })
+    const olderText = elementText(olderPage).join(' ')
+    assert.ok(olderText.includes(en('userTracking.caption')), 'the tab still names the setting')
+    assert.ok(olderText.includes(en('userTracking.unavailable')), 'and says why there is no switch')
     assert.equal(olderText.includes(en('userTracking.toggle')), false)
-    assert.equal(switchInput(PageBody({ t: en, seat: 'settings' })), null)
+    assert.equal(switchInput(olderPage), null)
   } finally {
     Reflect.deleteProperty(globalThis, 'sessionStorage')
   }
+})
+/* The settings page used to be one scroll: every answer sat above or below every other
+   answer. The five tabs are the structural fix, and the failure mode is a panel that draws
+   on the wrong tab (or all tabs), which element text alone can catch. The cached /status
+   answer is the same paint the page already uses; the tab key is the same store. */
+test('the settings page opens on Overview and draws one tab panel at a time', () => {
+  const store = new Map()
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  }
+  Object.defineProperty(globalThis, 'sessionStorage', { value: storage, configurable: true })
+  const status = {
+    ok: true,
+    version: '0.9.0',
+    routes: { '/v1': null },
+    metrics: { requests: 0, promptTokens: 0, completionTokens: 0 },
+    userTracking: { enabled: true, id: 'dsh-abc123' },
+  }
+  /** Open a named panel through the same key the page writes on a click. */
+  const open = (id) => {
+    writeCachedTab(id)
+    return elementText(PageBody({ t: en, seat: 'settings' })).join(' ')
+  }
+  try {
+    assert.equal(writeCachedStatus(status), true)
+
+    // A fresh page lands on Overview: money and recent traffic are the default answer.
+    store.delete(storageKeys.tab)
+    assert.equal(readCachedTab(), 'overview')
+    const overview = PageBody({ t: en, seat: 'settings' })
+    const overviewText = elementText(overview).join(' ')
+    for (const id of settingsTabIds) {
+      assert.ok(overviewText.includes(en('settings.tab.' + id)), 'the strip names ' + id)
+    }
+    assert.ok(overviewText.includes(en('savings.caption')), 'Overview carries the spend section')
+    assert.ok(overviewText.includes(en('recent.caption')), 'Overview carries the recent feed')
+    assert.equal(overviewText.includes(en('mounts.caption')), false, 'Endpoints stays closed')
+    assert.equal(overviewText.includes(en('providers.caption')), false, 'Routing stays closed')
+    assert.equal(overviewText.includes(en('provider.facts.caption')), false, 'Provider list stays closed')
+    assert.equal(overviewText.includes(en('userTracking.caption')), false, 'Privacy stays closed')
+
+    // The ARIA link points at the panel, and the selected label is the one tab stop.
+    const tablist = findElementWhere(overview, (node) => node.props && node.props.role === 'tablist')
+    assert.ok(tablist !== null, 'the strip is a tablist')
+    const selected = findElementWhere(
+      overview,
+      (node) => node.props && node.props.role === 'tab' && node.props['aria-selected'] === true,
+    )
+    assert.ok(selected !== null, 'one tab is selected')
+    assert.equal(selected.props['aria-controls'], 'openrouter-plus-settings-panel')
+    const panel = findElementWhere(overview, (node) => node.props && node.props.role === 'tabpanel')
+    assert.equal(panel.props['aria-labelledby'], 'openrouter-plus-tab-overview')
+
+    // Each panel draws its own sections and nobody else's.
+    const routing = open('routing')
+    assert.ok(routing.includes(en('routing.caption')), 'Routing draws its defaults')
+    assert.equal(routing.includes(en('mounts.caption')), false)
+    assert.equal(routing.includes(en('recent.caption')), false)
+
+    const endpoints = open('endpoints')
+    assert.ok(endpoints.includes(en('mounts.caption')), 'Endpoints draws the pinned base URLs')
+    assert.ok(endpoints.includes(en('providers.caption')), 'Endpoints draws the routes')
+    assert.equal(endpoints.includes(en('routing.caption')), false)
+
+    const display = open('display')
+    assert.ok(display.includes(en('provider.facts.caption')), 'Provider list draws its own section')
+    assert.ok(display.includes(en('provider.facts.unavailable')), 'a Host without the route says so')
+    assert.equal(display.includes(en('userTracking.caption')), false)
+
+    const privacy = open('privacy')
+    assert.ok(privacy.includes(en('userTracking.caption')), 'Privacy draws the switch section')
+    assert.ok(privacy.includes(en('userTracking.toggle')), 'and the switch itself')
+    assert.equal(privacy.includes(en('provider.facts.caption')), false)
+
+    // A remembered tab from another build is not trusted, and the fallback is Overview.
+    store.set(storageKeys.tab, 'not-a-tab')
+    assert.equal(readCachedTab(), 'overview')
+    // A write of an unknown id is refused rather than stored.
+    assert.equal(writeCachedTab('not-a-tab'), false)
+    assert.equal(store.get(storageKeys.tab), 'not-a-tab')
+  } finally {
+    Reflect.deleteProperty(globalThis, 'sessionStorage')
+  }
+})
+/* The Overview prints a headline amount at two decimals. A real sub-cent bill must not
+   read as "$0.00" (the exact rule usdText already keeps), and a zero-cost bucket must not
+   draw a bar. Both are pure formatters, so the review's two findings are pinned directly. */
+test('a sub-cent headline is not zero, and a zero-cost preset draws no bar', () => {
+  assert.equal(usdHeadline(en, 0.004), '< $0.01')
+  assert.equal(usdHeadline(en, 0), '$0.00')
+  assert.equal(usdHeadline(en, 0.02), '$0.02')
+  assert.equal(usdHeadline(en, null), en('usage.notReported'))
+  assert.equal(usdHeadline(zh, 0.004), '< $0.01')
+
+  assert.equal(costBarWidth(0, 58), 0, 'a zero bucket draws nothing')
+  assert.equal(costBarWidth(null, 58), 0, 'an unreported cost draws nothing')
+  assert.equal(costBarWidth(0.09, 58), 2, 'a tiny real cost keeps a sliver')
+  assert.equal(costBarWidth(29, 58), 50)
+  assert.equal(costBarWidth(58, 0), 0, 'no leading cost means no bar')
+  assert.equal(costBarWidth(1, 58), 2)
 })
