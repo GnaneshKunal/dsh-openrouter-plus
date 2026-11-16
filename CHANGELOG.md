@@ -27,9 +27,9 @@ palette.
   out, and `models` is a pointer rather than a second listing: `/provider` already probes a route's
   stored `baseURL` with the stored key.
 - **`providers [<model>]` — the endpoint table, in the terminal.** One row per OpenRouter endpoint
-  with price in and out per million tokens, tokens per second, milliseconds to the first token and
-  the last day's uptime, in the model page's group order, with the endpoints it will not route to
-  marked rather than hidden. It is the composer's endpoint menu in text, and the only verb that
+  with price in and out per million tokens, tokens per second, milliseconds to the first token, the
+  last day's uptime and the lane each endpoint belongs to, in the model page's group order, with the
+  endpoints it will not route to marked rather than hidden. It is the composer's endpoint menu in text, and the only verb that
   reads OpenRouter rather than the relay. With no model named it uses the one this Session last put
   through the relay, read from the metrics ring the status call already carries; a listing that
   omits a fact prints a dash, never a zero.

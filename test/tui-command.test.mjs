@@ -133,11 +133,13 @@ const ENDPOINTS = {
   groups: [
     { id: 'standard', tags: ['deepinfra/fp8', 'together/fp8'] },
     { id: 'flex', tags: ['fireworks/fp8/flex'] },
+    { id: 'priority', tags: ['baseten/fast'] },
     { id: 'unavailable', tags: ['bad/endpoint'] },
   ],
   providers: [
     {
       tag: 'deepinfra/fp8',
+      tier: 'standard',
       precision: 'fp8',
       inputPrice: 0.3,
       outputPrice: 1.2,
@@ -149,6 +151,7 @@ const ENDPOINTS = {
     },
     {
       tag: 'together/fp8',
+      tier: 'standard',
       precision: 'fp8',
       inputPrice: 0.25,
       outputPrice: 1,
@@ -160,6 +163,7 @@ const ENDPOINTS = {
     },
     {
       tag: 'fireworks/fp8/flex',
+      tier: 'flex',
       precision: null,
       inputPrice: 0,
       outputPrice: 0.6,
@@ -170,7 +174,22 @@ const ENDPOINTS = {
       group: 'flex',
     },
     {
+      // A priority row whose slug says "fast": the tag alone does not name the lane,
+      // which is why the table carries one.
+      tag: 'baseten/fast',
+      tier: 'priority',
+      precision: 'unknown',
+      inputPrice: 0.6,
+      outputPrice: 2.4,
+      throughput: { p50: 419, p90: 85 },
+      latency: { p50: 331, p90: 2102 },
+      uptime1d: 100,
+      available: true,
+      group: 'priority',
+    },
+    {
       tag: 'bad/endpoint',
+      tier: 'standard',
       precision: 'unknown',
       inputPrice: 2.5,
       outputPrice: 9,
@@ -512,16 +531,17 @@ test('`providers` answers with price, speed and uptime per endpoint', async () =
   const text = printed(result)
   // The facts a routing choice is made with, in the order the table promises them.
   for (const fragment of [
-    'deepseek/deepseek-v3.2: 4 endpoints',
-    'in $/M',
-    'out $/M',
+    'deepseek/deepseek-v3.2: 5 endpoints',
+    'lane',
+    'in',
+    'out',
     'tok/s',
     '0.300',
     '1.20',
     '142/190',
     '310/520',
     '99.8',
-    'standard 2 · flex 1 · unavailable 1',
+    'standard 2 · flex 1 · priority 1 · unavailable 1',
   ]) {
     assert.ok(text.includes(fragment), `expected ${JSON.stringify(fragment)} in:
 ${text}`)
@@ -532,6 +552,9 @@ ${text}`)
   assert.ok(unnoticed !== undefined)
   assert.ok(!/\b0\b/.test(unnoticed.replace('0.120', '').replace('0.600', '')), 'no invented zeros')
   assert.ok(unnoticed.includes('free'), 'a zero price is free, not a blank')
+  // The lane a row belongs to, for the endpoints whose slug does not say it.
+  assert.ok(text.includes('std'), 'a standard row says so')
+  assert.ok(text.includes('prio'), 'and so does a priority row with an invented slug')
   // The endpoint OpenRouter will not route to is marked, not hidden.
   assert.ok(text.includes('bad/endpoint'))
   assert.ok(text.includes('!'))

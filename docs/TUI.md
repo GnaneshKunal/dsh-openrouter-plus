@@ -58,7 +58,7 @@ Both names take the same argument; a bare command is `status`, and `help` prints
 | `spend` | Today, the retained window, requests and errors, tokens in and out, the measured multiplier of list price, and the priciest presets by cost. |
 | `user` · `user on` · `user off` | The optional OpenRouter `user` identifier: whether one is sent, which one, and the switch. |
 | `repair` | Refill the reasoning efforts a relay route is missing. |
-| `providers [<model>]` | The endpoint table for one model: price in and out per million tokens, tokens per second, milliseconds to the first token, and the last day's uptime, one row per OpenRouter endpoint in the model page's own group order. With no model named it uses the one this Session last put through the relay. |
+| `providers [<model>]` | The endpoint table for one model: price in and out per million tokens, tokens per second, milliseconds to the first token, the last day's uptime, and the lane each endpoint belongs to, one row per OpenRouter endpoint in the model page's own group order. With no model named it uses the one this Session last put through the relay. |
 | `models` | Why model *discovery* lives in `/provider`, not here. |
 
 The nine preset ids are `none`, `standard`, `fastest`, `fastest-standard`, `cheapest`, `flex`,
