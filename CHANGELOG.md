@@ -39,9 +39,9 @@ palette.
   with price in and out per million tokens, tokens per second, milliseconds to the first token, the
   last day's uptime and the lane each endpoint belongs to, in the model page's group order, with the
   endpoints it will not route to marked rather than hidden. It is the composer's endpoint menu in text, and the only verb that
-  reads OpenRouter rather than the relay. With no model named it uses the one this Session last put
-  through the relay, read from the metrics ring the status call already carries; a listing that
-  omits a fact prints a dash, never a zero.
+  reads OpenRouter rather than the relay. With no model named it uses the one this Session is
+  on, falling back to the last model the relay carried for it; a listing that omits a fact prints a
+  dash, never a zero.
 - **Per-Session choices stay in memory; only the profile defaults write.** `preset <id>`,
   `precision <id>` and their `clear` forms change the Session table, exactly as the composer chip
   does, because a switch must not rewrite the profile mid-conversation. `preset default <id>` and
